@@ -10,7 +10,13 @@ from typing import Optional, Callable, List, Tuple
 from huggingface_hub import hf_hub_download
 from base_models.get_base_models import get_base_model
 from utils import torch_load, print_message
-
+from tensor_to_pool_parti import main_pooling, TokenToSequencePooler
+import esm
+import re
+from Bio import SeqIO
+import networkx as nx
+import numpy as np
+import gc
 
 @dataclass
 class EmbeddingArguments:
@@ -105,20 +111,9 @@ class Pooler:
         return torch.cat(final_emb, dim=-1) # (b, n_pooling_types * d)
 
 
-def pool_parti(X: torch.Tensor, attentions: Tuple[torch.Tensor], attention_mask: torch.Tensor) -> torch.Tensor:
-    # X: (bs, seq_len, d)
-    # attentions: num_layres of (bs, n_heads, seq_len, seq_len)
-    # attention_mask: (bs, seq_len)
-    bs, seq_len, _ = X.shape
-    attentions = torch.stack(attentions, dim=1).float() # (bs, n_layers, n_heads, seq_len, seq_len)
-    att_mask = attention_mask[:, None, None, None, :].expand(bs, 1, 1, seq_len, seq_len)
-    attentions = attentions * att_mask
-    attentions = attentions.mean(dim=2) # (bs, n_layers, seq_len, seq_len)
-    attentions = attentions.mean(dim=1) # (bs, seq_len, seq_len)
-    attentions = attentions.mean(dim=-1) # (bs, seq_len)
-    X = X * attentions.unsqueeze(-1)
-    attention_mask = attention_mask.unsqueeze(-1)
-    return (X * attention_mask).sum(dim=1) / attention_mask.sum(dim=1) # (bs, d)
+def pool_parti(X: torch.Tensor, 
+               attentions: Tuple[torch.Tensor]) -> torch.Tensor:
+    return main_pooling(token_emb= X, attention_layers= attentions)
 
 
 ### Dataset for Embedding
