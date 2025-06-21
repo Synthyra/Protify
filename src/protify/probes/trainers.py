@@ -38,7 +38,7 @@ class TrainerArguments:
             weight_decay: float = 0.00,
             task_type: str = 'regression',
             patience: int = 3,
-            read_scaler: int = 1000,
+            read_scaler: int = 100,
             save_model: bool = False,
             seed: int = 42,
             train_data_size: int = 100,
@@ -203,6 +203,7 @@ class TrainerMixin:
         db_path = os.path.join(self.embedding_args.embedding_save_dir, f'{model_name}_{full}.db')
 
         if self.embedding_args.sql:
+            print('SQL enabled')
             if ppi:
                 if full:
                     raise ValueError('Full matrix embeddings not currently supported for SQL and PPI') # TODO: Implement
@@ -212,6 +213,7 @@ class TrainerMixin:
                 DatasetClass = EmbedsLabelsDatasetFromDisk
                 CollatorClass = EmbedsLabelsCollator
         else:
+            print('SQL disabled')
             if ppi:
                 DatasetClass = PairEmbedsLabelsDataset
                 CollatorClass = PairEmbedsLabelsCollator

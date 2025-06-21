@@ -81,6 +81,7 @@ def parse_arguments():
     parser.add_argument("--save_embeddings", action="store_true", default=False, help="Save computed embeddings (default: False).")
     parser.add_argument("--embed_dtype", default="float32", help="Data type for embeddings.")
     parser.add_argument("--sql", action="store_true", default=False, help="Whether to use SQL storage (default: False).")
+    parser.add_argument("--read_scaler", type=int, default=100, help="Read scaler for SQL storage.")
 
     # ----------------- TrainerArguments ----------------- #
     parser.add_argument("--num_epochs", type=int, default=200, help="Number of epochs to train for.")
@@ -210,7 +211,17 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         for model_name in self.model_args.model_names:
             _ = embedder(model_name)
 
-    def _run_nn_probe(self, model_name, data_name, train_set, valid_set, test_set, tokenizer, emb_dict, ppi):
+    def _run_nn_probe(
+            self,
+            model_name,
+            data_name,
+            train_set,
+            valid_set,
+            test_set,
+            tokenizer,
+            emb_dict=None,
+            ppi=False,
+        ):
         probe = get_probe(self.probe_args)
         summary(probe)
         probe, valid_metrics, test_metrics = self.trainer_probe(
@@ -229,7 +240,15 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         self.log_metrics(data_name, model_name, test_metrics, split_name='test')
         return probe
 
-    def _run_full_finetuning(self, model_name, data_name, train_set, valid_set, test_set, ppi):
+    def _run_full_finetuning(
+            self,
+            model_name,
+            data_name,
+            train_set,
+            valid_set,
+            test_set,
+            ppi=False,
+        ):
         tokenwise = self.probe_args.tokenwise
         num_labels = self.probe_args.num_labels
         model, tokenizer = get_base_model_for_training(model_name, tokenwise=tokenwise, num_labels=num_labels, hybrid=False)
@@ -251,7 +270,17 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         self.log_metrics(data_name, model_name, test_metrics, split_name='test')
         return model
 
-    def _run_hybrid_probe(self, model_name, data_name, train_set, valid_set, test_set, tokenizer, emb_dict, ppi):
+    def _run_hybrid_probe(
+            self,
+            model_name,
+            data_name,
+            train_set,
+            valid_set,
+            test_set,
+            tokenizer,
+            emb_dict=None,
+            ppi=False,
+        ):
         tokenwise = self.probe_args.tokenwise
         num_labels = self.probe_args.num_labels
         model, tokenizer = get_base_model_for_training(model_name, tokenwise=tokenwise, num_labels=num_labels, hybrid=True)
@@ -310,6 +339,7 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
                 # for sql, the embeddings will be gathered in real time during training
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, f'{model_name}_{self._full}.db')
                 input_dim = self.get_embedding_dim_sql(save_path, test_seq)
+                emb_dict = None
             else:
                 # for pth, the embeddings are loaded entirely into RAM and accessed during training
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, f'{model_name}_{self._full}.pth')
@@ -366,6 +396,7 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
                 # for sql, the embeddings will be gathered in real time during training
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, f'{model_name}_{self._full}.db')
                 input_dim = self.get_embedding_dim_sql(save_path, test_seq)
+                emb_dict = None
             else:
                 # for pth, the embeddings are loaded entirely into RAM and accessed during training
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, f'{model_name}_{self._full}.pth')

@@ -20,7 +20,7 @@ class PairEmbedsLabelsDatasetFromDisk(TorchDataset):
             full=False, 
             db_path='embeddings.db',
             batch_size=64,
-            read_scaler=1000,
+            read_scaler=100,
             input_dim=768,
             task_type='regression',
             **kwargs
@@ -70,6 +70,7 @@ class PairEmbedsLabelsDatasetFromDisk(TorchDataset):
             self.reset_epoch()
         conn = sqlite3.connect(self.db_file)
         c = conn.cursor()
+        
         for i in range(self.count, self.count + self.read_amt):
             if i >= self.length:
                 break
@@ -165,7 +166,7 @@ class EmbedsLabelsDatasetFromDisk(TorchDataset):
             full=False,
             db_path='embeddings.db',
             batch_size=64,
-            read_scaler=1000,
+            read_scaler=100,
             input_dim=768,
             task_type='singlelabel',
             **kwargs
@@ -217,6 +218,7 @@ class EmbedsLabelsDatasetFromDisk(TorchDataset):
             self.reset_epoch()
         conn = sqlite3.connect(self.db_file)
         c = conn.cursor()
+
         for i in range(self.count, self.count + self.read_amt):
             if i >= self.length:
                 break
