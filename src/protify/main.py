@@ -64,6 +64,10 @@ def parse_arguments():
     parser.add_argument("--lora_alpha", type=float, default=32.0, help="Alpha for the LoRA model.")
     parser.add_argument("--lora_dropout", type=float, default=0.01, help="Dropout rate for the LoRA model.")
 
+
+    parser.add_argument("--sim_type", choices=["mean_pooling", "dot_product", "euclidean_distance", "cosine_similarity"], default="dot_product", help="Cross-attention mechanism for token-parameter-attention")
+
+
     # ----------------- ScikitArguments ----------------- # # TODO add to GUI
     parser.add_argument("--scikit_n_iter", type=int, default=10, help="Number of iterations for scikit model.")
     parser.add_argument("--scikit_cv", type=int, default=3, help="Number of cross-validation folds for scikit model.")
