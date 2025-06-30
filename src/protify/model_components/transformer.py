@@ -26,10 +26,8 @@ class TransformerBlock(nn.Module):
         x: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        r1 = self.attn(x, attention_mask)
-        x = x + r1
-        r2 = self.ffn(x)
-        x = x + r2
+        x = self.attn(x, attention_mask) + x
+        x = self.ffn(x) + x
         return x
     
 
@@ -83,8 +81,8 @@ class PTransformerBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x = self.attn(self.ln1(x), attention_mask)
-        x = self.ffn(self.ln2(x))
+        x = self.attn(self.ln1(x), attention_mask) + x
+        x = self.ffn(self.ln2(x)) + x
         return x
 
 
