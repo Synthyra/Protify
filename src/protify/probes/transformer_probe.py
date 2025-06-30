@@ -20,6 +20,7 @@ class TransformerProbeConfig(PretrainedConfig):
             classifier_dropout: float = 0.2,
             num_labels: int = 2,
             n_layers: int = 1,
+            sim_type:str = 'cosine',
             n_heads: int = 4,
             task_type: str = 'singlelabel',
             rotary: bool = True,
@@ -40,6 +41,7 @@ class TransformerProbeConfig(PretrainedConfig):
         self.rotary = rotary
         self.pre_ln = pre_ln
         self.pooling_types = probe_pooling_types
+        self.sim_type = sim_type
 
 
 class TransformerForSequenceClassification(PreTrainedModel):
@@ -91,6 +93,10 @@ class TransformerForSequenceClassification(PreTrainedModel):
             output_attentions: Optional[bool] = False,
     ) -> SequenceClassifierOutput:
         x = self.input_layer(embeddings)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+            if attention_mask is not None and attention_mask.dim() == 2:
+                attention_mask = attention_mask.unsqueeze(1)
         x = self.transformer(x, attention_mask)
         x = self.pooler(x, attention_mask)
         logits = self.classifier(x)
@@ -152,6 +158,10 @@ class TransformerForTokenClassification(PreTrainedModel):
             output_attentions: Optional[bool] = False,
     ) -> TokenClassifierOutput:
         x = self.input_layer(embeddings)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+            if attention_mask is not None and attention_mask.dim() == 2:
+                attention_mask = attention_mask.unsqueeze(1)
         x = self.transformer(x, attention_mask)
         logits = self.classifier(x)
         loss = None

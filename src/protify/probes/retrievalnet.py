@@ -18,6 +18,7 @@ class RetrievalNetConfig(PretrainedConfig):
             dropout: float = 0.2,
             num_labels: int = 2,
             n_layers: int = 1,
+            sim_type: str = 'cosine',
             n_heads: int = 4,
             task_type: str = 'singlelabel',
             expansion_ratio: float = 8 / 3,
@@ -31,6 +32,7 @@ class RetrievalNetConfig(PretrainedConfig):
         self.task_type = task_type
         self.num_labels = num_labels
         self.n_layers = n_layers
+        self.sim_type = sim_type
         self.expansion_ratio = expansion_ratio
         self.n_heads = n_heads
 
@@ -66,7 +68,7 @@ class RetrievalNetForSequenceClassification(PreTrainedModel):
             self.get_logits = AttentionLogitsSequence(
                 hidden_size=config.hidden_dim,
                 num_labels=config.num_labels,
-                sim_type='cosine',
+                sim_type=config.sim_type,
             )
         
         self.num_labels = config.num_labels
@@ -139,7 +141,7 @@ class RetrievalNetForTokenClassification(PreTrainedModel):
                 dropout=config.dropout,
                 rotary=config.rotary,
             )
-        self.get_logits = AttentionLogitsToken(hidden_size=config.hidden_dim, num_labels=config.num_labels)
+        self.get_logits = AttentionLogitsToken(hidden_size=config.hidden_dim, num_labels=config.num_labels, sim_type=config.sim_type)
 
         self.num_labels = config.num_labels
         self.task_type = config.task_type
