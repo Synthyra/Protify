@@ -65,7 +65,7 @@ def parse_arguments():
     parser.add_argument("--lora_dropout", type=float, default=0.01, help="Dropout rate for the LoRA model.")
 
 
-    parser.add_argument("--sim_type", choices=["mean", "dot", "euclidean", "cosine"], default="cosine", help="Cross-attention mechanism for token-parameter-attention")
+    parser.add_argument("--sim_type", choices=["dot", "euclidean", "cosine"], default="dot", help="Cross-attention mechanism for token-parameter-attention")
 
 
     # ----------------- ScikitArguments ----------------- # # TODO add to GUI

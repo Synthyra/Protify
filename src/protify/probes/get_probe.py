@@ -20,7 +20,7 @@ class ProbeArguments:
             n_layers: int = 1,
             task_type: str = 'singlelabel',
             pre_ln: bool = True,
-            sim_type: str = 'cosine',
+            sim_type: str = 'dot',
             ### Transformer Probe
             classifier_dim: int = 4096,
             transformer_dropout: float = 0.1,

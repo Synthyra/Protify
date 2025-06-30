@@ -276,8 +276,6 @@ class AttentionLogitsSequence(nn.Module):
             y = self.euclidean_distance(x, p)
         elif self.sim_type == 'cosine':
             y = self.cosine_similarity(x, p)
-        elif self.sim_type == 'mean':
-            y = self.mean_pooling(x ,p)
         else:
             raise ValueError(f"Invalid similarity type: {self.sim_type}")
 
@@ -318,8 +316,6 @@ class AttentionLogitsToken(nn.Module):
             logits = self.euclidean_distance(x, p)
         elif self.sim_type == 'cosine':
             logits = self.cosine_similarity(x, p)
-        elif self.sim_type == 'mean':
-            logits = x.mean(dim=1, keepdim=True).expand(-1, x.size(1), self.num_labels)
         else:
             raise ValueError(f"Invalid similarity type: {self.sim_type}")
         return logits # (b, L, num_labels)

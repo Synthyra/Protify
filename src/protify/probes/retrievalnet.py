@@ -18,7 +18,7 @@ class RetrievalNetConfig(PretrainedConfig):
             dropout: float = 0.2,
             num_labels: int = 2,
             n_layers: int = 1,
-            sim_type: str = 'cosine',
+            sim_type: str = 'dot',
             n_heads: int = 4,
             task_type: str = 'singlelabel',
             expansion_ratio: float = 8 / 3,
