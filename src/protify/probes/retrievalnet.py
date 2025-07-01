@@ -75,7 +75,7 @@ class RetrievalNetForSequenceClassification(PreTrainedModel):
                 num_labels=config.num_labels,
                 sim_type=config.sim_type,
             )
-        
+
         self.num_labels = config.num_labels
         self.task_type = config.task_type
         self.loss_fct = get_loss_fct(config.task_type)
