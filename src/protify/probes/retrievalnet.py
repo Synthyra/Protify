@@ -19,6 +19,7 @@ class RetrievalNetConfig(PretrainedConfig):
             num_labels: int = 2,
             n_layers: int = 1,
             sim_type: str = 'dot',
+            token_attention: bool = False,
             n_heads: int = 4,
             task_type: str = 'singlelabel',
             expansion_ratio: float = 8 / 3,
@@ -33,6 +34,7 @@ class RetrievalNetConfig(PretrainedConfig):
         self.num_labels = num_labels
         self.n_layers = n_layers
         self.sim_type = sim_type
+        self.token_attention = token_attention
         self.expansion_ratio = expansion_ratio
         self.n_heads = n_heads
 
@@ -41,30 +43,33 @@ class RetrievalNetForSequenceClassification(PreTrainedModel):
     config_class = RetrievalNetConfig
     def __init__(self, config: RetrievalNetConfig):
         super().__init__(config)
-        #self.input_proj = nn.Linear(config.input_dim, config.hidden_dim)
-        
-        #self.transformer = PTransformer(
-        #    hidden_size=config.hidden_dim,
-        #    n_heads=config.n_heads,
-        #    n_layers=config.n_layers,
-        #    expansion_ratio=config.expansion_ratio,
-        #    dropout=config.dropout,
-        #    rotary=True,
-        #)
 
         # If n_layers == 0, only learn how to distribute labels over the raw embeddings
         if config.n_layers == 0:
             self.label_dist_head = nn.Linear(config.input_dim, config.num_labels)
         else:
             self.input_proj = nn.Linear(config.input_dim, config.hidden_dim)
-            self.transformer = Transformer(
-                hidden_size=config.hidden_dim,
-                n_heads=config.n_heads,
-                n_layers=config.n_layers,
-                expansion_ratio=config.expansion_ratio,
-                dropout=config.dropout,
-                rotary=True,
-            )
+            
+            if config.token_attention:        
+                self.transformer = PTransformer(
+                    hidden_size=config.hidden_dim,
+                    n_heads=config.n_heads,
+                    n_layers=config.n_layers,
+                    expansion_ratio=config.expansion_ratio,
+                    dropout=config.dropout,
+                    rotary=True,
+                )
+            
+            else:
+                self.transformer = Transformer(
+                    hidden_size=config.hidden_dim,
+                    n_heads=config.n_heads,
+                    n_layers=config.n_layers,
+                    expansion_ratio=config.expansion_ratio,
+                    dropout=config.dropout,
+                    rotary=True,
+                )
+            
             self.get_logits = AttentionLogitsSequence(
                 hidden_size=config.hidden_dim,
                 num_labels=config.num_labels,

@@ -40,6 +40,8 @@ tokenwise: !!bool false
 hidden_dim: !!int 8192
 dropout: !!float 0.2
 n_layers: !!int 1
+sim_type: dot #valid options: dot, cosine, euclidean
+token_attention: !!bool false
 pre_ln: !!bool true
 classifier_dim: !!int 4096
 transformer_dropout: !!float 0.1

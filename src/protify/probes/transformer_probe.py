@@ -5,7 +5,7 @@ from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassif
 from typing import List, Optional
 from pooler import Pooler
 from model_components.mlp import intermediate_correction_fn
-from model_components.transformer import Transformer
+from model_components.transformer import Transformer, PTransformer
 from .losses import get_loss_fct
 
 
@@ -21,6 +21,7 @@ class TransformerProbeConfig(PretrainedConfig):
             num_labels: int = 2,
             n_layers: int = 1,
             sim_type:str = 'cosine',
+            token_attention: bool = False,
             n_heads: int = 4,
             task_type: str = 'singlelabel',
             rotary: bool = True,
@@ -42,6 +43,7 @@ class TransformerProbeConfig(PretrainedConfig):
         self.pre_ln = pre_ln
         self.pooling_types = probe_pooling_types
         self.sim_type = sim_type
+        self.token_attention = token_attention
 
 
 class TransformerForSequenceClassification(PreTrainedModel):
@@ -62,14 +64,35 @@ class TransformerForSequenceClassification(PreTrainedModel):
         else:
             self.input_layer = nn.Linear(config.input_dim, config.hidden_dim)
 
-        self.transformer = Transformer(
-            hidden_size=config.hidden_dim,
-            n_heads=config.n_heads,
-            n_layers=config.n_layers,
-            expansion_ratio=8 / 3,
-            dropout=config.transformer_dropout,
-            rotary=config.rotary,
-        )
+
+        if config.token_attention:        
+            self.transformer = PTransformer(
+                hidden_size=config.hidden_dim,
+                n_heads=config.n_heads,
+                n_layers=config.n_layers,
+                expansion_ratio=config.expansion_ratio,
+                dropout=config.dropout,
+                rotary=True,
+            )
+            
+        else:
+            self.transformer = Transformer(
+                hidden_size=config.hidden_dim,
+                n_heads=config.n_heads,
+                n_layers=config.n_layers,
+                expansion_ratio=config.expansion_ratio,
+                dropout=config.dropout,
+                rotary=True,
+            )
+        
+        #self.transformer = Transformer(
+        #    hidden_size=config.hidden_dim,
+        #    n_heads=config.n_heads,
+        #    n_layers=config.n_layers,
+        #    expansion_ratio=8 / 3,
+        #    dropout=config.transformer_dropout,
+        #    rotary=config.rotary,
+        #)
 
         classifier_input_dim = config.hidden_dim * len(config.pooling_types)
         proj_dim = intermediate_correction_fn(expansion_ratio=2, hidden_size=config.num_labels)

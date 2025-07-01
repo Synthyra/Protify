@@ -21,6 +21,7 @@ class ProbeArguments:
             task_type: str = 'singlelabel',
             pre_ln: bool = True,
             sim_type: str = 'dot',
+            token_attention: bool = False,
             ### Transformer Probe
             classifier_dim: int = 4096,
             transformer_dropout: float = 0.1,
@@ -46,6 +47,7 @@ class ProbeArguments:
         self.num_labels = num_labels
         self.n_layers = n_layers
         self.sim_type = sim_type
+        self.token_attention = token_attention
         self.task_type = task_type
         self.pre_ln = pre_ln
         self.classifier_dim = classifier_dim

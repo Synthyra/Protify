@@ -66,7 +66,7 @@ def parse_arguments():
 
 
     parser.add_argument("--sim_type", choices=["dot", "euclidean", "cosine"], default="dot", help="Cross-attention mechanism for token-parameter-attention")
-
+    parser.add_argument("--token_attention", action="store_true", default=False, help="If true, use TokenFormer instead of Transformer blocks")
 
     # ----------------- ScikitArguments ----------------- # # TODO add to GUI
     parser.add_argument("--scikit_n_iter", type=int, default=10, help="Number of iterations for scikit model.")
