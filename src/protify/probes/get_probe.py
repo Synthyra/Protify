@@ -14,12 +14,14 @@ class ProbeArguments:
             tokenwise: bool = False,
             ### Linear Probe
             input_dim: int = 960,
-            hidden_dim: int = 8192,
+            hidden_size: int = 8192,
             dropout: float = 0.2,
             num_labels: int = 2,
             n_layers: int = 1,
             task_type: str = 'singlelabel',
             pre_ln: bool = True,
+            sim_type: str = 'dot',
+            token_attention: bool = False,
             ### Transformer Probe
             classifier_dim: int = 4096,
             transformer_dropout: float = 0.1,
@@ -40,10 +42,12 @@ class ProbeArguments:
         self.probe_type = probe_type
         self.tokenwise = tokenwise
         self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
+        self.hidden_size = hidden_size
         self.dropout = dropout
         self.num_labels = num_labels
         self.n_layers = n_layers
+        self.sim_type = sim_type
+        self.token_attention = token_attention
         self.task_type = task_type
         self.pre_ln = pre_ln
         self.classifier_dim = classifier_dim

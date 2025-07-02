@@ -55,7 +55,7 @@ class Transformer(nn.Module):
         return x
 
 
-class PTransformerBlock(nn.Module):
+class TokenFormerBlock(nn.Module):
     def __init__(
         self,
         hidden_size: int,
@@ -86,7 +86,7 @@ class PTransformerBlock(nn.Module):
         return x
 
 
-class PTransformer(nn.Module):
+class TokenFormer(nn.Module):
     def __init__(
         self,
         hidden_size: int,
@@ -98,7 +98,7 @@ class PTransformer(nn.Module):
     ):
         super().__init__()
         self.layers = nn.ModuleList([
-            PTransformerBlock(hidden_size, n_heads, expansion_ratio, dropout, rotary) for _ in range(n_layers)
+            TokenFormerBlock(hidden_size, n_heads, expansion_ratio, dropout, rotary) for _ in range(n_layers)
         ])
 
     def forward(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:

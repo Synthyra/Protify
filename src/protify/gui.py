@@ -408,9 +408,9 @@ class GUI(MainProcess):
 
         # Hidden Dimension
         ttk.Label(self.probe_tab, text="Hidden Dimension:").grid(row=4, column=0, padx=10, pady=5, sticky="w")
-        self.settings_vars["hidden_dim"] = tk.IntVar(value=8192)
-        spin_hidden_dim = ttk.Spinbox(self.probe_tab, from_=1, to=10000, textvariable=self.settings_vars["hidden_dim"])
-        spin_hidden_dim.grid(row=4, column=1, padx=10, pady=5)
+        self.settings_vars["hidden_size"] = tk.IntVar(value=8192)
+        spin_hidden_size = ttk.Spinbox(self.probe_tab, from_=1, to=10000, textvariable=self.settings_vars["hidden_size"])
+        spin_hidden_size.grid(row=4, column=1, padx=10, pady=5)
         self.add_help_button(self.probe_tab, 4, 2, "Size of hidden dimension in the probe model.")
 
         # Dropout
@@ -868,7 +868,7 @@ class GUI(MainProcess):
         # Update full_args with probe settings
         self.full_args.probe_type = self.settings_vars["probe_type"].get()
         self.full_args.tokenwise = self.settings_vars["tokenwise"].get()
-        self.full_args.hidden_dim = self.settings_vars["hidden_dim"].get()
+        self.full_args.hidden_size = self.settings_vars["hidden_size"].get()
         self.full_args.dropout = self.settings_vars["dropout"].get()
         self.full_args.n_layers = self.settings_vars["n_layers"].get()
         self.full_args.pre_ln = self.settings_vars["pre_ln"].get()

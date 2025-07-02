@@ -129,9 +129,9 @@ if __name__ == "__main__":
     
     batch_size = 8
     seq_len = 64
-    hidden_dim = 128
+    hidden_size = 128
     num_layers = 12
-    emb = torch.randn(batch_size, seq_len, hidden_dim)
+    emb = torch.randn(batch_size, seq_len, hidden_size)
     attentions = torch.randn(batch_size, num_layers, seq_len, seq_len)
     attention_mask = torch.ones(batch_size, seq_len)
     

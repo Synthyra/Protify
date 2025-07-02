@@ -45,7 +45,7 @@ def parse_arguments():
     parser.add_argument("--probe_type", choices=["linear", "transformer", "retrievalnet", "lyra"], default="linear", help="Type of probe.")
     parser.add_argument("--tokenwise", action="store_true", default=False, help="Tokenwise probe (default: False).")
     ### TODO refactor to hidden_size
-    parser.add_argument("--hidden_dim", type=int, default=8192, help="Hidden dimension size.")
+    parser.add_argument("--hidden_size", type=int, default=8192, help="Hidden dimension size.")
     parser.add_argument("--dropout", type=float, default=0.2, help="Dropout rate.")
     parser.add_argument("--n_layers", type=int, default=1, help="Number of layers.")
     parser.add_argument("--pre_ln", action="store_false", default=True,
@@ -63,6 +63,10 @@ def parse_arguments():
     parser.add_argument("--lora_r", type=int, default=8, help="Number of trainable parameters in the LoRA model.")
     parser.add_argument("--lora_alpha", type=float, default=32.0, help="Alpha for the LoRA model.")
     parser.add_argument("--lora_dropout", type=float, default=0.01, help="Dropout rate for the LoRA model.")
+
+
+    parser.add_argument("--sim_type", choices=["dot", "euclidean", "cosine"], default="dot", help="Cross-attention mechanism for token-parameter-attention")
+    parser.add_argument("--token_attention", action="store_true", default=False, help="If true, use TokenFormer instead of Transformer blocks")
 
     # ----------------- ScikitArguments ----------------- # # TODO add to GUI
     parser.add_argument("--scikit_n_iter", type=int, default=10, help="Number of iterations for scikit model.")
