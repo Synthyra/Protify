@@ -199,12 +199,6 @@ source ~/protify_venv/bin/activate
 cd src/protify
 ```
 
-If you would like a Python virtual environment with the requirements
-```console
-chmod +x setup_protify.sh
-./setup_protify.sh
-```
-
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Usage
