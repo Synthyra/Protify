@@ -16,6 +16,7 @@ class LinearProbeConfig(PretrainedConfig):
             dropout: float = 0.2,
             num_labels: int = 2,
             n_layers: int = 1,
+            sim_type: str = 'dot',
             task_type: str = 'singlelabel',
             pre_ln: bool = True,
             **kwargs,
@@ -28,6 +29,7 @@ class LinearProbeConfig(PretrainedConfig):
         self.num_labels = num_labels
         self.n_layers = n_layers
         self.pre_ln = pre_ln
+        self.sim_type = sim_type
 
 
 class LinearProbe(PreTrainedModel):
