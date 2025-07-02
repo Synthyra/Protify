@@ -237,7 +237,7 @@ class LyraConfig(PretrainedConfig):
     def __init__(
         self,
         input_dim: int = 29, # protein vocab
-        hidden_dim: int = 64,
+        hidden_size: int = 64,
         num_labels: int = 2,
         dropout: float = 0.2,
         n_layers: int = 1,
@@ -247,7 +247,7 @@ class LyraConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
         self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
+        self.hidden_size = hidden_size
         self.dropout = dropout
         self.num_labels = num_labels
         self.task_type = task_type 
@@ -262,7 +262,7 @@ class LyraForSequenceClassification(PreTrainedModel):
         self.lyra = Lyra(
             d_input=config.input_dim,
             d_output=config.num_labels,
-            d_model=config.hidden_dim,
+            d_model=config.hidden_size,
             dropout=config.dropout,
             n_layers=config.n_layers,
         )
@@ -270,8 +270,8 @@ class LyraForSequenceClassification(PreTrainedModel):
         self.pooler = Pooler(config.pooling_types)
         classifier_dim = intermediate_correction_fn(2.0, config.num_labels)
         self.classifier = nn.Sequential(
-            nn.LayerNorm(config.hidden_dim),
-            nn.Linear(config.hidden_dim, classifier_dim),
+            nn.LayerNorm(config.hidden_size),
+            nn.Linear(config.hidden_size, classifier_dim),
             nn.GELU(),
             nn.Linear(classifier_dim, config.num_labels),
         )
@@ -312,15 +312,15 @@ class LyraForTokenClassification(PreTrainedModel):
         self.lyra = Lyra(
             d_input=config.input_dim,
             d_output=config.num_labels,
-            d_model=config.hidden_dim,
+            d_model=config.hidden_size,
             dropout=config.dropout,
             n_layers=config.n_layers,
         )
         self.loss_fct = get_loss_fct(config.task_type)
         classifier_dim = intermediate_correction_fn(2.0, config.num_labels)
         self.classifier = nn.Sequential(
-            nn.LayerNorm(config.hidden_dim),
-            nn.Linear(config.hidden_dim, classifier_dim),
+            nn.LayerNorm(config.hidden_size),
+            nn.Linear(config.hidden_size, classifier_dim),
             nn.GELU(),
             nn.Linear(classifier_dim, config.num_labels),
         )

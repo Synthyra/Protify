@@ -12,24 +12,22 @@ class LinearProbeConfig(PretrainedConfig):
     def __init__(
             self,
             input_dim: int = 768,
-            hidden_dim: int = 8192,
+            hidden_size: int = 8192,
             dropout: float = 0.2,
             num_labels: int = 2,
             n_layers: int = 1,
-            sim_type: str = 'dot',
             task_type: str = 'singlelabel',
             pre_ln: bool = True,
             **kwargs,
     ):
         super().__init__(**kwargs)
         self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
+        self.hidden_size = hidden_size
         self.dropout = dropout
         self.task_type = task_type
         self.num_labels = num_labels
         self.n_layers = n_layers
         self.pre_ln = pre_ln
-        self.sim_type = sim_type
 
 
 class LinearProbe(PreTrainedModel):
@@ -43,26 +41,25 @@ class LinearProbe(PreTrainedModel):
         layers = []
         if config.pre_ln:
             layers.append(nn.LayerNorm(config.input_dim))
-        layers.append(nn.Linear(config.input_dim, config.hidden_dim))
+        layers.append(nn.Linear(config.input_dim, config.hidden_size))
         layers.append(nn.ReLU())
         layers.append(nn.Dropout(config.dropout))
         
         for _ in range(config.n_layers):
-            layers.append(nn.Linear(config.hidden_dim, config.hidden_dim))
+            layers.append(nn.Linear(config.hidden_size, config.hidden_size))
             layers.append(nn.ReLU())
             layers.append(nn.Dropout(config.dropout))
 
         proj_dim = intermediate_correction_fn(2, config.num_labels) # finds nearest multiple of 256 of 2 * num_labels
-        layers.append(nn.LayerNorm(config.hidden_dim))
-        layers.append(nn.Linear(config.hidden_dim, proj_dim))
+        layers.append(nn.LayerNorm(config.hidden_size))
+        layers.append(nn.Linear(config.hidden_size, proj_dim))
         layers.append(nn.ReLU())
         layers.append(nn.Dropout(config.dropout))
         layers.append(nn.Linear(proj_dim, config.num_labels))
         self.layers = nn.Sequential(*layers)
 
     def forward(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> SequenceClassifierOutput:
-        dtype = self.layers[0].weight.dtype
-        logits = self.layers(embeddings.to(dtype))
+        logits = self.layers(embeddings)
         loss = None
         if labels is not None:
             if self.task_type == 'regression':
