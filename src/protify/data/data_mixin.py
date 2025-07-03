@@ -330,7 +330,7 @@ class DataMixin:
             test_embedding = c.fetchone()[0]
             test_embedding = torch.tensor(np.frombuffer(test_embedding, dtype=np.float32).reshape(1, -1))
         if self._full:
-            test_embedding = test_embedding.reshape(test_seq_len)
+            test_embedding = test_embedding.reshape(test_seq_len, -1)
         embedding_dim = test_embedding.shape[-1]
         return embedding_dim
 
@@ -338,7 +338,7 @@ class DataMixin:
         test_seq_len = len(tokenizer(test_seq, return_tensors='pt')['input_ids'][0])
         test_embedding = emb_dict[test_seq]
         if self._full:
-            test_embedding = test_embedding.reshape(test_seq_len)
+            test_embedding = test_embedding.reshape(test_seq_len, -1)
         embedding_dim = test_embedding.shape[-1]
         return embedding_dim
 
