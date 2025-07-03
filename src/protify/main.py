@@ -63,8 +63,6 @@ def parse_arguments():
     parser.add_argument("--lora_r", type=int, default=8, help="Number of trainable parameters in the LoRA model.")
     parser.add_argument("--lora_alpha", type=float, default=32.0, help="Alpha for the LoRA model.")
     parser.add_argument("--lora_dropout", type=float, default=0.01, help="Dropout rate for the LoRA model.")
-
-
     parser.add_argument("--sim_type", choices=["dot", "euclidean", "cosine"], default="dot", help="Cross-attention mechanism for token-parameter-attention")
     parser.add_argument("--token_attention", action="store_true", default=False, help="If true, use TokenFormer instead of Transformer blocks")
 
