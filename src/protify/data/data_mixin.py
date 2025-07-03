@@ -320,9 +320,9 @@ class DataMixin:
 
         return self.process_datasets(hf_datasets=datasets, data_names=data_names)
 
-    def get_embedding_dim_sql(self, save_path, test_seq):
+    def get_embedding_dim_sql(self, save_path, test_seq, tokenizer):
         import sqlite3
-        test_seq_len = len(test_seq) + 2
+        test_seq_len = len(tokenizer(test_seq, return_tensors='pt')['input_ids'][0])
         
         with sqlite3.connect(save_path) as conn:
             c = conn.cursor()
@@ -330,25 +330,15 @@ class DataMixin:
             test_embedding = c.fetchone()[0]
             test_embedding = torch.tensor(np.frombuffer(test_embedding, dtype=np.float32).reshape(1, -1))
         if self._full:
-            try:
-                test_embedding = test_embedding.reshape(test_seq_len, -1)
-            except:
-                test_embedding = test_embedding.reshape(test_seq_len - 1, -1) # some pLMs have only one special token added
+            test_embedding = test_embedding.reshape(test_seq_len)
         embedding_dim = test_embedding.shape[-1]
         return embedding_dim
 
-    def get_embedding_dim_pth(self, emb_dict, test_seq):
-        test_seq_len = len(test_seq) + 2
-
+    def get_embedding_dim_pth(self, emb_dict, test_seq, tokenizer):
+        test_seq_len = len(tokenizer(test_seq, return_tensors='pt')['input_ids'][0])
         test_embedding = emb_dict[test_seq]
-        print(test_embedding.shape)
         if self._full:
-            try:
-                test_embedding = test_embedding.reshape(test_seq_len, -1)
-            except:
-                test_embedding = test_embedding.reshape(test_seq_len - 1, -1) # some pLMs have only one special token added
-        else:
-            test_embedding = test_embedding.reshape(1, -1)
+            test_embedding = test_embedding.reshape(test_seq_len)
         embedding_dim = test_embedding.shape[-1]
         return embedding_dim
 

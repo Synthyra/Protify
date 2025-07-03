@@ -338,20 +338,20 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         for model_name in self.model_args.model_names:
             self.logger.info(f"Processing model: {model_name}")
     
+            # get tokenizer
+            tokenizer = get_tokenizer(model_name)
+
             # get embedding size
             if self._sql:
                 # for sql, the embeddings will be gathered in real time during training
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, f'{model_name}_{self._full}.db')
-                input_dim = self.get_embedding_dim_sql(save_path, test_seq)
+                input_dim = self.get_embedding_dim_sql(save_path, test_seq, tokenizer)
                 emb_dict = None
             else:
                 # for pth, the embeddings are loaded entirely into RAM and accessed during training
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, f'{model_name}_{self._full}.pth')
                 emb_dict = torch_load(save_path)
-                input_dim = self.get_embedding_dim_pth(emb_dict, test_seq)
-
-            # get tokenizer
-            tokenizer = get_tokenizer(model_name)
+                input_dim = self.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)
 
             # for each dataset, gather the settings and train the probe
             for data_name, dataset in self.datasets.items():
@@ -395,22 +395,22 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         for model_name in self.model_args.model_names:
             self.logger.info(f"Processing model: {model_name}")
     
+            # get tokenizer
+            tokenizer = get_tokenizer(model_name)
+
             # get embedding size
             if self._sql:
                 # for sql, the embeddings will be gathered in real time during training
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, f'{model_name}_{self._full}.db')
-                input_dim = self.get_embedding_dim_sql(save_path, test_seq)
+                input_dim = self.get_embedding_dim_sql(save_path, test_seq, tokenizer)
                 emb_dict = None
             else:
                 # for pth, the embeddings are loaded entirely into RAM and accessed during training
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, f'{model_name}_{self._full}.pth')
                 emb_dict = torch_load(save_path)
-                input_dim = self.get_embedding_dim_pth(emb_dict, test_seq)
+                input_dim = self.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)
 
             print(f'Input dim: {input_dim}')
-
-            # get tokenizer
-            tokenizer = get_tokenizer(model_name)
 
             # for each dataset, gather the settings and train the probe
             for data_name, dataset in self.datasets.items():
