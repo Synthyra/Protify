@@ -118,14 +118,10 @@ def parse_arguments():
             settings = yaml.safe_load(file)
         yaml_args = SimpleNamespace(**settings)
         yaml_args.hf_token = args.hf_token
-        yaml_args.hf_username = args.hf_username
         yaml_args.hf_home = args.hf_home
         yaml_args.synthyra_api_key = args.synthyra_api_key
         yaml_args.wandb_api_key = args.wandb_api_key
         yaml_args.yaml_path = args.yaml_path
-        yaml_args.log_dir = args.log_dir
-        yaml_args.results_dir = args.results_dir
-        yaml_args.model_save_dir = args.model_save_dir
         return yaml_args
     else:
         return args
