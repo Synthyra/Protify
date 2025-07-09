@@ -82,7 +82,7 @@ class RetrievalNetForSequenceClassification(PreTrainedModel):
         else:
             x = embeddings
 
-        logits, sims, x = self.get_logits(x, attention_mask) 
+        logits, sims, x = self.get_logits(x, attention_mask) # (bs, num_labels)
         loss = None
         if labels is not None:
             if self.task_type == 'regression':
