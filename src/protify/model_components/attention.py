@@ -255,7 +255,9 @@ class AttentionLogitsSequence(nn.Module):
     def cosine_similarity(self, x: torch.Tensor, p: torch.Tensor): # (b, L, d) * (b, d, num_labels) -> (b, L, num_labels)
         x = F.normalize(x, p=2, dim=-1)
         p = F.normalize(p, p=2, dim=-1)
-        return torch.matmul(x, p)
+        cos_sims = torch.matmul(x, p)
+        assert cos_sims.max().item() <= 1.0 and cos_sims.min().item() >= -1.0, "Cosine similarity values should be between -1 and 1"
+        return cos_sims
 
     def forward(
         self,
