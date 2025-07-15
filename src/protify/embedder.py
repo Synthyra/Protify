@@ -192,7 +192,15 @@ class Embedder:
                 return pooler(emb=residue_embeddings, attention_mask=attention_mask, attentions=attentions)
 
         dataset = SimpleProteinDataset(to_embed)
-        dataloader = DataLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers, collate_fn=collate_fn, shuffle=False)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            prefetch_factor=2 if self.num_workers > 0 else None,
+            collate_fn=collate_fn,
+            shuffle=False,
+            pin_memory=True
+        )
 
         if self.sql:
             conn = sqlite3.connect(save_path)

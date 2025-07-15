@@ -108,6 +108,7 @@ class TrainerArguments:
             seed=self.seed,
             label_names=['labels'],
             dataloader_num_workers=self.num_workers,
+            dataloader_prefetch_factor=2 if self.num_workers > 0 else None,
             **eval_strats
         )
 
