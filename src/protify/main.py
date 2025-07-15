@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 
 def parse_arguments():
