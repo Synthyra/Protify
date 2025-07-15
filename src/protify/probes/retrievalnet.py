@@ -139,7 +139,7 @@ class RetrievalNetForTokenClassification(PreTrainedModel):
         else:
             x = embeddings
 
-        logits = self.get_logits(x)
+        logits = self.get_logits(x, attention_mask)
 
         loss = None
         if labels is not None:
