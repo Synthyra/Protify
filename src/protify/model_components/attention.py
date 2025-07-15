@@ -256,11 +256,9 @@ class AttentionLogitsSequence(nn.Module):
             self,
             x: torch.Tensor,
             p: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
+            attention_mask: torch.Tensor = None,
     ) -> torch.Tensor: # (b, L, d) * (b, d, num_labels) -> (b, L, num_labels)
-        if attention_mask is not None:
-            x = x * attention_mask.unsqueeze(-1)
-        
+        x = x * attention_mask
         x = F.normalize(x, p=2, dim=-1)
         p = F.normalize(p, p=2, dim=1)
         cos_sims = torch.matmul(x, p)
@@ -273,19 +271,21 @@ class AttentionLogitsSequence(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        b, L, d = x.size()
+        b, l, _ = x.size()
         p = self.Wp.expand(b, -1, -1) # (b, d, num_labels)
         x = self.Wx(x) # (b, L, d)
 
-        if attention_mask is not None:
-            attention_mask = attention_mask[:, :, None].expand(b, L, self.num_labels) # (b, L, num_labels)
+        if attention_mask is None:
+            attention_mask = torch.ones(b, l, device=x.device, dtype=x.dtype)
+        
+        attention_mask = attention_mask.unsqueeze(-1)
 
         if self.sim_type == 'dot':
             y = self.dot_product(x, p)
         elif self.sim_type == 'euclidean':
             y = self.euclidean_distance(x, p)
         elif self.sim_type == 'cosine':
-            y = self.cosine_similarity(x, p)
+            y = self.cosine_similarity(x, p, attention_mask)
         else:
             raise ValueError(f"Invalid similarity type: {self.sim_type}")
 
@@ -326,7 +326,12 @@ class AttentionLogitsToken(nn.Module):
         assert cos_sims.max().item() <= 1.0 and cos_sims.min().item() >= -1.0, "Cosine similarity values should be between -1 and 1"
         return cos_sims
 
-    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(
+            self,
+            x: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            **kwargs,
+    ) -> torch.Tensor:
         b, L, d = x.size()
         p = self.Wp.expand(b, -1, -1) # (b, d, num_labels)
         x = self.Wx(x) # (b, L, d)
@@ -335,7 +340,7 @@ class AttentionLogitsToken(nn.Module):
         elif self.sim_type == 'euclidean':
             logits = self.euclidean_distance(x, p)
         elif self.sim_type == 'cosine':
-            logits = self.cosine_similarity(x, p)
+            logits = self.cosine_similarity(x, p, attention_mask)
         else:
             raise ValueError(f"Invalid similarity type: {self.sim_type}")
         return logits # (b, L, num_labels)
