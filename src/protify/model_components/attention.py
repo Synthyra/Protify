@@ -252,7 +252,15 @@ class AttentionLogitsSequence(nn.Module):
         dist = torch.abs(torch.norm(x_exp - p_exp, p=2, dim=2))  # (b, L, num_labels)
         return -dist
 
-    def cosine_similarity(self, x: torch.Tensor, p: torch.Tensor): # (b, L, d) * (b, d, num_labels) -> (b, L, num_labels)
+    def cosine_similarity(
+            self,
+            x: torch.Tensor,
+            p: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor: # (b, L, d) * (b, d, num_labels) -> (b, L, num_labels)
+        if attention_mask is not None:
+            x = x * attention_mask.unsqueeze(-1)
+        
         x = F.normalize(x, p=2, dim=-1)
         p = F.normalize(p, p=2, dim=1)
         cos_sims = torch.matmul(x, p)
@@ -303,7 +311,15 @@ class AttentionLogitsToken(nn.Module):
     def euclidean_distance(self, x: torch.Tensor, p: torch.Tensor):
         return torch.norm(x - p, p=2, dim=-1)
     
-    def cosine_similarity(self, x: torch.Tensor, p: torch.Tensor):
+    def cosine_similarity(
+            self,
+            x: torch.Tensor,
+            p: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if attention_mask is not None:
+            x = x * attention_mask.unsqueeze(-1)
+        
         x = F.normalize(x, p=2, dim=-1)
         p = F.normalize(p, p=2, dim=1)
         cos_sims = torch.matmul(x, p)
