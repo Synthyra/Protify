@@ -254,7 +254,7 @@ class AttentionLogitsSequence(nn.Module):
 
     def cosine_similarity(self, x: torch.Tensor, p: torch.Tensor): # (b, L, d) * (b, d, num_labels) -> (b, L, num_labels)
         x = F.normalize(x, p=2, dim=-1)
-        p = F.normalize(p, p=2, dim=-1)
+        p = F.normalize(p, p=2, dim=1)
         cos_sims = torch.matmul(x, p)
         assert cos_sims.max().item() <= 1.0 and cos_sims.min().item() >= -1.0, "Cosine similarity values should be between -1 and 1"
         return cos_sims
@@ -264,7 +264,7 @@ class AttentionLogitsSequence(nn.Module):
         x: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         **kwargs,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         b, L, d = x.size()
         p = self.Wp.expand(b, -1, -1) # (b, d, num_labels)
         x = self.Wx(x) # (b, L, d)
@@ -305,10 +305,12 @@ class AttentionLogitsToken(nn.Module):
     
     def cosine_similarity(self, x: torch.Tensor, p: torch.Tensor):
         x = F.normalize(x, p=2, dim=-1)
-        p = F.normalize(p, p=2, dim=-1)
-        return torch.matmul(x, p)
+        p = F.normalize(p, p=2, dim=1)
+        cos_sims = torch.matmul(x, p)
+        assert cos_sims.max().item() <= 1.0 and cos_sims.min().item() >= -1.0, "Cosine similarity values should be between -1 and 1"
+        return cos_sims
 
-    def forward(self, x: torch.Tensor, **kwargs) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         b, L, d = x.size()
         p = self.Wp.expand(b, -1, -1) # (b, d, num_labels)
         x = self.Wx(x) # (b, L, d)
