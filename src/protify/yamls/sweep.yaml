@@ -17,6 +17,11 @@ parameters:
     min: 64
     max: 8192
     q: 8
+  head_size:
+    distribution: q_uniform
+    min: 8
+    max: 256
+    q: 8
   n_layers:
     distribution: int_uniform
     min: 1
@@ -33,7 +38,7 @@ parameters:
     distribution: uniform
     min: 0.0
     max: 0.5
-  classifier_dim:
+  classifier_size:
     distribution: q_uniform
     min: 64
     max: 8192

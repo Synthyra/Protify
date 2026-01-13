@@ -456,12 +456,12 @@ class GUI(MainProcess):
         spin_class_dropout.grid(row=8, column=1, padx=10, pady=5)
         self.add_help_button(self.probe_tab, 8, 2, "Dropout probability in the classifier layer (0.0-1.0).")
 
-        # Number of Heads
-        ttk.Label(self.probe_tab, text="Number of Heads:").grid(row=9, column=0, padx=10, pady=5, sticky="w")
-        self.settings_vars["n_heads"] = tk.IntVar(value=4)
-        spin_n_heads = ttk.Spinbox(self.probe_tab, from_=1, to=32, textvariable=self.settings_vars["n_heads"])
-        spin_n_heads.grid(row=9, column=1, padx=10, pady=5)
-        self.add_help_button(self.probe_tab, 9, 2, "Number of attention heads in transformer probe.")
+        # Attention head size
+        ttk.Label(self.probe_tab, text="Head Size:").grid(row=9, column=0, padx=10, pady=5, sticky="w")
+        self.settings_vars["head_size"] = tk.IntVar(value=64)
+        spin_head_size = ttk.Spinbox(self.probe_tab, from_=8, to=256, increment=8, textvariable=self.settings_vars["head_size"])
+        spin_head_size.grid(row=9, column=1, padx=10, pady=5)
+        self.add_help_button(self.probe_tab, 9, 2, "Attention head size. Number of heads is computed as hidden_size // head_size.")
 
         # Rotary
         ttk.Label(self.probe_tab, text="Rotary:").grid(row=10, column=0, padx=10, pady=5, sticky="w")
@@ -893,7 +893,7 @@ class GUI(MainProcess):
         
         self.full_args.classifier_size = self.settings_vars["classifier_size"].get()
         self.full_args.classifier_dropout = self.settings_vars["classifier_dropout"].get()
-        self.full_args.n_heads = self.settings_vars["n_heads"].get()
+        self.full_args.head_size = self.settings_vars["head_size"].get()
         self.full_args.rotary = self.settings_vars["rotary"].get()
         
         pooling_str = self.settings_vars["probe_pooling_types"].get().strip()

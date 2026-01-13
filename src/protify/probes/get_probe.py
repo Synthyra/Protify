@@ -26,7 +26,7 @@ class ProbeArguments:
             classifier_size: int = 4096,
             transformer_dropout: float = 0.1,
             classifier_dropout: float = 0.2,
-            n_heads: int = 4,
+            head_size: int = 64,
             rotary: bool = True,
             probe_pooling_types: List[str] = field(default_factory=lambda: ['mean', 'cls']),
             ### RetrievalNet
@@ -53,7 +53,20 @@ class ProbeArguments:
         self.classifier_size = classifier_size
         self.transformer_dropout = transformer_dropout
         self.classifier_dropout = classifier_dropout
-        self.n_heads = n_heads
+        self.head_size = head_size
+        if 'n_heads' in kwargs:
+            raise ValueError(
+                "n_heads has been deprecated. Please remove it from your config and set head_size instead "
+                "(n_heads is computed as hidden_size // head_size)."
+            )
+        if head_size <= 0:
+            raise ValueError(f"head_size must be > 0, got {head_size}")
+        if hidden_size % head_size != 0:
+            raise ValueError(
+                f"hidden_size ({hidden_size}) must be divisible by head_size ({head_size}). "
+                f"Got remainder {hidden_size % head_size}."
+            )
+        self.n_heads = hidden_size // head_size
         self.rotary = rotary
         self.pooling_types = probe_pooling_types
         self.lora = lora

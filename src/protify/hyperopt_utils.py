@@ -9,7 +9,7 @@ from embedder import get_embedding_filename
 from base_models.get_base_models import get_tokenizer
 
 
-if os.environ.get('WANDB_AVAILABLE') == 'true':
+if os.enviro['WANDB_AVAILABLE'] == 'true':
     import wandb
 else:
     pass
@@ -38,8 +38,8 @@ class HyperoptModule:
         self.base_trainer_args = copy.deepcopy(self.mp.trainer_args.__dict__)
         
         self.probe_keys = {
-            'hidden_size','dropout','n_layers','pre_ln','classifier_dim',
-            'classifier_dropout','n_heads','rotary',
+            'hidden_size','dropout','n_layers','pre_ln','classifier_size',
+            'classifier_dropout','head_size','rotary',
             'lora','lora_r','lora_alpha','lora_dropout','probe_type','tokenwise'
         }
         self.trainer_keys = {
@@ -48,7 +48,7 @@ class HyperoptModule:
             'patience','seed'
         }
         self.int_keys = {
-            'hidden_size', 'n_layers', 'classifier_dim', 'n_heads', 
+            'hidden_size', 'n_layers', 'classifier_size', 'head_size',
             'lora_r', 'lora_alpha', 'num_epochs', 'probe_batch_size',
             'base_batch_size', 'probe_grad_accum', 'base_grad_accum',
             'patience', 'seed'
@@ -62,21 +62,35 @@ class HyperoptModule:
         for key in self.int_keys:
             if key in cfg:
                 cfg[key] = int(cfg[key])
-        
-        if 'hidden_size' in cfg:
-            val = cfg['hidden_size']
-            # Automatically set n_heads based on hidden_size
-            n_heads = max(1, val // 64)
-            cfg['n_heads'] = n_heads
+
+        if 'head_size' in cfg and cfg['head_size'] <= 0:
+            raise ValueError(f"head_size must be > 0, got {cfg['head_size']}")
+
+        if 'hidden_size' in cfg or 'head_size' in cfg:
+            hidden_size = cfg['hidden_size'] if 'hidden_size' in cfg else self.mp.probe_args.hidden_size
+            head_size = cfg['head_size'] if 'head_size' in cfg else self.mp.probe_args.head_size
+            if hidden_size % head_size != 0:
+                raise ValueError(f"hidden_size ({hidden_size}) must be divisible by head_size ({head_size})")
+            cfg['n_heads'] = hidden_size // head_size
                 
         if 'dropout' in cfg:
             cfg['transformer_dropout'] = cfg['dropout']
 
         for k, v in cfg.items():
-            if k in self.probe_keys and hasattr(self.mp.probe_args, k):
-                setattr(self.mp.probe_args, k, v)
-            if k in self.trainer_keys and hasattr(self.mp.trainer_args, k):
-                setattr(self.mp.trainer_args, k, v)
+            if k in self.probe_keys:
+                if k not in self.mp.probe_args.__dict__:
+                    raise KeyError(f"Unknown probe arg '{k}' in sweep config")
+                self.mp.probe_args.__dict__[k] = v
+            if k in self.trainer_keys:
+                if k not in self.mp.trainer_args.__dict__:
+                    raise KeyError(f"Unknown trainer arg '{k}' in sweep config")
+                self.mp.trainer_args.__dict__[k] = v
+
+        # Always keep derived n_heads in sync for internal transformer modules
+        if 'n_heads' in cfg:
+            if 'n_heads' not in self.mp.probe_args.__dict__:
+                raise KeyError("ProbeArguments is missing required internal field 'n_heads'")
+            self.mp.probe_args.__dict__['n_heads'] = cfg['n_heads']
 
     def train_model(self, sweep_mode=True):
         train_set, valid_set, test_set, _, _, ppi = self.dataset
@@ -143,8 +157,8 @@ class HyperoptModule:
         
         # Choose task-specific metric to optimize
         label_type = self.mp.probe_args.task_type
-        metric_cls = getattr(self.mp.full_args, 'sweep_metric_cls', None)
-        metric_reg = getattr(self.mp.full_args, 'sweep_metric_reg', None)
+        metric_cls = self.mp.full_args.sweep_metric_cls
+        metric_reg = self.mp.full_args.sweep_metric_reg
         dataset_metric = metric_cls if label_type in ["singlelabel", "multilabel"] else metric_reg
 
         all_metrics = {}
@@ -182,16 +196,16 @@ class HyperoptModule:
         else:
             raise ValueError(f"Sweep config file not found: {sweep_config_path}")
 
-        params_to_hyperopt = sweep_config.get("parameters", {})
+        params_to_hyperopt = sweep_config["parameters"]
         
         # Filter parameters based on probe type and LoRA settings
-        probe_type = getattr(mp.probe_args, 'probe_type', 'linear')
-        use_lora = getattr(mp.probe_args, 'lora', False)
+        probe_type = mp.probe_args.probe_type
+        use_lora = mp.probe_args.lora
         
         # Define which parameters are relevant for each probe type
-        linear_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'dropout', 'pre_ln'}
-        transformer_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'dropout', 'pre_ln', 
-                                     'classifier_dropout', 'classifier_dim'}
+        linear_probe_params = {'lr', 'weight_decay', 'hidden_size', 'head_size', 'n_layers', 'dropout', 'pre_ln'}
+        transformer_probe_params = {'lr', 'weight_decay', 'hidden_size', 'head_size', 'n_layers', 'dropout', 'pre_ln', 
+                                     'classifier_dropout', 'classifier_size'}
         lora_params = {'lora_r', 'lora_alpha', 'lora_dropout'}
         
         # Determine which parameters to include
@@ -280,8 +294,8 @@ class HyperoptModule:
 
                 results_list = []
                 # Choose task-specific metric to optimize
-                metric_cls = getattr(mp.full_args, 'sweep_metric_cls', None)
-                metric_reg = getattr(mp.full_args, 'sweep_metric_reg', None)
+                metric_cls = mp.full_args.sweep_metric_cls
+                metric_reg = mp.full_args.sweep_metric_reg
                 dataset_metric = metric_cls if label_type in ["singlelabel", "multilabel"] else metric_reg
                 
                 hyperopt_module = cls(

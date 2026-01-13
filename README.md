@@ -397,6 +397,8 @@ parameters:
     max: 0.5
   hidden_size:
     values: [512, 1024, 2048, 4096, 8192]
+  head_size:
+    values: [32, 64, 128]
   n_layers:
     values: [1, 2, 3]
   probe_pooling_types:
@@ -413,10 +415,8 @@ parameters:
     max: 0.5
   pre_ln:
     values: [True, False]
-  classifier_dim:
+  classifier_size:
     values: [4096, 8192]
-  n_heads:  # number of attention heads
-    values: [2, 4, 8]
   
   # LoRA parameters
   lora_r:

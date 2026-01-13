@@ -51,7 +51,7 @@ def parse_arguments():
     parser.add_argument("--classifier_size", type=int, default=4096, help="Feed-forward dimension.")
     parser.add_argument("--transformer_dropout", type=float, default=0.1, help="Dropout rate for the transformer layers.")
     parser.add_argument("--classifier_dropout", type=float, default=0.2, help="Dropout rate for the classifier.")
-    parser.add_argument("--n_heads", type=int, default=4, help="Number of heads in multi-head attention.")
+    parser.add_argument("--head_size", type=int, default=64, help="Attention head size. The number of attention heads is computed as hidden_size // head_size.")
     parser.add_argument("--rotary", action="store_false", default=True,
                         help="Disable rotary embeddings (default: enabled). Use --rotary to toggle off.")
     parser.add_argument("--probe_pooling_types", nargs="+", default=["mean", "var"], help="Pooling types to use.")
@@ -144,10 +144,13 @@ def parse_arguments():
         print(f"Logged in to HuggingFace Hub with token from arguments")
     else:
         # Check if token exists in environment (from Modal secret or other source)
-        hf_token_env = os.environ.get("HF_TOKEN")
-        if hf_token_env:
-            print(f"Note: HF_TOKEN found in environment (from Modal secret or other source)")
-            print(f"Note: This token will be used for read operations only unless overridden")
+        try:
+            hf_token_env = os.environ["HF_TOKEN"]
+        except KeyError:
+            hf_token_env = None
+        if hf_token_env is not None and hf_token_env != "":
+            print("Note: HF_TOKEN found in environment (from Modal secret or other source)")
+            print("Note: This token will be used for read operations only unless overridden")
     if args.wandb_api_key is not None:
         try:
             import wandb
@@ -161,7 +164,11 @@ def parse_arguments():
     if args.yaml_path is not None:
         with open(args.yaml_path, 'r') as file: 
             settings = yaml.safe_load(file)
-        yaml_args = SimpleNamespace(**settings)
+        # Start from parser defaults, then overlay YAML values. This guarantees all expected attributes exist.
+        base_args = parser.parse_args([])
+        yaml_args = SimpleNamespace(**vars(base_args))
+        for k, v in settings.items():
+            setattr(yaml_args, k, v)
         yaml_args.hf_token = args.hf_token
         yaml_args.hf_home = args.hf_home
         yaml_args.synthyra_api_key = args.synthyra_api_key
@@ -176,18 +183,6 @@ def parse_arguments():
         yaml_args.sweep_metric_reg = args.sweep_metric_reg
         yaml_args.sweep_goal = args.sweep_goal
         yaml_args.yaml_path = args.yaml_path
-        # Ensure ProteinGym defaults exist when using YAML configs
-        if not hasattr(yaml_args, 'proteingym'):
-            yaml_args.proteingym = False
-        if not hasattr(yaml_args, 'dms_ids'):
-            yaml_args.dms_ids = ["all"]
-        if not hasattr(yaml_args, 'mode'):
-            yaml_args.mode = None
-        if not hasattr(yaml_args, 'scoring_method'):
-            yaml_args.scoring_method = "masked_marginal"
-        # Ensure num_runs default exists
-        if not hasattr(yaml_args, 'num_runs'):
-            yaml_args.num_runs = 1
         return yaml_args
     else:
         return args
@@ -198,8 +193,8 @@ if __name__ == "__main__":
     args = parse_arguments()
 
     # Require that either datasets are specified or a ProteinGym experiment is chosen
-    has_datasets = bool(getattr(args, 'data_names', []) or getattr(args, 'data_dirs', []))
-    has_proteingym = bool(getattr(args, 'proteingym', False))
+    has_datasets = bool(args.data_names or args.data_dirs)
+    has_proteingym = bool(args.proteingym)
     if not has_datasets and not has_proteingym:
         raise AssertionError("No datasets specified. Provide --data_names or --data_dirs, or run a ProteinGym experiment.")
 
@@ -281,7 +276,7 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         self._trim = self.full_args.trim
         self._delimiter = self.full_args.delimiter
         self._col_names = self.full_args.col_names
-        self._multi_column = getattr(self.full_args, 'multi_column', None)
+        self._multi_column = self.full_args.multi_column
 
     @log_method_calls
     def get_datasets(self):
@@ -387,8 +382,17 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         )
         
         # Handle both plain and test-prefixed metric keys returned by HF Trainer
-        rho = test_metrics.get('spearman_rho', test_metrics.get('test_spearman_rho', None))
-        mse = test_metrics.get('mse', test_metrics.get('test_mse', None))
+        rho = None
+        if 'spearman_rho' in test_metrics:
+            rho = test_metrics['spearman_rho']
+        elif 'test_spearman_rho' in test_metrics:
+            rho = test_metrics['test_spearman_rho']
+
+        mse = None
+        if 'mse' in test_metrics:
+            mse = test_metrics['mse']
+        elif 'test_mse' in test_metrics:
+            mse = test_metrics['test_mse']
         return rho, mse
     
     def _run_full_finetuning(
@@ -403,7 +407,7 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         ):
         tokenwise = self.probe_args.tokenwise
         num_labels = self.probe_args.num_labels
-        num_runs = getattr(self.trainer_args, 'num_runs', 1)
+        num_runs = self.trainer_args.num_runs
         
         model_factory = self._create_model_factory(model_name, tokenwise, num_labels, hybrid=False) if num_runs > 1 else None
         model, tokenizer = get_base_model_for_training(model_name, tokenwise=tokenwise, num_labels=num_labels, hybrid=False)
@@ -463,7 +467,7 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         
         tokenwise = self.probe_args.tokenwise
         num_labels = self.probe_args.num_labels
-        num_runs = getattr(self.trainer_args, 'num_runs', 1)
+        num_runs = self.trainer_args.num_runs
         
         model_factory = self._create_model_factory(model_name, tokenwise, num_labels, hybrid=True) if num_runs > 1 else None
         probe_factory = self._create_probe_factory() if num_runs > 1 else None
@@ -542,7 +546,7 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
                 input_size = self.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)
 
             # Adjust input dim for multi-column vector embeddings
-            if (not self._full) and getattr(self.full_args, 'multi_column', None):
+            if (not self._full) and self.full_args.multi_column:
                 input_size = input_size * len(self.full_args.multi_column)
 
             # for each dataset, gather the settings and train the probe
@@ -612,7 +616,7 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
                 input_size = self.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)
 
             # Adjust input dim for multi-column vector embeddings
-            if (not self._full) and getattr(self.full_args, 'multi_column', None):
+            if (not self._full) and self.full_args.multi_column:
                 input_size = input_size * len(self.full_args.multi_column)
 
             print(f'Input dim: {input_size}')
@@ -682,19 +686,19 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         
     def run_proteingym_zero_shot(self):
         """Run ProteinGym zero-shot for all specified models and DMS ids."""
-        dms_ids = getattr(self.full_args, 'dms_ids', []) or []
-        mode = getattr(self.full_args, 'mode', 'benchmark')
+        dms_ids = self.full_args.dms_ids
+        mode = self.full_args.mode
         dms_ids = expand_dms_ids_all(dms_ids, mode=mode)
         if len(dms_ids) == 0:
             raise ValueError("--dms_ids is required when --proteingym is specified")
-        model_names = getattr(self.full_args, 'model_names', []) or []
+        model_names = self.full_args.model_names
         if len(model_names) == 0:
             raise ValueError("--model_names must specify at least one model")
         # Where to write results
-        results_root = getattr(self.full_args, 'results_dir', 'results')
+        results_root = self.full_args.results_dir
         results_dir = os.path.join(results_root, 'proteingym')
-        scoring_method = getattr(self.full_args, 'scoring_method', 'masked_marginal')
-        scoring_window = getattr(self.full_args, 'scoring_window', 'optimal')
+        scoring_method = self.full_args.scoring_method
+        scoring_window = self.full_args.scoring_window
         if isinstance(mode, str) and mode.lower() == 'indels':
             print_message("Only pll is currently supported for indels scoring.")
             scoring_method = 'pll'
@@ -712,7 +716,7 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
             mode=mode,
             scoring_method=scoring_method,
             scoring_window=scoring_window,
-            batch_size=getattr(self.full_args, 'pg_batch_size', 32),
+            batch_size=self.full_args.pg_batch_size,
         )
         print_message(f"ProteinGym zero-shot complete. Results in {results_dir}")
 
@@ -728,17 +732,15 @@ def main(args: SimpleNamespace):
         replayer = LogReplayer(args.replay_path)
         replay_args = replayer.parse_log()
         replay_args.replay_path = args.replay_path
-        # Re-apply seed using the replayed settings to ensure exact reproducibility
-        try:
-            # If no seed is present in replay, fall back to time-based seed
-            if not hasattr(replay_args, 'seed') or replay_args.seed is None:
-                replay_args.seed = None
-            if not hasattr(replay_args, 'deterministic') or replay_args.deterministic is None:
-                replay_args.deterministic = getattr(args, 'deterministic', False)
-            chosen_seed = set_global_seed(replay_args.seed, deterministic=replay_args.deterministic)
-            replay_args.seed = chosen_seed
-        except Exception:
-            pass
+        # Overlay current CLI args (defaults) and then replay values, so all expected attributes exist.
+        base_args = SimpleNamespace(**vars(args))
+        merged = SimpleNamespace(**vars(base_args))
+        for k, v in replay_args.__dict__.items():
+            setattr(merged, k, v)
+        replay_args = merged
+
+        chosen_seed = set_global_seed(replay_args.seed, deterministic=replay_args.deterministic)
+        replay_args.seed = chosen_seed
         main = MainProcess(replay_args, GUI=False)
         for k, v in main.full_args.__dict__.items():
             print(f"{k}:\t{v}")
@@ -749,18 +751,18 @@ def main(args: SimpleNamespace):
         for k, v in main.full_args.__dict__.items():
             print(f"{k}:\t{v}")
 
-        if getattr(args, 'compare_scoring_methods', False) and getattr(args, 'proteingym', False):
+        if args.compare_scoring_methods and args.proteingym:
             # Run scoring method comparison
             print_message("Running scoring method comparison...")
-            dms_ids = getattr(args, 'dms_ids', []) or []
-            mode = getattr(args, 'mode', 'benchmark')
+            dms_ids = args.dms_ids
+            mode = args.mode
             dms_ids = expand_dms_ids_all(dms_ids, mode=mode)
-            model_names = getattr(args, 'model_names', []) or []
+            model_names = args.model_names
             if len(model_names) == 0:
                 raise ValueError("--model_names must specify at least one model")
             
             # Set up output path
-            results_root = getattr(args, 'results_dir', 'results')
+            results_root = args.results_dir
             output_csv = os.path.join(results_root, 'scoring_methods_comparison.csv')
             
             summary_df = compare_scoring_methods(
@@ -775,7 +777,7 @@ def main(args: SimpleNamespace):
             return
 
         # Determine if current experiment passed datasets
-        has_datasets = bool(getattr(args, 'data_names', []) or getattr(args, 'data_dirs', []))
+        has_datasets = bool(args.data_names or args.data_dirs)
 
         # Run through datasets first (if any)
         if has_datasets:
@@ -802,13 +804,13 @@ def main(args: SimpleNamespace):
               main.run_nn_probes()
         else:
             # Determine if current experiment passed datasets
-            has_datasets = bool(getattr(args, 'data_names', []) or getattr(args, 'data_dirs', []))
+            has_datasets = bool(args.data_names or args.data_dirs)
 
             # Run through datasets first (if any)
             if has_datasets:
                 main.apply_current_settings()
                 main.get_datasets()
-                num_seqs = len(main.all_seqs) if hasattr(main, 'all_seqs') else 0
+                num_seqs = len(main.all_seqs)
                 print_message(f"Number of sequences: {num_seqs}")
 
                 if main.full_args.full_finetuning:
@@ -828,17 +830,17 @@ def main(args: SimpleNamespace):
             else:
                 print_message("No datasets specified; proceeding with ProteinGym.")
 
-            if getattr(args, 'proteingym', False):
+            if args.proteingym:
                 main.run_proteingym_zero_shot()
                 try:
-                    results_root = getattr(args, 'results_dir', 'results')
+                    results_root = args.results_dir
                     results_dir = os.path.join(results_root, 'proteingym')
-                    pg_scores = ProteinGymRunner.collect_spearman(results_dir, getattr(args, 'model_names', []))
+                    pg_scores = ProteinGymRunner.collect_spearman(results_dir, args.model_names)
                     for model_name, score in pg_scores.items():
                         if isinstance(score, (int, float)):
-                            training_time = getattr(main, '_proteingym_timing', {}).get(model_name, None)
+                            training_time = main._proteingym_timing[model_name]
                             metrics_dict = {'spearman': float(score)}
-                            metrics_dict['training_time_seconds'] = float(training_time)
+                            metrics_dict['training_time_seconds'] = float(training_time) if training_time is not None else None
                             main.log_metrics('proteingym', model_name, metrics_dict)
                 except Exception as e:
                     print_message(f"Failed to log ProteinGym metrics: {e}")
