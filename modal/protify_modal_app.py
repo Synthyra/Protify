@@ -403,7 +403,7 @@ def _execute_protify_job(
                 "stdout": stdout_text[-5000:] if stdout_text else ""
             }
         
-        # Collect results
+        # This Collect results
         results_dir = Path(config.get("results_dir", "/data/results"))
         plots_dir = Path(config.get("plots_dir", "/data/plots"))
         logs_dir = Path(config.get("log_dir", "/data/logs"))
