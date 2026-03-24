@@ -22,9 +22,21 @@ py -m main --replay_path logs/<log_id>.txt
 # List supported models and datasets
 py -m resource_info
 
-# Tests
-pytest src/protify/testing_suite/ -v
+# Tests (must run in Docker, not natively on Windows)
+docker build -t protify-env:latest .
+docker run --rm -v "${PWD}":/workspace -w /workspace/src/protify protify-env:latest python -m pytest testing_suite/ -v
+
+# Run a single test file
+docker run --rm -v "${PWD}":/workspace -w /workspace/src/protify protify-env:latest python -m pytest testing_suite/test_metrics.py -v
+
+# CPU-only tests (skip GPU-dependent tests)
+docker run --rm -v "${PWD}":/workspace -w /workspace/src/protify protify-env:latest python -m pytest testing_suite/ -v -m "not gpu and not slow"
+
+# GPU tests (add --gpus all)
+docker run --rm --gpus all -v "${PWD}":/workspace -w /workspace/src/protify protify-env:latest python -m pytest testing_suite/ -v
 ```
+
+**Windows note:** Use `MSYS_NO_PATHCONV=1` prefix if running from Git Bash to prevent path mangling.
 
 ## Architecture
 
@@ -68,6 +80,22 @@ _FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 - `embeddings/` — cached embeddings if `--save_embeddings`
 
 **Training modes:** probe-only (frozen PLM), full fine-tune, hybrid, scikit (embeddings → sklearn), W&B hyperparameter sweep.
+
+**Registries (authoritative source of truth):**
+- Supported models: `base_models/supported_models.py` (`currently_supported_models` list, 45 entries)
+- Supported datasets: `data/supported_datasets.py` (`supported_datasets` dict, 67 entries)
+
+## Testing
+
+Tests live in `testing_suite/`. Working directory must be `src/protify/` (bare imports like `import entrypoint_setup` require it). All tests use synthetic data; no network calls or real dataset downloads.
+
+**Import pattern:** Every test file uses a try/except chain: `from src.protify.X`, then `from protify.X`, then relative `from ..X`.
+
+**Markers:** `@pytest.mark.gpu` (requires CUDA), `@pytest.mark.slow` (>10s). Registered in `testing_suite/conftest.py`.
+
+**`embedding_test.py`** is a standalone diagnostic script, not a pytest test. It is excluded from collection via `collect_ignore` in conftest.
+
+**`test_packaged_probe_export.py`** has a `_copy_runtime_code` helper that copies the full `protify/` source tree into a temp dir and rewrites relative imports in `packaged_probe_model.py` to absolute imports so `transformers` dynamic module loader can resolve them. If probe exports break, check this helper first.
 
 **Embedding pipeline performance:**
 - SQL storage uses compact binary blobs (not torch.save), async writer thread, and batch serialization

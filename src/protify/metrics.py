@@ -22,7 +22,9 @@ from transformers import EvalPrediction
 
 
 def softmax(x: np.ndarray) -> np.ndarray:
-    return np.exp(x) / np.sum(np.exp(x), axis=-1, keepdims=True)
+    x = x - x.max(axis=-1, keepdims=True)
+    e = np.exp(x)
+    return e / np.sum(e, axis=-1, keepdims=True)
 
 
 def regression_scorer() -> Callable:

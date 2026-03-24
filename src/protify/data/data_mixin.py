@@ -154,7 +154,7 @@ class DataMixin:
         if self._not_regression(labels):
             if isinstance(ex, list):
                 label_type = 'multilabel'
-            elif isinstance(ex, int) or isinstance(ex, float):
+            else:
                 label_type = 'singlelabel' # binary or multiclass
         elif isinstance(ex, str):
             label_type = 'string'
@@ -588,7 +588,7 @@ class DataMixin:
                 all_seqs.update(list(test_set['seqs']))
 
             # confirm the type of labels
-            check_labels = list(valid_set['labels'])
+            check_labels = list(train_set['labels'])
             label_type = self._label_type_checker(check_labels)
 
             if label_type == 'string': # might be string or multilabel
@@ -601,7 +601,7 @@ class DataMixin:
                         train_set = train_set.map(lambda ex: {'labels': ast.literal_eval(ex['labels'])})
                         valid_set = valid_set.map(lambda ex: {'labels': ast.literal_eval(ex['labels'])})
                         test_set = test_set.map(lambda ex: {'labels': ast.literal_eval(ex['labels'])})
-                except:
+                except Exception:
                     label_type = 'string' # if ast throws error it is actually string
 
             if label_type == 'string': # if still string, it's for tokenwise classification

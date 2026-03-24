@@ -1,12 +1,12 @@
 # Testing
 
-This page describes the Protify testing suite: where tests live, what they cover, and how to run them. For running tests in Docker when a Dockerfile exists, see the note at the end.
+This page describes the Protify testing suite: where tests live, what they cover, and how to run them.
 
 ---
 
 ## Overview
 
-Tests are under [src/protify/testing_suite/](../src/protify/testing_suite/). They cover modal utilities, lazy-predict integration, packaged probe export, probe attention behavior, and embedding pipeline behavior. Run them with pytest from the repository root (or from `src/protify` with the appropriate Python path).
+Tests are under [src/protify/testing_suite/](../src/protify/testing_suite/). They cover metrics computation, pooling strategies, probe construction and forward passes, model components (MLP, attention, rotary embeddings), loss functions, blob serialization, data utilities, seed reproducibility, lazy-predict integration, packaged probe export, and probe attention behavior. Run them with pytest from the repository root.
 
 ---
 
@@ -14,14 +14,41 @@ Tests are under [src/protify/testing_suite/](../src/protify/testing_suite/). The
 
 | File | Description |
 |------|-------------|
-| **test_modal_utils.py** | Tests for Modal-related utilities (e.g. parsing Modal API key, env handling). |
-| **test_lazy_predict.py** | Tests for the lazy_predict / scikit integration. |
-| **test_packaged_probe_export.py** | Tests for exporting and loading packaged probe models (probe type inference, config round-trip). |
-| **test_probe_attention.py** | Tests for probe attention components (e.g. attention backends, masking). |
-| **embedding_test.py** | Tests for the embedding pipeline (embedder, filenames, storage). |
-| **__init__.py** | Package marker. |
+| **conftest.py** | Shared fixtures (tiny embeddings, masks, label arrays) and marker registration (`gpu`, `slow`). |
+| **test_metrics.py** | Metric computation: softmax, scorers, threshold optimization, single/multi-label classification, regression, tokenwise, ROC/PR AUC, `get_compute_metrics` dispatch. |
+| **test_pooler.py** | All pooling strategies (mean, max, norm, median, std, var, cls, parti/PageRank) with and without attention masks, concatenation behavior. |
+| **test_probe_construction.py** | `get_probe` factory dispatch for all probe_type x tokenwise combinations, forward passes (singlelabel, regression, multilabel, sigmoid_regression), loss computation, config roundtrip. |
+| **test_model_components.py** | `intermediate_correction_fn`, SwiGLU, `swiglu_ln_ffn`, RotaryEmbedding, MultiHeadAttention shapes and values. |
+| **test_losses.py** | `get_loss_fct` dispatch, SoftBCELoss, SoftBCEWithLogitsLoss (forward, ignore_index, smooth_factor). |
+| **test_blob_serialization.py** | `tensor_to_embedding_blob` / `embedding_blob_to_tensor` roundtrip for float32/float16/bfloat16, `batch_tensor_to_blobs`, legacy fallback. |
+| **test_data_utils.py** | Amino acid, DNA, RNA, codon constant validation, translation mapping coverage, `pad_and_concatenate_dimer`. |
+| **test_seed_utils.py** | `set_global_seed` / `get_global_seed`, reproducibility (torch, numpy, random), `seed_worker`, `dataloader_generator`. |
+| **test_lazy_predict.py** | LazyClassifier and LazyRegressor fit, models, predictions, provide_models. |
+| **test_packaged_probe_export.py** | Linear and transformer probe save/load roundtrip via PackagedProbeModel, PPI inference with/without token_type_ids. |
+| **test_probe_attention.py** | Transformer attention with 2D/4D masks, s_max output, `resolve_attention_backend`. |
+| **embedding_test.py** | Standalone embedding diagnostic script (excluded from pytest collection). |
 
-Additional tests may exist in the same directory or under other test directories; the list above reflects the current testing_suite contents.
+---
+
+## Markers
+
+Tests use pytest markers registered in `conftest.py`:
+
+- `@pytest.mark.gpu` -- requires a CUDA GPU. Skipped by default in CPU-only environments.
+- `@pytest.mark.slow` -- tests that take >10 seconds (e.g. loading multiple models).
+
+Filter tests by marker:
+
+```bash
+# CPU-only tests (skip gpu and slow)
+py -m pytest src/protify/testing_suite -v -m "not gpu and not slow"
+
+# GPU tests only
+py -m pytest src/protify/testing_suite -v -m "gpu"
+
+# All tests
+py -m pytest src/protify/testing_suite -v
+```
 
 ---
 
@@ -36,7 +63,7 @@ py -m pytest src/protify/testing_suite -v
 To run a single file:
 
 ```bash
-py -m pytest src/protify/testing_suite/test_modal_utils.py -v
+py -m pytest src/protify/testing_suite/test_metrics.py -v
 ```
 
 To run with coverage (if you have pytest-cov):
@@ -51,7 +78,7 @@ On Windows use `py`; on Linux/mac you can use `python` if preferred. Ensure the 
 
 ## Docker
 
-If the project has a [Dockerfile](../Dockerfile) and you want tests to run in a container (e.g. with a specific CUDA or OS environment), build the image first, then run pytest with the workspace mounted and working directory at repo root (`-w /workspace`):
+Build the image first, then run pytest with the workspace mounted:
 
 **Linux / macOS:**
 ```bash
@@ -65,7 +92,17 @@ docker build -t protify-env:latest .
 docker run --rm -v "%CD%":/workspace -w /workspace protify-env:latest py -m pytest src/protify/testing_suite -v
 ```
 
-For GPU-dependent tests, add `--gpus all` to the run command. To run the main CLI or GUI in Docker, use `-w /workspace/src/protify` and `python -m main` or `python -m gui`; see [Getting started > Docker](getting_started.md#docker).
+For GPU-dependent tests, add `--gpus all` to the run command:
+
+```bash
+docker run --rm --gpus all -v "${PWD}":/workspace -w /workspace protify-env:latest python -m pytest src/protify/testing_suite -v
+```
+
+To run only CPU tests in Docker:
+
+```bash
+docker run --rm -v "${PWD}":/workspace -w /workspace protify-env:latest python -m pytest src/protify/testing_suite -v -m "not gpu and not slow"
+```
 
 ---
 

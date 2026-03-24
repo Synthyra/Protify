@@ -36,7 +36,7 @@ def pick_metric(metrics: Dict[str, float], prefs: List[Tuple[str, str]]) -> Tupl
             if 'training_time' in mk.lower() or 'time_seconds' in mk.lower():
                 continue
             if mk.lower().endswith(k):
-                return k, nice
+                return mk, nice
     raise KeyError("No preferred metric found.")
 
 
@@ -213,8 +213,7 @@ def heatmap_plot(datasets: List[str],
     # Clean display names
     clean_model_names = [MODEL_NAMES.get(m, m) for m in models]
     clean_dataset_names = [DATASET_NAMES.get(d, d) for d in datasets_plus_avg]
-    print(clean_dataset_names)
-    print(datasets_plus_avg)
+
 
     # Build display string matrix if provided
     if display_strings is not None and not no_std:
@@ -320,9 +319,9 @@ def heatmap_plot(datasets: List[str],
     
     # Set appropriate title
     if normalize:
-        title = f'{annot_label} Heatmap (Cls→F1, Reg→Spearman)\nColors normalized per dataset'
+        title = f'{annot_label} Heatmap (Cls\u2192F1, Reg\u2192Spearman)\nColors normalized per dataset'
     else:
-        title = f'{annot_label} Heatmap (Cls→F1, Reg→Spearman)\nColors normalized per dataset'
+        title = f'{annot_label} Heatmap (Cls\u2192F1, Reg\u2192Spearman)\nRaw metric values'
         
     plt.title(title, pad=20, fontsize=21)
     plt.ylabel('Dataset', fontsize=17)

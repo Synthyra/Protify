@@ -1,6 +1,6 @@
 # Protify Documentation Hub
 
-Protify is a low-code platform for training and evaluating protein (and chemical) language models on property-prediction and benchmarking tasks. You can run it via CLI, YAML config, or a Tk GUI, with optional cloud compute (Modal) and precomputed embeddings. This hub is the entry point for all Protify documentation.
+Protify is a low-code platform for training and evaluating protein language models on property-prediction and benchmarking tasks. You can run it via CLI, YAML config, or a Tk GUI, with optional cloud compute (Modal) and precomputed embeddings. This hub is the entry point for all Protify documentation.
 
 For the full project story, installation options, and high-level usage, see the main [README](../README.md) in the repository root.
 

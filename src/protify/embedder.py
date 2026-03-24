@@ -135,7 +135,7 @@ class Embedder:
                 filename=f'embeddings/{filename}.gz',
                 repo_type='dataset'
             )
-        except:
+        except Exception:
             print(f'No embeddings found for {model_name} in {self.download_dir}')
             return
 
@@ -493,7 +493,7 @@ class Embedder:
         if self.download_embeddings:
             self._download_embeddings(model_name)
 
-        if self.device == 'cpu':
+        if self.device.type == 'cpu':
             warnings.warn("Downloading embeddings is recommended for CPU usage - Embedding on CPU will be extremely slow!")
         to_embed, save_path, embeddings_dict = self._read_embeddings_from_disk(model_name)
 

@@ -62,6 +62,7 @@
         <li><a href="#best-practices">Best Practices</a></li>
       </ul>
     </li>
+    <li><a href="#testing">Testing</a></li>
     <li><a href="#contributing">Contributing</a></li>
     <li><a href="#built-with">Built With</a></li>
     <li><a href="#license">License</a></li>
@@ -114,16 +115,28 @@ Protify is currently in beta. We're actively working to enhance features and doc
   | DPLM-150 | Diffusion pLM focused on protein structure. | 150M | pLM |
   | DPLM-650 | Larger diffusion pLM focused on protein structure. | 650M | pLM |
   | DPLM-3B | Largest deep protein language model in the DPLM family. | 3B | pLM |
+  | DPLM2-150 | Second-generation diffusion protein language model, 150M parameters. | 150M | pLM |
+  | DPLM2-650 | Second-generation diffusion protein language model, 650M parameters. | 650M | pLM |
+  | DPLM2-3B | Second-generation diffusion protein language model, 3B parameters. | 3B | pLM |
   | DSM-150 | Diffusion sequence model 150 parameter version. | 150M | pLM |
   | DSM-650 | Diffusion sequence model 650 parameter version. | 650M | pLM |
   | DSM-PPI | DSM model optimized for protein-protein interactions. | Varies | pLM |
-  | ProtCLM-1b | Causal (auto regressive) pLM. | 1B | pLM |
+  | E1-150 | Profluent E1 protein language model, 150M parameters. | 150M | pLM |
+  | E1-300 | Profluent E1 protein language model, 300M parameters. | 300M | pLM |
+  | E1-600 | Profluent E1 protein language model, 600M parameters. | 600M | pLM |
+  | AMPLIFY-120 | AMPLIFY protein language model, 120M parameters. | 120M | pLM |
+  | AMPLIFY-350 | AMPLIFY protein language model, 350M parameters. | 350M | pLM |
+  | CaLM | Codon-aware language model from MultiMolecule. | Varies | pLM |
   | OneHot-Protein | One-hot encoding baseline for protein sequences. | N/A | Baseline |
   | OneHot-DNA | One-hot encoding baseline for DNA sequences. | N/A | Baseline |
   | OneHot-RNA | One-hot encoding baseline for RNA sequences. | N/A | Baseline |
   | OneHot-Codon | One-hot encoding baseline for codon sequences. | N/A | Baseline |
   | Random | Baseline model with randomly initialized weights, serving as a negative control. | Varies | Negative control |
   | Random-Transformer | Randomly initialized transformer model serving as a homology-based control. | Varies | Homology control |
+  | Random-ESM2-8 | Randomly initialized ESM2-8M architecture. | 8M | Negative control |
+  | Random-ESM2-35 | Randomly initialized ESM2-35M architecture. | 35M | Negative control |
+  | Random-ESM2-150 | Randomly initialized ESM2-150M architecture. | 150M | Negative control |
+  | Random-ESM2-650 | Randomly initialized ESM2-650M architecture. | 650M | Negative control |
 </details>
 
 ## Currently Supported Datasets
@@ -193,6 +206,12 @@ Protify is currently in beta. We're actively working to enhance features and doc
   | plddt | AlphaFold pLDDT confidence score prediction. | TR | Confidence prediction | Yes | No |
   | realness | Protein realness dataset. | BC | Authenticity prediction | No | No |
   | million_full | Large-scale enzyme variant dataset, from Millionfull preprint October 2025 | R | Protein fitness prediction | No | No |
+  | soluprot | Protein solubility prediction from SoluProt. | BC | Protein solubility prediction | No | No |
+  | ecoli_expression | E. coli protein expression level prediction. | BC | Expression prediction | No | No |
+  | KSMoFinder | Kinase substrate prediction dataset. | SLC | Enzyme function prediction | No | Yes |
+  | KSMoFinder-clustered | Clustered kinase substrate prediction dataset. | SLC | Enzyme function prediction | No | Yes |
+  | plm-interact | PLM-Interact human PPI cross-species dataset. | SLC | PPI prediction | No | Yes |
+  | bernett_processed | Processed Bernett PPI benchmark dataset. | SLC | PPI prediction | No | Yes |
 </details>
 
 For more details about supported models and datasets, including programmatic access and command-line utilities, see the [Resource Listing Documentation](docs/resource_listing.md).
@@ -200,19 +219,19 @@ For more details about supported models and datasets, including programmatic acc
 ### Current Key Features
 
 - **Multiple interfaces**: Run experiments via an intuitive GUI, CLI, or prepared YAML files
-- **Efficient embeddings**: Leverage fast and efficient embeddings from ESM2 and ESMC via [FastPLMs](https://github.com/Synthyra/FastPLMs)
-  - Coming soon: Additional protein, SMILES, SELFIES, codon, and nucleotide language models
-- **Flexible model probing**: Use efficient MLPs for sequence-wise tasks or transformer probes for token-wise tasks
-  - Coming soon: Full model fine-tuning, hybrid probing, and LoRA
+- **Efficient embeddings**: Leverage fast and efficient embeddings from 45+ PLMs (ESM2, ESMC, E1, ProtBert, ProtT5, ANKH, GLM2, DPLM, DPLM2, DSM, AMPLIFY, CaLM, and more) via [FastPLMs](https://github.com/Synthyra/FastPLMs)
+- **Flexible model training**: Probe-only (frozen PLM), full fine-tuning, hybrid probing, and LoRA via PEFT
 - **Automated model selection**: Find optimal scikit-learn models for your data with LazyPredict, enhanced by automatic hyperparameter optimization
-  - Coming soon: GPU acceleration
 - **Hyperparameter optimization**: Integrated Weights & Biases sweeps that conducts a hyperparameter search and trains the final version based on the best hyperparameters
 - **Complete reproducibility**: Every session generates a detailed log that can be used to reproduce your entire workflow
 - **Publication-ready visualizations**: Generate cross-model and dataset comparisons with radar and bar plots, embedding analysis with PCA, t-SNE, and UMAP, and statistically sound confidence interval plots
-- **Extensive dataset support**: Access 46+ protein datasets by default, or easily integrate your own local or private datasets
-  - Coming soon: Additional protein, SMILES, SELFIES, codon, and nucleotide property datasets
+- **Extensive dataset support**: Access 60+ protein datasets by default, or easily integrate your own local or private datasets
 - **Advanced interaction modeling**: Support for protein-protein interaction datasets
   - Coming soon: Protein-small molecule interaction capabilities
+- **ProteinGym zero-shot benchmarking**: Run zero-shot DMS scoring against 217+ ProteinGym substitution assays with multiple scoring methods
+- **Cloud compute**: Run GPU jobs via the Synthyra API or self-hosted Modal compute
+- **Multi-GPU embedding**: Split sequences across GPUs for parallel embedding generation
+- **SQL embedding storage**: Compact binary blob storage with async writer for efficient embedding caching
 
 ### Support Protify's Development
 
@@ -630,6 +649,32 @@ Protify includes a zero-shot pipeline for the ProteinGym DMS benchmark with a st
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
+## Testing
+
+Tests live under `src/protify/testing_suite/`. Run them with:
+
+```bash
+py -m pytest src/protify/testing_suite/ -v
+```
+
+The suite covers metrics, pooling, probe construction, model components, loss functions, blob serialization, data utilities, seed reproducibility, scikit-learn integration, packaged probe export, and attention backends.
+
+For Docker-based testing (recommended for GPU-dependent tests):
+
+```bash
+docker build -t protify-env:latest .
+docker run --rm --gpus all -v "${PWD}":/workspace -w /workspace protify-env:latest python -m pytest src/protify/testing_suite/ -v
+```
+
+To run only CPU tests (no GPU required):
+
+```bash
+docker run --rm -v "${PWD}":/workspace -w /workspace protify-env:latest python -m pytest src/protify/testing_suite/ -v -m "not gpu and not slow"
+```
+
+See [docs/testing.md](docs/testing.md) for full details.
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 ## Contributing
 

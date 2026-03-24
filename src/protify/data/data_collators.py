@@ -266,8 +266,8 @@ class OneHotCollator:
     def __init__(self, alphabet: str = "ACDEFGHIKLMNPQRSTVWY") -> None:
         # Add X for unknown amino acids, and special CLS and EOS tokens
         alphabet = alphabet + "X"
-        alphabet = list(alphabet)
-        self.mapping = {token: idx for idx, token in enumerate(alphabet)}
+        self.alphabet = list(alphabet)
+        self.mapping = {token: idx for idx, token in enumerate(self.alphabet)}
         
     def __call__(self, batch: List[Tuple]) -> Dict[str, torch.Tensor]:
         seqs = [ex[0] for ex in batch]

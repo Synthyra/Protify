@@ -25,8 +25,16 @@ def _copy_runtime_code(save_dir: Path) -> None:
         dst_file = dst_package_dir / relative_path
         dst_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_file, dst_file)
+    # Also copy packaged_probe_model.py to save_dir root as a standalone
+    # version with absolute imports so transformers dynamic_module_utils can
+    # resolve the import chain without relative path traversal.
     packaged_model_file = repo_root / "src" / "protify" / "probes" / "packaged_probe_model.py"
-    shutil.copy2(packaged_model_file, save_dir / "packaged_probe_model.py")
+    standalone = save_dir / "packaged_probe_model.py"
+    content = packaged_model_file.read_text(encoding="utf-8")
+    content = content.replace("from ..base_models.supported_models import", "from protify.base_models.supported_models import")
+    content = content.replace("from ..pooler import", "from protify.pooler import")
+    content = content.replace("from .get_probe import", "from protify.probes.get_probe import")
+    standalone.write_text(content, encoding="utf-8")
 
 
 def _create_tiny_backbone(backbone_dir: Path) -> tuple[BertModel, BertTokenizerFast]:
