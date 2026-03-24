@@ -137,7 +137,6 @@ class E1BatchPreparer:
         sequence_encodings: List[Dict[str, torch.Tensor]],
         device: torch.device = torch.device("cpu"),
         non_blocking: bool = False,
-        max_length: Optional[int] = None,
     ) -> Dict[str, Union[torch.Tensor, List[str], List[int]]]:
         non_blocking = non_blocking and device.type == "cuda"
         padded_encodings = {}
@@ -151,13 +150,9 @@ class E1BatchPreparer:
             "global_position_ids": -1,
             "labels": self.pad_token_id,
         }.items():
-            tensors = [enc[key] for enc in sequence_encodings]
-            padded = pad_sequence(tensors, batch_first=True, padding_value=padding_value)
-            # Pad to fixed max_length if requested (enables static shapes for torch.compile)
-            if max_length is not None and padded.shape[1] < max_length:
-                pad_size = max_length - padded.shape[1]
-                padded = torch.nn.functional.pad(padded, (0, pad_size), value=padding_value)
-            padded_encodings[key] = padded.to(device=device, dtype=torch.long, non_blocking=non_blocking)
+            padded_encodings[key] = pad_sequence(
+                [enc[key] for enc in sequence_encodings], batch_first=True, padding_value=padding_value
+            ).to(device=device, dtype=torch.long, non_blocking=non_blocking)
 
         padded_encodings["context"] = [enc["context"] for enc in sequence_encodings]
         padded_encodings["context_len"] = [enc["context_len"] for enc in sequence_encodings]

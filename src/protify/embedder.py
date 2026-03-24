@@ -1,11 +1,9 @@
 import entrypoint_setup
 
 import os
-import queue
-import sqlite3
-import threading
 import torch
 import warnings
+import sqlite3
 import gzip
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
@@ -39,65 +37,6 @@ def build_collator(tokenizer: object, padding: str = 'max_length', max_length: i
     return _collate_fn
 
 
-class _SqlWriter:
-    """Background thread that serializes embeddings and writes to SQLite.
-
-    The main embedding loop enqueues (seqs, embeddings, masks) tuples and
-    immediately proceeds to the next GPU batch. This thread handles the
-    CPU-bound serialization and I/O-bound SQL writes in parallel with GPU
-    computation.
-    """
-
-    def __init__(self, db_path: str, commit_interval: int, matrix_embed: bool) -> None:
-        self._queue: queue.Queue = queue.Queue(maxsize=4)
-        self._commit_interval = commit_interval
-        self._matrix_embed = matrix_embed
-        self._db_path = db_path
-        self._error: Optional[Exception] = None
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def _run(self) -> None:
-        conn = sqlite3.connect(self._db_path, timeout=30)
-        c = conn.cursor()
-        c.execute('PRAGMA journal_mode=WAL')
-        c.execute('PRAGMA synchronous=NORMAL')
-        c.execute('PRAGMA cache_size=-64000')
-        c.execute('PRAGMA temp_store=MEMORY')
-        c.execute('CREATE TABLE IF NOT EXISTS embeddings (sequence text PRIMARY KEY, embedding blob)')
-        batch_count = 0
-
-        while True:
-            item = self._queue.get()
-            if item is None:
-                conn.commit()
-                conn.close()
-                return
-
-            seqs, embeddings, masks = item
-            batch_rows = []
-            for seq, emb, mask in zip(seqs, embeddings, masks):
-                if self._matrix_embed:
-                    emb = emb[mask.bool()]
-                batch_rows.append((seq, tensor_to_embedding_blob(emb)))
-            c.executemany("INSERT OR REPLACE INTO embeddings VALUES (?, ?)", batch_rows)
-
-            batch_count += 1
-            if batch_count % self._commit_interval == 0:
-                conn.commit()
-
-    def enqueue(self, seqs: List[str], embeddings: torch.Tensor, masks: torch.Tensor) -> None:
-        if self._error is not None:
-            raise self._error
-        self._queue.put((seqs, embeddings, masks))
-
-    def close(self) -> None:
-        self._queue.put(None)
-        self._thread.join()
-        if self._error is not None:
-            raise self._error
-
-
 def get_embedding_filename(model_name: str, matrix_embed: bool, pooling_types: List[str], extension: str = 'pth') -> str:
     """
     Generate embedding filename with pooling types for vector embeddings.
@@ -124,7 +63,7 @@ class EmbeddingArguments:
     def __init__(
             self,
             embedding_batch_size: int = 4,
-            embedding_num_workers: int = 4,
+            embedding_num_workers: int = 0,
             download_embeddings: bool = False,
             download_dir: str = 'Synthyra/vector_embeddings',
             matrix_embed: bool = False,
@@ -307,7 +246,7 @@ class Embedder:
             dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
-            prefetch_factor=4 if self.num_workers > 0 else None,
+            prefetch_factor=2 if self.num_workers > 0 else None,
             collate_fn=collate_fn,
             shuffle=False,
             pin_memory=True,
@@ -315,10 +254,14 @@ class Embedder:
             generator=dataloader_generator(get_global_seed())
         )
 
-        sql_commit_interval = max(1, 10000 // self.batch_size)
-        sql_writer: Optional[_SqlWriter] = None
         if self.sql:
-            sql_writer = _SqlWriter(save_path, sql_commit_interval, self.matrix_embed)
+            conn = sqlite3.connect(save_path, timeout=30)
+            c = conn.cursor()
+            c.execute('PRAGMA journal_mode=WAL')
+            c.execute('PRAGMA busy_timeout=30000')
+            c.execute('CREATE TABLE IF NOT EXISTS embeddings (sequence text PRIMARY KEY, embedding blob)')
+
+        sql_commit_interval = max(1, 10000 // self.batch_size)
 
         for i, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc='Embedding batches'):
             seqs = to_embed[i * self.batch_size:(i + 1) * self.batch_size]
@@ -333,27 +276,36 @@ class Embedder:
             if 'parti' in self.pooling_types:
                 try:
                     residue_embeddings, attentions = model(**batch, output_attentions=True)
-                    embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask, attentions=attentions).to('cpu', non_blocking=True)
+                    embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask, attentions=attentions).cpu()
                 except Exception as e:
                     print_message(f"Error in parti pooling: {e}\nDefaulting to mean pooling")
                     self.pooling_types = ['mean']
                     pooler = Pooler(self.pooling_types)
                     residue_embeddings = model(**batch)
-                    embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask).to('cpu', non_blocking=True)
+                    embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask).cpu()
             else:
                 residue_embeddings = model(**batch)
-                embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask).to('cpu', non_blocking=True)
+                embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask).cpu()
 
-            if sql_writer is not None:
-                sql_writer.enqueue(seqs, embeddings, attention_mask.to('cpu', non_blocking=True))
+            if self.sql:
+                batch_rows = []
+                for seq, emb, mask in zip(seqs, embeddings, attention_mask.cpu()):
+                    if self.matrix_embed:
+                        emb = emb[mask.bool()]
+                    batch_rows.append((seq, tensor_to_embedding_blob(emb)))
+                c.executemany("INSERT OR REPLACE INTO embeddings VALUES (?, ?)", batch_rows)
             else:
                 for seq, emb, mask in zip(seqs, embeddings, attention_mask.cpu()):
                     if self.matrix_embed:
                         emb = emb[mask.bool()]
                     embeddings_dict[seq] = emb.to(self.embed_dtype)
 
-        if sql_writer is not None:
-            sql_writer.close()
+            if (i + 1) % sql_commit_interval == 0 and self.sql:
+                conn.commit()
+
+        if self.sql:
+            conn.commit()
+            conn.close()
             return embeddings_dict
         
         if self.save_embeddings:
