@@ -76,6 +76,20 @@ The **transformer probe** uses `Transformer` as the backbone above embeddings wi
 
 ---
 
+## Performance: padding + flex attention + torch.compile
+
+Protify defaults to a configuration optimized for maximum GPU throughput:
+
+- **`--padding max_length`** (default): All sequences in every batch are padded to `--max_length`. This produces uniform tensor shapes across batches, which is critical for torch.compile to cache a single optimized graph instead of recompiling per unique shape.
+- **`--attention_backend flex`** (default): Flex attention fuses the attention kernel and ignores padding tokens via block masks. With fixed-length tensors, the block mask structure is identical across batches, avoiding recomputation.
+- **torch.compile** (`dynamic=False`): The embedding model is compiled with static shapes. Combined with max_length padding, this means a single compilation that is reused for every batch.
+
+Together, these three settings eliminate dynamic shape overhead and produce the fastest possible inference and training.
+
+To opt out (e.g. for memory-constrained environments with highly variable sequence lengths), pass `--padding longest`. A warning will be printed because this disables graph caching and increases flex attention overhead.
+
+---
+
 ## See also
 
 - [Probes and training](probes_and_training.md) for probe types and training flows

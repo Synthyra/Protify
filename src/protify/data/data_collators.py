@@ -1,6 +1,14 @@
 import torch
-from typing import List, Tuple, Dict, Union
+from typing import Any, Dict, List, Tuple, Union
 from .utils import pad_and_concatenate_dimer
+
+
+def _tokenize_kwargs(padding: str, max_length: int) -> Dict[str, Any]:
+    """Build tokenizer kwargs for the given padding strategy."""
+    kwargs: Dict[str, Any] = dict(padding=padding, return_tensors='pt', add_special_tokens=True, truncation=True)
+    if padding == 'max_length':
+        kwargs['max_length'] = max_length
+    return kwargs
 
 
 def _pad_matrix_embeds(embeds: List[torch.Tensor], max_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -28,22 +36,22 @@ def _pad_matrix_embeds(embeds: List[torch.Tensor], max_len: int) -> Tuple[torch.
 
 
 class StringCollator:
-    def __init__(self, tokenizer: object, **kwargs) -> None:
+    def __init__(self, tokenizer: object, padding: str = 'max_length', max_length: int = 2048, **kwargs) -> None:
         self.tokenizer = tokenizer
+        self.padding = padding
+        self.max_length = max_length
 
     def __call__(self, batch: Tuple[List[str], List[str]]) -> Dict[str, torch.Tensor]:
-        batch = self.tokenizer(batch,
-                          padding='longest',
-                          return_tensors='pt',
-                          add_special_tokens=True)
-        return batch
+        return self.tokenizer(batch, **_tokenize_kwargs(self.padding, self.max_length))
 
 
 class StringLabelsCollator:
-    def __init__(self, tokenizer: object, task_type: str = 'regression', tokenwise: bool = False, **kwargs) -> None:
+    def __init__(self, tokenizer: object, task_type: str = 'regression', tokenwise: bool = False, padding: str = 'max_length', max_length: int = 2048, **kwargs) -> None:
         self.tokenizer = tokenizer
         self.task_type = task_type
         self.tokenwise = tokenwise
+        self.padding = padding
+        self.max_length = max_length
 
     def __call__(self, batch: List[Tuple[str, Union[float, int]]]) -> Dict[str, torch.Tensor]:
         seqs = [ex[0] for ex in batch]
@@ -52,10 +60,7 @@ class StringLabelsCollator:
         # Tokenize the sequences
         batch_encoding = self.tokenizer(
             seqs,
-            padding='longest',
-            truncation=False,
-            return_tensors='pt',
-            add_special_tokens=True
+            **_tokenize_kwargs(self.padding, self.max_length),
         )
         
         # Handle labels based on tokenwise flag
@@ -158,16 +163,19 @@ class EmbedsLabelsCollator:
 
 
 class PairCollator_input_ids:
-    def __init__(self, tokenizer: object, **kwargs) -> None:
+    def __init__(self, tokenizer: object, padding: str = 'max_length', max_length: int = 2048, **kwargs) -> None:
         self.tokenizer = tokenizer
+        self.padding = padding
+        self.max_length = max_length
 
     def __call__(self, batch: List[Tuple[str, str, Union[float, int]]]) -> Dict[str, torch.Tensor]:
         seqs_a, seqs_b, labels = zip(*batch)
         labels = torch.tensor(labels, dtype=torch.float)
+        tok_kwargs = _tokenize_kwargs(self.padding, self.max_length)
+        tok_kwargs.pop('add_special_tokens', None)
         tokenized = self.tokenizer(
             seqs_a, seqs_b,
-            padding='longest',
-            return_tensors='pt'
+            **tok_kwargs,
         )
         return {
             'input_ids': tokenized['input_ids'],
@@ -177,23 +185,22 @@ class PairCollator_input_ids:
 
 
 class PairCollator_ab:
-    def __init__(self, tokenizer: object, **kwargs) -> None:
+    def __init__(self, tokenizer: object, padding: str = 'max_length', max_length: int = 2048, **kwargs) -> None:
         self.tokenizer = tokenizer
+        self.padding = padding
+        self.max_length = max_length
 
     def __call__(self, batch: List[Tuple[str, str, Union[float, int]]]) -> Dict[str, torch.Tensor]:
         seqs_a, seqs_b, labels = zip(*batch)
         labels = torch.tensor(labels, dtype=torch.float)
+        tok_kwargs = _tokenize_kwargs(self.padding, self.max_length)
         tokenized_a = self.tokenizer(
             seqs_a,
-            padding='longest',
-            truncation=True,
-            return_tensors='pt'
+            **tok_kwargs,
         )
         tokenized_b = self.tokenizer(
             seqs_b,
-            padding='longest',
-            truncation=True,
-            return_tensors='pt'
+            **tok_kwargs,
         )
         return {
             'input_ids_a': tokenized_a['input_ids'],

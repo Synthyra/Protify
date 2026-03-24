@@ -27,6 +27,7 @@ col_names:
   - seqs
   - labels
 max_length: !!int 1024
+padding: max_length  # 'max_length' (recommended) or 'longest'
 trim: !!bool false
 data_names:
   - DeepLoc-2

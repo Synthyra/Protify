@@ -12,6 +12,7 @@ class BaseSequenceTokenizer:
         # Default tokenizer args if not provided
         kwargs.setdefault('return_tensors', 'pt')
         kwargs.setdefault('padding', 'max_length')
+        kwargs.setdefault('truncation', True)
         kwargs.setdefault('add_special_tokens', True)
 
         return self.tokenizer(sequences, **kwargs)

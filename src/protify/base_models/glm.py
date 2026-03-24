@@ -30,7 +30,8 @@ class GLMTokenizerWrapper(BaseSequenceTokenizer):
         if isinstance(sequences, str):
             sequences = [sequences]
         kwargs.setdefault('return_tensors', 'pt')
-        kwargs.setdefault('padding', 'longest')
+        kwargs.setdefault('padding', 'max_length')
+        kwargs.setdefault('truncation', True)
         kwargs.setdefault('add_special_tokens', True)
         modified_sequences = [self.plus_token + seq for seq in sequences]
         tokenized = self.tokenizer(modified_sequences, **kwargs)

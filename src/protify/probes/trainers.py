@@ -485,7 +485,9 @@ Protify is an open source platform designed to simplify and democratize workflow
         """
 
         add_token_ids = getattr(self.probe_args, 'add_token_ids', False)
-        data_collator = CollatorClass(tokenizer=tokenizer, full=full, task_type=task_type, tokenwise=tokenwise, add_token_ids=add_token_ids)
+        padding = getattr(self.full_args, 'padding', 'max_length')
+        max_length = getattr(self.full_args, 'max_length', 2048)
+        data_collator = CollatorClass(tokenizer=tokenizer, full=full, task_type=task_type, tokenwise=tokenwise, add_token_ids=add_token_ids, padding=padding, max_length=max_length)
         common_kwargs = dict(
             hf_dataset=train_dataset,
             input_size=input_size,
@@ -634,7 +636,9 @@ Protify is an open source platform designed to simplify and democratize workflow
             DatasetClass = StringLabelDataset
             CollatorClass = StringLabelsCollator
 
-        data_collator = CollatorClass(tokenizer=tokenizer, task_type=task_type, tokenwise=tokenwise)
+        padding = getattr(self.full_args, 'padding', 'max_length')
+        max_length = getattr(self.full_args, 'max_length', 2048)
+        data_collator = CollatorClass(tokenizer=tokenizer, task_type=task_type, tokenwise=tokenwise, padding=padding, max_length=max_length)
 
         train_ds = DatasetClass(hf_dataset=train_dataset, train=True, random_pair_flipping=self.full_args.random_pair_flipping)
         valid_ds = DatasetClass(hf_dataset=valid_dataset, train=False, random_pair_flipping=self.full_args.random_pair_flipping)

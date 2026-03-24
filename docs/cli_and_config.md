@@ -64,6 +64,7 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--delimiter` | str | , | Delimiter for CSV/TSV from data_dirs. |
 | `--col_names` | list | [seqs, labels] | Column names (legacy; often inferred). |
 | `--max_length` | int | 2048 | Maximum sequence length. |
+| `--padding` | choice | max_length | Padding strategy: `max_length` pads all sequences to `--max_length` (recommended for torch.compile + flex attention); `longest` pads to the longest sequence in each batch. |
 | `--trim` | flag | False | If set, drop sequences longer than max_length; else truncate. |
 | `--data_names` | list | [] | Dataset names (HuggingFace or preset e.g. standard_benchmark). |
 | `--data_dirs` | list | [] | Local directories with train.*/valid.*/test.*. |

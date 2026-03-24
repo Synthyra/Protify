@@ -58,6 +58,12 @@ def parse_arguments():
     parser.add_argument("--delimiter", default=",", help="Delimiter for data.")
     parser.add_argument("--col_names", nargs="+", default=["seqs", "labels"], help="Column names.") # DEPRECATED, found automatically now
     parser.add_argument("--max_length", type=int, default=2048, help="Maximum sequence length.")
+    parser.add_argument(
+        "--padding",
+        choices=["max_length", "longest"],
+        default="max_length",
+        help="Padding strategy. 'max_length' pads all sequences to --max_length (recommended for torch.compile + flex attention). 'longest' pads to the longest sequence in each batch.",
+    )
     parser.add_argument("--trim", action="store_true", default=False,
                         help="Whether to trim sequences (default: False). If False, sequences are removed from the dataset if they are longer than max length. If True, they are truncated to max length."
                         )
@@ -972,6 +978,16 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
 def main(args: SimpleNamespace):
     chosen_seed = set_global_seed(args.seed)
     args.seed = chosen_seed
+
+    if not hasattr(args, 'padding'):
+        args.padding = 'max_length'
+
+    if args.padding == "longest":
+        print_message(
+            "WARNING: padding='longest' causes dynamic tensor shapes. "
+            "This disables torch.compile graph caching and reduces flex attention efficiency. "
+            "Use padding='max_length' (default) for best performance."
+        )
 
     if _should_auto_run_cloud(args):
         return _run_on_cloud(args)

@@ -66,6 +66,8 @@ Defined in [embedder.py](../src/protify/embedder.py). Constructor maps long name
 | `model_dtype` | dtype | None | Dtype for base model (None uses default). |
 | `sql` | bool | False | Store in SQLite (`.db`) instead of `.pth`. |
 | `embedding_save_dir` | str | embeddings | Directory for save/load paths. |
+| `padding` | str | max_length | Padding strategy for the embedding collator. `max_length` pads all batches to `max_length` tokens (optimal for torch.compile + flex attention). `longest` pads to the longest sequence in each batch. |
+| `max_length` | int | 2048 | Maximum sequence length (used when `padding='max_length'`). |
 
 `read_scaler` (CLI/embedding) is used for SQL read batching in dataset building.
 

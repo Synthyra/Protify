@@ -35,8 +35,9 @@ class E1TokenizerWrapper(BaseSequenceTokenizer):
     def __call__(self, sequences: Union[str, List[str]], **kwargs) -> Dict[str, torch.Tensor]:
         if isinstance(sequences, str):
             sequences = [sequences]
-        tokenized = self.tokenizer.get_batch_kwargs(sequences)
-        return tokenized
+        max_length = kwargs.get('max_length') if kwargs.get('padding') == 'max_length' else None
+        sequence_encodings = [self.tokenizer.prepare_multiseq(seq) for seq in sequences]
+        return self.tokenizer.pad_encodings(sequence_encodings, max_length=max_length)
 
 
 class E1ForEmbedding(nn.Module):

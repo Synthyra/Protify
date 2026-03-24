@@ -553,12 +553,25 @@ class GUI(MainProcess):
         backend_combo.grid(row=14, column=1, padx=10, pady=5, sticky="w")
         self.add_help_button(self.probe_tab, 14, 2, "Select the attention backend for transformer-style probes.")
 
+        # Padding Strategy
+        ttk.Label(self.probe_tab, text="Padding:").grid(row=15, column=0, padx=10, pady=5, sticky="w")
+        self.settings_vars["padding"] = tk.StringVar(value="max_length")
+        padding_combo = ttk.Combobox(
+            self.probe_tab,
+            textvariable=self.settings_vars["padding"],
+            values=["max_length", "longest"],
+            state="readonly",
+            width=17,
+        )
+        padding_combo.grid(row=15, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.probe_tab, 15, 2, "Padding strategy. 'max_length' (recommended) pads all sequences to max_length for optimal torch.compile + flex attention performance. 'longest' pads to the longest sequence in each batch.")
+
         # Use Bias
-        ttk.Label(self.probe_tab, text="Use Bias:").grid(row=15, column=0, padx=10, pady=5, sticky="w")
+        ttk.Label(self.probe_tab, text="Use Bias:").grid(row=16, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["use_bias"] = tk.BooleanVar(value=False)
         check_use_bias = ttk.Checkbutton(self.probe_tab, variable=self.settings_vars["use_bias"])
-        check_use_bias.grid(row=15, column=1, padx=10, pady=5, sticky="w")
-        self.add_help_button(self.probe_tab, 15, 2, "Use bias terms in probe linear layers.")
+        check_use_bias.grid(row=16, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.probe_tab, 16, 2, "Use bias terms in probe linear layers.")
 
         # Add Token IDs
         ttk.Label(self.probe_tab, text="Add Token IDs:").grid(row=16, column=0, padx=10, pady=5, sticky="w")
