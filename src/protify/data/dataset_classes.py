@@ -43,6 +43,8 @@ class PairEmbedsLabelsDatasetFromDisk(TorchDataset):
         self.task_type = task_type
         self.train = train
         self.random_pair_flipping = random_pair_flipping
+        self._conn = sqlite3.connect(self.db_file, timeout=30)
+        self._cursor = self._conn.cursor()
 
     def __len__(self):
         return self.length
@@ -62,32 +64,35 @@ class PairEmbedsLabelsDatasetFromDisk(TorchDataset):
         self.embeddings_a, self.embeddings_b, self.current_labels = [], [], []
         self.count, self.index = 0, 0
 
-    def get_embedding(self, c, seq):
-        result = c.execute("SELECT embedding FROM embeddings WHERE sequence=?", (seq,))
-        row = result.fetchone()
-        if row is None:
-            raise ValueError(f"Embedding not found for sequence: {seq}")
-        emb_data = row[0]
-        emb = embedding_blob_to_tensor(emb_data, fallback_shape=(-1, self.input_size))
-        return emb
+    def _batch_fetch(self, seqs: List[str]) -> Dict[str, torch.Tensor]:
+        unique_seqs = list(set(seqs))
+        placeholders = ','.join('?' * len(unique_seqs))
+        self._cursor.execute(
+            f"SELECT sequence, embedding FROM embeddings WHERE sequence IN ({placeholders})",
+            unique_seqs,
+        )
+        cache = {}
+        for seq, blob in self._cursor.fetchall():
+            cache[seq] = embedding_blob_to_tensor(blob, fallback_shape=(-1, self.input_size))
+        missing = [s for s in unique_seqs if s not in cache]
+        assert not missing, f"Embeddings not found for {len(missing)} sequences: {missing[:5]}"
+        return cache
 
     def read_embeddings(self):
         embeddings_a, embeddings_b, labels = [], [], []
         self.count += self.read_amt
         if self.count >= self.length:
             self.reset_epoch()
-        conn = sqlite3.connect(self.db_file)
-        c = conn.cursor()
-        
-        for i in range(self.count, self.count + self.read_amt):
-            if i >= self.length:
-                break
-            emb_a = self.get_embedding(c, self.seqs_a[i])
-            emb_b = self.get_embedding(c, self.seqs_b[i])
-            embeddings_a.append(emb_a)
-            embeddings_b.append(emb_b)
-            labels.append(self.labels[i])
-        conn.close()
+
+        end = min(self.count + self.read_amt, self.length)
+        chunk_a = self.seqs_a[self.count:end]
+        chunk_b = self.seqs_b[self.count:end]
+        cache = self._batch_fetch(chunk_a + chunk_b)
+
+        for seq_a, seq_b, lbl in zip(chunk_a, chunk_b, self.labels[self.count:end]):
+            embeddings_a.append(cache[seq_a])
+            embeddings_b.append(cache[seq_b])
+            labels.append(lbl)
         self.index = 0
         self.embeddings_a = embeddings_a
         self.embeddings_b = embeddings_b
@@ -153,8 +158,8 @@ class PairEmbedsLabelsDataset(TorchDataset):
         
     def __getitem__(self, idx):
         seq_a, seq_b = self.seqs_a[idx], self.seqs_b[idx]
-        emb_a = self.emb_dict.get(seq_a).reshape(-1, self.input_size)
-        emb_b = self.emb_dict.get(seq_b).reshape(-1, self.input_size)
+        emb_a = self.emb_dict[seq_a].reshape(-1, self.input_size)
+        emb_b = self.emb_dict[seq_b].reshape(-1, self.input_size)
         
         # Optional random pair order augmentation during training only.
         if self.train and self.random_pair_flipping and random.random() < 0.5:
@@ -197,6 +202,8 @@ class EmbedsLabelsDatasetFromDisk(TorchDataset):
         self.read_amt = read_scaler * self.batch_size
         self.embeddings, self.current_labels = [], []
         self.count, self.index = 0, 0
+        self._conn = sqlite3.connect(self.db_file, timeout=30)
+        self._cursor = self._conn.cursor()
 
         self.reset_epoch()
 
@@ -223,27 +230,37 @@ class EmbedsLabelsDatasetFromDisk(TorchDataset):
         self.embeddings, self.current_labels = [], []
         self.count, self.index = 0, 0
 
+    def _batch_fetch(self, seqs: List[str]) -> Dict[str, torch.Tensor]:
+        unique_seqs = list(set(seqs))
+        placeholders = ','.join('?' * len(unique_seqs))
+        self._cursor.execute(
+            f"SELECT sequence, embedding FROM embeddings WHERE sequence IN ({placeholders})",
+            unique_seqs,
+        )
+        cache = {}
+        for seq, blob in self._cursor.fetchall():
+            cache[seq] = embedding_blob_to_tensor(blob, fallback_shape=(-1, self.input_size))
+        missing = [s for s in unique_seqs if s not in cache]
+        assert not missing, f"Embeddings not found for {len(missing)} sequences: {missing[:5]}"
+        return cache
+
     def read_embeddings(self):
         embeddings, labels = [], []
         self.count += self.read_amt
         if self.count >= self.length:
             self.reset_epoch()
-        conn = sqlite3.connect(self.db_file)
-        c = conn.cursor()
 
-        for i in range(self.count, self.count + self.read_amt):
-            if i >= self.length:
-                break
-            result = c.execute("SELECT embedding FROM embeddings WHERE sequence=?", (self.seqs[i],))
-            row = result.fetchone()
-            emb_data = row[0]
-            emb = embedding_blob_to_tensor(emb_data, fallback_shape=(-1, self.input_size))
+        end = min(self.count + self.read_amt, self.length)
+        chunk_seqs = self.seqs[self.count:end]
+        cache = self._batch_fetch(chunk_seqs)
+
+        for seq, lbl in zip(chunk_seqs, self.labels[self.count:end]):
+            emb = cache[seq]
             if self.full:
                 padding_needed = self.max_length - emb.size(0)
                 emb = F.pad(emb, (0, 0, 0, padding_needed), value=0)
             embeddings.append(emb)
-            labels.append(self.labels[i])
-        conn.close()
+            labels.append(lbl)
         self.index = 0
         self.embeddings = embeddings
         self.current_labels = labels
@@ -383,6 +400,8 @@ class MultiEmbedsLabelsDatasetFromDisk(TorchDataset):
 
         self.embeddings, self.current_labels = [], []
         self.count, self.index = 0, 0
+        self._conn = sqlite3.connect(self.db_file, timeout=30)
+        self._cursor = self._conn.cursor()
 
     def __len__(self):
         return self.length
@@ -397,17 +416,21 @@ class MultiEmbedsLabelsDatasetFromDisk(TorchDataset):
         self.embeddings, self.current_labels = [], []
         self.count, self.index = 0, 0
 
-    def _get_embedding(self, c, seq: str) -> torch.Tensor:
-        result = c.execute("SELECT embedding FROM embeddings WHERE sequence=?", (seq,))
-        row = result.fetchone()
-        if row is None:
-            raise ValueError(f"Embedding not found for sequence: {seq}")
-        emb_data = row[0]
-        emb = embedding_blob_to_tensor(emb_data, fallback_shape=(-1, self.input_size))
-        return emb
+    def _batch_fetch(self, seqs: List[str]) -> Dict[str, torch.Tensor]:
+        unique_seqs = list(set(seqs))
+        placeholders = ','.join('?' * len(unique_seqs))
+        self._cursor.execute(
+            f"SELECT sequence, embedding FROM embeddings WHERE sequence IN ({placeholders})",
+            unique_seqs,
+        )
+        cache = {}
+        for seq, blob in self._cursor.fetchall():
+            cache[seq] = embedding_blob_to_tensor(blob, fallback_shape=(-1, self.input_size))
+        missing = [s for s in unique_seqs if s not in cache]
+        assert not missing, f"Embeddings not found for {len(missing)} sequences: {missing[:5]}"
+        return cache
 
     def _combine_matrix(self, parts: List[torch.Tensor]) -> torch.Tensor:
-        # Insert a single zero row between parts
         if len(parts) == 0:
             return torch.zeros(0, self.input_size)
         sep = torch.zeros(1, self.input_size, dtype=parts[0].dtype)
@@ -423,26 +446,25 @@ class MultiEmbedsLabelsDatasetFromDisk(TorchDataset):
         self.count += self.read_amt
         if self.count >= self.length:
             self.reset_epoch()
-        conn = sqlite3.connect(self.db_file)
-        c = conn.cursor()
 
-        for i in range(self.count, self.count + self.read_amt):
-            if i >= self.length:
-                break
-            parts = [self._get_embedding(c, self.col_to_seqs[col][i]) for col in self.seq_cols]
+        end = min(self.count + self.read_amt, self.length)
+        all_seqs = []
+        for col in self.seq_cols:
+            all_seqs.extend(self.col_to_seqs[col][self.count:end])
+        cache = self._batch_fetch(all_seqs)
+
+        for i in range(self.count, end):
+            parts = [cache[self.col_to_seqs[col][i]] for col in self.seq_cols]
             if self.full:
                 emb = self._combine_matrix(parts)
-                # pad to max_length
                 if self.full and self.max_length:
                     pad_needed = self.max_length - emb.size(0)
                     if pad_needed > 0:
                         emb = F.pad(emb, (0, 0, 0, pad_needed), value=0)
             else:
-                # vector embeddings are 1 x d; concatenate along feature dim
                 emb = torch.cat([p.reshape(1, -1) for p in parts], dim=-1)
             embeddings.append(emb)
             labels.append(self.labels[i])
-        conn.close()
         self.index = 0
         self.embeddings = embeddings
         self.current_labels = labels

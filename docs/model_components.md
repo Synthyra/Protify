@@ -86,7 +86,7 @@ Protify defaults to a configuration optimized for maximum GPU throughput:
 
 Together, these three settings eliminate dynamic shape overhead and produce the fastest possible inference and training.
 
-To opt out (e.g. for memory-constrained environments with highly variable sequence lengths), pass `--padding longest`. A warning will be printed because this disables graph caching and increases flex attention overhead.
+**`--padding longest`** pads each batch to its longest sequence only, avoiding wasted compute on padding tokens. When this mode is selected, `maybe_compile()` skips torch.compile entirely because flex attention's `create_block_mask` is incompatible with compiled dynamic shapes (causes CUDA illegal memory access). Sequences are automatically sorted by length before batching to minimize padding waste within each batch.
 
 ---
 

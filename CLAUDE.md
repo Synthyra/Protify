@@ -68,3 +68,9 @@ _FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 - `embeddings/` — cached embeddings if `--save_embeddings`
 
 **Training modes:** probe-only (frozen PLM), full fine-tune, hybrid, scikit (embeddings → sklearn), W&B hyperparameter sweep.
+
+**Embedding pipeline performance:**
+- SQL storage uses compact binary blobs (not torch.save), async writer thread, and batch serialization
+- `padding='max_length'` enables torch.compile; `padding='longest'` skips compile (flex attention incompatibility) but sorts by length to minimize padding
+- `multi_gpu=True` splits sequences across GPUs via `mp.Process`
+- `autocast=True` enables mixed-precision inference for float32 models

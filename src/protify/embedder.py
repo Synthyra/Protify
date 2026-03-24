@@ -1,7 +1,11 @@
 import entrypoint_setup
 
 import os
+import math
+import queue
+import threading
 import torch
+import torch.multiprocessing as mp
 import warnings
 import sqlite3
 import gzip
@@ -16,22 +20,22 @@ try:
     from data.dataset_classes import SimpleProteinDataset
     from base_models.get_base_models import get_base_model
     from pooler import Pooler
-    from utils import torch_load, print_message, maybe_compile, tensor_to_embedding_blob
+    from utils import torch_load, print_message, maybe_compile, tensor_to_embedding_blob, batch_tensor_to_blobs
 except ImportError:
     from .seed_utils import seed_worker, dataloader_generator, get_global_seed
     from .data.dataset_classes import SimpleProteinDataset
     from .base_models.get_base_models import get_base_model
     from .pooler import Pooler
-    from .utils import torch_load, print_message, maybe_compile, tensor_to_embedding_blob
+    from .utils import torch_load, print_message, maybe_compile, tensor_to_embedding_blob, batch_tensor_to_blobs
 
 
 def build_collator(tokenizer: object, padding: str = 'max_length', max_length: int = 2048) -> Callable[[List[str]], Dict[str, torch.Tensor]]:
     def _collate_fn(sequences: List[str]) -> Dict[str, torch.Tensor]:
         """Collate function for batching sequences."""
-        kwargs: Dict[str, Any] = dict(return_tensors="pt", padding=padding, truncation=True)
-        if padding == 'max_length':
-            kwargs['max_length'] = max_length
-        else:
+        kwargs: Dict[str, Any] = dict(
+            return_tensors="pt", padding=padding, truncation=True, max_length=max_length,
+        )
+        if padding != 'max_length':
             kwargs['pad_to_multiple_of'] = 8
         return tokenizer(sequences, **kwargs)
     return _collate_fn
@@ -75,6 +79,8 @@ class EmbeddingArguments:
             embedding_save_dir: str = 'embeddings',
             padding: str = 'max_length',
             max_length: int = 2048,
+            multi_gpu: bool = False,
+            autocast: bool = False,
             **kwargs
     ):
         self.batch_size = embedding_batch_size
@@ -90,6 +96,8 @@ class EmbeddingArguments:
         self.embedding_save_dir = embedding_save_dir
         self.padding = padding
         self.max_length = max_length
+        self.multi_gpu = multi_gpu
+        self.autocast = autocast
 
 
 class Embedder:
@@ -109,9 +117,12 @@ class Embedder:
         self.embedding_save_dir = args.embedding_save_dir
         self.padding = args.padding
         self.max_length = args.max_length
+        self.multi_gpu = args.multi_gpu
+        self.autocast = args.autocast
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print_message(f'Device {self.device} found')
+        n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+        print_message(f'Device {self.device} found ({n_gpus} GPU{"s" if n_gpus != 1 else ""})')
 
     def _download_embeddings(self, model_name: str):
         # download from download_dir
@@ -165,18 +176,12 @@ class Embedder:
         return final_path
 
     def _read_sequences_from_db(self, db_path: str) -> Set[str]:
-        """Read sequences from SQLite database."""
+        """Read all embedded sequences from SQLite database."""
         import sqlite3
-        sequences = []
         with sqlite3.connect(db_path, timeout=30) as conn:
             c = conn.cursor()
             c.execute("SELECT sequence FROM embeddings")
-            while True:
-                row = c.fetchone()
-                if row is None:
-                    break
-                sequences.append(row[0])
-        return set(sequences)
+            return {row[0] for row in c.fetchall()}
 
     def _read_embeddings_from_disk(self, model_name: str):
         if self.sql:
@@ -222,7 +227,8 @@ class Embedder:
             embeddings_dict: Dict[str, torch.Tensor]) -> Optional[Dict[str, torch.Tensor]]:
         os.makedirs(self.embedding_save_dir, exist_ok=True)
         model = embedding_model.to(self.device).eval()
-        model = maybe_compile(model)
+        dynamic = self.padding == 'longest'
+        model = maybe_compile(model, dynamic=dynamic)
         device = self.device
         collate_fn = build_collator(tokenizer, padding=self.padding, max_length=self.max_length)
         print_message(f'Pooling types: {self.pooling_types}')
@@ -241,6 +247,7 @@ class Embedder:
             else:
                 return pooler(emb=residue_embeddings, attention_mask=attention_mask, attentions=attentions)
 
+        to_embed = sorted(to_embed, key=len)
         dataset = SimpleProteinDataset(to_embed)
         dataloader = DataLoader(
             dataset,
@@ -254,14 +261,34 @@ class Embedder:
             generator=dataloader_generator(get_global_seed())
         )
 
+        sql_queue = None
+        sql_writer_thread = None
         if self.sql:
-            conn = sqlite3.connect(save_path, timeout=30)
+            conn = sqlite3.connect(save_path, timeout=30, check_same_thread=False)
             c = conn.cursor()
             c.execute('PRAGMA journal_mode=WAL')
             c.execute('PRAGMA busy_timeout=30000')
+            c.execute('PRAGMA synchronous=OFF')
+            c.execute('PRAGMA cache_size=-64000')
             c.execute('CREATE TABLE IF NOT EXISTS embeddings (sequence text PRIMARY KEY, embedding blob)')
 
-        sql_commit_interval = max(1, 10000 // self.batch_size)
+            sql_queue = queue.Queue(maxsize=4)
+
+            def _sql_writer():
+                wc = conn.cursor()
+                batches_written = 0
+                while True:
+                    item = sql_queue.get()
+                    if item is None:
+                        break
+                    wc.executemany("INSERT OR REPLACE INTO embeddings VALUES (?, ?)", item)
+                    batches_written += 1
+                    if sql_queue.qsize() == 0:
+                        conn.commit()
+                conn.commit()
+
+            sql_writer_thread = threading.Thread(target=_sql_writer, daemon=True)
+            sql_writer_thread.start()
 
         for i, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc='Embedding batches'):
             seqs = to_embed[i * self.batch_size:(i + 1) * self.batch_size]
@@ -273,38 +300,40 @@ class Embedder:
             else:
                 attention_mask = torch.ones_like(batch['input_ids'], device=device)
 
-            if 'parti' in self.pooling_types:
-                try:
-                    residue_embeddings, attentions = model(**batch, output_attentions=True)
-                    embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask, attentions=attentions).cpu()
-                except Exception as e:
-                    print_message(f"Error in parti pooling: {e}\nDefaulting to mean pooling")
-                    self.pooling_types = ['mean']
-                    pooler = Pooler(self.pooling_types)
+            with torch.autocast(device.type, dtype=self.embed_dtype, enabled=self.autocast):
+                if 'parti' in self.pooling_types:
+                    try:
+                        residue_embeddings, attentions = model(**batch, output_attentions=True)
+                        embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask, attentions=attentions).cpu()
+                    except Exception as e:
+                        print_message(f"Error in parti pooling: {e}\nDefaulting to mean pooling")
+                        self.pooling_types = ['mean']
+                        pooler = Pooler(self.pooling_types)
+                        residue_embeddings = model(**batch)
+                        embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask).cpu()
+                else:
                     residue_embeddings = model(**batch)
                     embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask).cpu()
-            else:
-                residue_embeddings = model(**batch)
-                embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask).cpu()
 
             if self.sql:
-                batch_rows = []
-                for seq, emb, mask in zip(seqs, embeddings, attention_mask.cpu()):
-                    if self.matrix_embed:
-                        emb = emb[mask.bool()]
-                    batch_rows.append((seq, tensor_to_embedding_blob(emb)))
-                c.executemany("INSERT OR REPLACE INTO embeddings VALUES (?, ?)", batch_rows)
+                embeddings = embeddings.to(self.embed_dtype)
+                if self.matrix_embed:
+                    batch_rows = []
+                    for seq, emb, mask in zip(seqs, embeddings, attention_mask.cpu()):
+                        batch_rows.append((seq, tensor_to_embedding_blob(emb[mask.bool()])))
+                else:
+                    blobs = batch_tensor_to_blobs(embeddings)
+                    batch_rows = list(zip(seqs, blobs))
+                sql_queue.put(batch_rows)
             else:
                 for seq, emb, mask in zip(seqs, embeddings, attention_mask.cpu()):
                     if self.matrix_embed:
                         emb = emb[mask.bool()]
                     embeddings_dict[seq] = emb.to(self.embed_dtype)
 
-            if (i + 1) % sql_commit_interval == 0 and self.sql:
-                conn.commit()
-
         if self.sql:
-            conn.commit()
+            sql_queue.put(None)
+            sql_writer_thread.join()
             conn.close()
             return embeddings_dict
         
@@ -314,6 +343,152 @@ class Embedder:
             
         return embeddings_dict
 
+    def _embed_sequences_multi_gpu(
+            self,
+            to_embed: List[str],
+            save_path: str,
+            dispatch_name: str,
+            model_path: Optional[str],
+            embeddings_dict: Dict[str, torch.Tensor],
+    ) -> Optional[Dict[str, torch.Tensor]]:
+        n_gpus = torch.cuda.device_count()
+        to_embed = sorted(to_embed, key=len)
+        chunk_size = math.ceil(len(to_embed) / n_gpus)
+        shards = [to_embed[i * chunk_size:(i + 1) * chunk_size] for i in range(n_gpus)]
+        shards = [s for s in shards if len(s) > 0]
+        actual_gpus = len(shards)
+        print_message(f"Multi-GPU: splitting {len(to_embed)} sequences across {actual_gpus} GPUs")
+
+        if self.sql:
+            os.makedirs(self.embedding_save_dir, exist_ok=True)
+            conn = sqlite3.connect(save_path, timeout=30)
+            conn.execute('PRAGMA journal_mode=WAL')
+            conn.execute('PRAGMA busy_timeout=30000')
+            conn.execute('CREATE TABLE IF NOT EXISTS embeddings (sequence text PRIMARY KEY, embedding blob)')
+            conn.close()
+
+        result_dicts: Dict[int, Dict[str, torch.Tensor]] = mp.Manager().dict()
+
+        def _worker(rank: int, shard: List[str]) -> None:
+            torch.cuda.set_device(rank)
+            device = torch.device(f'cuda:{rank}')
+            model_obj, tokenizer = get_base_model(dispatch_name, dtype=self.model_dtype, model_path=model_path)
+            model_obj = model_obj.to(device).eval()
+            dynamic = self.padding == 'longest'
+            model_obj = maybe_compile(model_obj, dynamic=dynamic)
+            collate_fn = build_collator(tokenizer, padding=self.padding, max_length=self.max_length)
+
+            if self.matrix_embed:
+                pooler = None
+            else:
+                pooler = Pooler(self.pooling_types)
+
+            def _get_embeddings(residue_embeddings, attention_mask=None, attentions=None):
+                if residue_embeddings.ndim == 2 or self.matrix_embed:
+                    return residue_embeddings
+                return pooler(emb=residue_embeddings, attention_mask=attention_mask, attentions=attentions)
+
+            dataset = SimpleProteinDataset(shard)
+            dataloader = DataLoader(
+                dataset,
+                batch_size=self.batch_size,
+                num_workers=self.num_workers,
+                prefetch_factor=2 if self.num_workers > 0 else None,
+                collate_fn=collate_fn,
+                shuffle=False,
+                pin_memory=True,
+                worker_init_fn=seed_worker,
+                generator=dataloader_generator(get_global_seed()),
+            )
+
+            local_dict = {}
+            worker_sql_queue = None
+            worker_sql_thread = None
+            if self.sql:
+                sql_conn = sqlite3.connect(save_path, timeout=30, check_same_thread=False)
+                sql_c = sql_conn.cursor()
+                sql_c.execute('PRAGMA journal_mode=WAL')
+                sql_c.execute('PRAGMA busy_timeout=30000')
+                sql_c.execute('PRAGMA synchronous=OFF')
+                sql_c.execute('PRAGMA cache_size=-64000')
+
+                worker_sql_queue = queue.Queue(maxsize=4)
+
+                def _worker_sql_writer():
+                    wc = sql_conn.cursor()
+                    while True:
+                        item = worker_sql_queue.get()
+                        if item is None:
+                            break
+                        wc.executemany("INSERT OR REPLACE INTO embeddings VALUES (?, ?)", item)
+                        if worker_sql_queue.qsize() == 0:
+                            sql_conn.commit()
+                    sql_conn.commit()
+
+                worker_sql_thread = threading.Thread(target=_worker_sql_writer, daemon=True)
+                worker_sql_thread.start()
+
+            with torch.inference_mode():
+                for i, batch_data in tqdm(
+                    enumerate(dataloader),
+                    total=len(dataloader),
+                    desc=f'GPU {rank}',
+                    position=rank,
+                ):
+                    seqs = shard[i * self.batch_size:(i + 1) * self.batch_size]
+                    batch_data = {k: v.to(device) for k, v in batch_data.items() if isinstance(v, torch.Tensor)}
+                    if 'attention_mask' in batch_data:
+                        attention_mask = batch_data['attention_mask']
+                    elif 'sequence_ids' in batch_data:
+                        attention_mask = (batch_data['sequence_ids'] != -1).long().to(device)
+                    else:
+                        attention_mask = torch.ones_like(batch_data['input_ids'], device=device)
+
+                    with torch.autocast(device.type, dtype=self.embed_dtype, enabled=self.autocast):
+                        residue_embeddings = model_obj(**batch_data)
+                        embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask).cpu()
+
+                    if self.sql:
+                        embeddings = embeddings.to(self.embed_dtype)
+                        if self.matrix_embed:
+                            batch_rows = []
+                            for seq, emb, mask in zip(seqs, embeddings, attention_mask.cpu()):
+                                batch_rows.append((seq, tensor_to_embedding_blob(emb[mask.bool()])))
+                        else:
+                            blobs = batch_tensor_to_blobs(embeddings)
+                            batch_rows = list(zip(seqs, blobs))
+                        worker_sql_queue.put(batch_rows)
+                    else:
+                        for seq, emb, mask in zip(seqs, embeddings, attention_mask.cpu()):
+                            if self.matrix_embed:
+                                emb = emb[mask.bool()]
+                            local_dict[seq] = emb.to(self.embed_dtype)
+
+            if self.sql:
+                worker_sql_queue.put(None)
+                worker_sql_thread.join()
+                sql_conn.close()
+            else:
+                result_dicts[rank] = local_dict
+
+        processes = []
+        mp.set_start_method('spawn', force=True)
+        for rank, shard in enumerate(shards):
+            p = mp.Process(target=_worker, args=(rank, shard))
+            p.start()
+            processes.append(p)
+        for p in processes:
+            p.join()
+
+        if not self.sql:
+            for rank in range(actual_gpus):
+                embeddings_dict.update(result_dicts[rank])
+            if self.save_embeddings:
+                print_message(f"Saving embeddings to {save_path}")
+                torch.save(embeddings_dict, save_path)
+
+        return embeddings_dict
+
     def __call__(self, model_name: str, model_type: str = None, model_path: str = None):
         if self.download_embeddings:
             self._download_embeddings(model_name)
@@ -321,13 +496,19 @@ class Embedder:
         if self.device == 'cpu':
             warnings.warn("Downloading embeddings is recommended for CPU usage - Embedding on CPU will be extremely slow!")
         to_embed, save_path, embeddings_dict = self._read_embeddings_from_disk(model_name)
-        
+
         if len(to_embed) > 0:
             print_message(f"Embedding {len(to_embed)} sequences with {model_name}")
             dispatch_name = model_type or model_name
-            model, tokenizer = get_base_model(dispatch_name, dtype=self.model_dtype, model_path=model_path)
 
-            return self._embed_sequences(to_embed, save_path, model, tokenizer, embeddings_dict)
+            n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            if self.multi_gpu and n_gpus > 1:
+                return self._embed_sequences_multi_gpu(
+                    to_embed, save_path, dispatch_name, model_path, embeddings_dict,
+                )
+            else:
+                model, tokenizer = get_base_model(dispatch_name, dtype=self.model_dtype, model_path=model_path)
+                return self._embed_sequences(to_embed, save_path, model, tokenizer, embeddings_dict)
         else:
             print_message(f"No sequences to embed with {model_name}")
             return embeddings_dict

@@ -66,8 +66,10 @@ Defined in [embedder.py](../src/protify/embedder.py). Constructor maps long name
 | `model_dtype` | dtype | None | Dtype for base model (None uses default). |
 | `sql` | bool | False | Store in SQLite (`.db`) instead of `.pth`. |
 | `embedding_save_dir` | str | embeddings | Directory for save/load paths. |
-| `padding` | str | max_length | Padding strategy for the embedding collator. `max_length` pads all batches to `max_length` tokens (optimal for torch.compile + flex attention). `longest` pads to the longest sequence in each batch. |
-| `max_length` | int | 2048 | Maximum sequence length (used when `padding='max_length'`). |
+| `padding` | str | max_length | Padding strategy for the embedding collator. `max_length` pads all batches to `max_length` tokens (optimal for torch.compile + flex attention). `longest` pads to the longest sequence in each batch (skips compile, but avoids wasted padding compute). |
+| `max_length` | int | 2048 | Maximum sequence length. Always passed to the tokenizer for truncation, regardless of padding mode. |
+| `multi_gpu` | bool | False | Split sequences across all available GPUs via `mp.Process`. Each GPU loads its own model copy and embeds a shard. |
+| `autocast` | bool | False | Wrap forward pass in `torch.autocast` for mixed-precision inference. Useful when `model_dtype` is float32 but you want float16 compute speed (~1.5x). |
 
 `read_scaler` (CLI/embedding) is used for SQL read batching in dataset building.
 
@@ -101,7 +103,17 @@ Example: `ESM2-8_False_mean_var.pth`.
 ## SQL vs PTH
 
 - **PTH:** One file per (model_name, matrix_embed, pooling_types). Dict mapping sequence string to tensor. Load/save with `torch.load` / `torch.save`.
-- **SQL:** One `.db` file per same key. Table `embeddings(sequence, embedding)`. New sequences use INSERT OR REPLACE. Better for very large sequence sets and incremental updates.
+- **SQL:** One `.db` file per same key. Table `embeddings(sequence, embedding)`. New sequences use INSERT OR REPLACE. Better for very large sequence sets, incremental updates, and Modal volume storage.
+
+### SQL performance optimizations
+
+The SQL path uses several optimizations to minimize the gap with in-memory dict storage:
+
+- **Compact blob format:** Embeddings are serialized as a small binary header + raw numpy bytes instead of `torch.save`. For float16 vectors this is 3.4x smaller and ~18x faster to serialize than pickle-based `torch.save`.
+- **Batch serialization:** `batch_tensor_to_blobs()` converts an entire batch of identically-shaped embeddings in one numpy call, avoiding per-embedding overhead.
+- **Async writer thread:** SQLite INSERTs run in a background thread via `queue.Queue`, so the GPU never blocks on I/O.
+- **Aggressive pragmas:** `PRAGMA synchronous=OFF` and `PRAGMA cache_size=-64000` (64MB) during embedding. Data is reproducible, so fsync is unnecessary.
+- **Batch reads:** Training dataset classes use batch `SELECT ... WHERE sequence IN (?)` queries with persistent connections instead of per-sequence lookups.
 
 ---
 
