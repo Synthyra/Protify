@@ -11,7 +11,7 @@ _FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 if _FASTPLMS not in sys.path:
     sys.path.insert(0, _FASTPLMS)
 
-from e1_fastplms.modeling_e1 import (
+from fastplms.e1.modeling_e1 import (
     E1Model,
     E1ForMaskedLM,
     E1ForSequenceClassification,

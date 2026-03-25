@@ -11,7 +11,7 @@ _FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 if _FASTPLMS not in sys.path:
     sys.path.insert(0, _FASTPLMS)
 
-from esm_plusplus.modeling_esm_plusplus import (
+from fastplms.esm_plusplus.modeling_esm_plusplus import (
     ESMplusplusModel,
     ESMplusplusForMaskedLM,
     ESMplusplusForSequenceClassification,

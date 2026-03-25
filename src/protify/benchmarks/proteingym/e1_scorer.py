@@ -14,7 +14,7 @@ _FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path
 if _FASTPLMS not in sys.path:
     sys.path.insert(0, _FASTPLMS)
 
-from e1_fastplms.modeling_e1 import E1ForMaskedLM, DataPrepConfig
+from fastplms.e1.modeling_e1 import E1ForMaskedLM, DataPrepConfig
 from .e1_predictor import E1Predictor
 
 logger = logging.get_logger(__name__)

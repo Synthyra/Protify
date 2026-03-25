@@ -25,8 +25,8 @@ src/protify/results/*
 !yamls/sweep_full.yaml
 !yamls/sweep_probe.yaml
 !yamls/sweep_transformer_probe.yaml
-!images/*.png
-!images/example_workflow/*.png
+!assets/*.png
+!assets/example_workflow/*.png
 !requirements.txt
 !yamls/vector_benchmark.yaml
 !src/protify/base_models/e1_tokenizer.json

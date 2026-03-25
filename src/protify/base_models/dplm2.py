@@ -11,7 +11,7 @@ _FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 if _FASTPLMS not in sys.path:
     sys.path.insert(0, _FASTPLMS)
 
-from dplm2_fastplms.modeling_dplm2 import (
+from fastplms.dplm2.modeling_dplm2 import (
     DPLM2ForMaskedLM,
     DPLM2ForSequenceClassification,
     DPLM2ForTokenClassification,
