@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import warnings
 from enum import Enum
-from typing import Any, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -9,9 +11,13 @@ from einops import rearrange, repeat
 try:
     from torch.nn.attention.flex_attention import BlockMask, create_block_mask, flex_attention
 except ImportError:
-    BlockMask = Any
     create_block_mask = None
     flex_attention = None
+
+    if TYPE_CHECKING:
+        from torch.nn.attention.flex_attention import BlockMask
+    else:
+        BlockMask = None
 
 try:
     from kernels import get_kernel
@@ -309,6 +315,7 @@ def kernels_attention_func(
     return pad_input(attn_output, indices, batch_size, seq_len)
 
 
+@torch.compiler.disable
 def build_attention_masks(
     attention_backend: AttentionBackend,
     batch_size: int,
@@ -330,11 +337,14 @@ def build_attention_masks(
                 f"attention_mask must be 2D or 4D, but received shape {tuple(attention_mask.shape)}."
             )
 
-    if attention_mask_4d is None and attention_mask_2d is not None:
-        attention_mask_4d = attention_mask_2d[:, None, :, None] & attention_mask_2d[:, None, None, :]
-
     if attention_mask_2d is None and attention_mask_4d is None and flex_block_mask is None:
         return None, None, None
+
+    if attention_mask_2d is None and attention_mask_4d is not None:
+        attention_mask_2d = attention_mask_4d[:, 0, 0, :]
+
+    if attention_backend == AttentionBackend.KERNELS:
+        return attention_mask_2d, None, None
 
     if attention_backend == AttentionBackend.FLEX and flex_block_mask is None and not output_attentions:
         assert attention_mask_2d is not None, (
@@ -344,20 +354,15 @@ def build_attention_masks(
         assert create_block_mask is not None, "Flex attention is unavailable in this environment."
         valid_lengths = attention_mask_2d.sum(dim=-1)
 
-        def mask_mod(batch_idx, head_idx, query_idx, key_idx):  # type: ignore[no-untyped-def]
-            del head_idx
+        def mask_mod(batch_idx, head_idx, query_idx, key_idx):
             return (query_idx < valid_lengths[batch_idx]) & (key_idx < valid_lengths[batch_idx])
 
-        flex_block_mask = create_block_mask(
-            mask_mod,
-            batch_size,
-            1,
-            seq_len,
-            seq_len,
-            device=device,
-        )
+        flex_block_mask = create_block_mask(mask_mod, batch_size, 1, seq_len, seq_len, device=device)
+        return attention_mask_2d, None, flex_block_mask
 
-    if attention_mask_2d is None and attention_mask_4d is not None:
-        attention_mask_2d = attention_mask_4d[:, 0, 0, :]
+    # SDPA / manual: only mask key dimension so padding query positions attend to
+    # real keys and produce valid outputs instead of NaN from softmax(-inf,...,-inf).
+    if attention_mask_4d is None and attention_mask_2d is not None:
+        attention_mask_4d = attention_mask_2d[:, None, None, :]
 
     return attention_mask_2d, attention_mask_4d, flex_block_mask
