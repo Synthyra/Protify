@@ -60,6 +60,7 @@ class ProbeArguments:
             output_s_max: bool = False,
             probe_pooling_types: List[str] = field(default_factory=lambda: ['mean', 'cls']),
             expansion_ratio: float = 8 / 3,
+            max_length: int = 2048,
             ### LoRA
             lora: bool = False,
             lora_r: int = 8,
@@ -89,6 +90,7 @@ class ProbeArguments:
         self.output_s_max = output_s_max
         self.pooling_types = probe_pooling_types
         self.expansion_ratio = expansion_ratio
+        self.max_seq_len = max_length
         self.lora = lora
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha

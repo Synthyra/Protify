@@ -20,6 +20,7 @@ class TransformerBlock(nn.Module):
         rotary: bool = True,
         use_bias: bool = False,
         attention_backend: str = "flex",
+        max_seq_len: int = 2048,
     ):
         super().__init__()
         self.attn_norm = LayerNorm(hidden_size, bias=use_bias)
@@ -29,6 +30,7 @@ class TransformerBlock(nn.Module):
             rotary=rotary,
             attention_backend=attention_backend,
             use_bias=use_bias,
+            max_seq_len=max_seq_len,
         )
         self.ffn = swiglu_ln_ffn(hidden_size, expansion_ratio, dropout, use_bias)
 
@@ -79,6 +81,7 @@ class Transformer(nn.Module):
         rotary: bool = True,
         use_bias: bool = False,
         attention_backend: str = "flex",
+        max_seq_len: int = 2048,
     ):
         super().__init__()
         self.layers = nn.ModuleList(
@@ -91,6 +94,7 @@ class Transformer(nn.Module):
                     rotary=rotary,
                     use_bias=use_bias,
                     attention_backend=attention_backend,
+                    max_seq_len=max_seq_len,
                 )
                 for _ in range(n_layers)
             ]
@@ -168,6 +172,7 @@ class TransformerConfig(PretrainedConfig):
         rotary: bool = True,
         attention_backend: str = "flex",
         output_s_max: bool = False,
+        max_seq_len: int = 2048,
         attn_implementation: Optional[str] = None,
         **kwargs,
     ):
@@ -180,6 +185,7 @@ class TransformerConfig(PretrainedConfig):
         self.rotary = rotary
         self.vocab_size = vocab_size
         self.output_s_max = output_s_max
+        self.max_seq_len = max_seq_len
         self.attention_backend = attn_implementation if attn_implementation is not None else attention_backend
 
 
@@ -198,6 +204,7 @@ class TransformerForMaskedLM(PreTrainedModel):
             dropout=config.dropout,
             rotary=config.rotary,
             attention_backend=config.attention_backend,
+            max_seq_len=config.max_seq_len,
         )
         self.lm_head = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size),

@@ -64,6 +64,7 @@ class TransformerProbeConfig(PretrainedConfig):
         add_token_ids: bool = False,
         attention_backend: str = "flex",
         output_s_max: bool = False,
+        max_seq_len: int = 2048,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -83,6 +84,7 @@ class TransformerProbeConfig(PretrainedConfig):
         self.add_token_ids = add_token_ids
         self.attention_backend = attention_backend
         self.output_s_max = output_s_max
+        self.max_seq_len = max_seq_len
 
 
 class TransformerForSequenceClassification(PreTrainedModel):
@@ -118,6 +120,7 @@ class TransformerForSequenceClassification(PreTrainedModel):
             rotary=config.rotary,
             use_bias=config.use_bias,
             attention_backend=config.attention_backend,
+            max_seq_len=config.max_seq_len,
         )
 
         classifier_input_size = config.hidden_size * len(config.pooling_types)
@@ -208,6 +211,7 @@ class TransformerForTokenClassification(PreTrainedModel):
             rotary=config.rotary,
             use_bias=config.use_bias,
             attention_backend=config.attention_backend,
+            max_seq_len=config.max_seq_len,
         )
 
         proj_dim = intermediate_correction_fn(expansion_ratio=2, hidden_size=config.num_labels)

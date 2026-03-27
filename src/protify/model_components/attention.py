@@ -59,6 +59,7 @@ class RotaryEmbedding(nn.Module):
         base: float = 10000.0,
         interleaved: bool = False,
         scaling_factor: float = 1.0,
+        max_seq_len: int = 2048,
         device: Optional[torch.device] = None,
     ):
         super().__init__()
@@ -66,50 +67,28 @@ class RotaryEmbedding(nn.Module):
         self.base = float(base)
         self.interleaved = interleaved
         self.scaling_factor = scaling_factor
-        self.device = device
-        self._seq_len_cached = 0
-        self._cos_cached = None
-        self._sin_cached = None
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        inv_freq = 1 / (
+        self.max_seq_len = max_seq_len
+        inv_freq = 1.0 / (
             self.base
             ** (
-                torch.arange(0, self.dim, 2, device=self.device, dtype=torch.float32)
+                torch.arange(0, self.dim, 2, device=device, dtype=torch.float32)
                 / self.dim
             )
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-    def _update_cos_sin_cache(
-        self,
-        seq_len: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> None:
-        if (
-            seq_len <= self._seq_len_cached
-            and self._cos_cached is not None
-            and self._sin_cached is not None
-            and self._cos_cached.device == device
-            and self._cos_cached.dtype == dtype
-        ):
-            return
-
-        self._seq_len_cached = seq_len
-        positions = torch.arange(seq_len, device=device, dtype=torch.float32) / self.scaling_factor
-        freqs = torch.outer(positions, self.inv_freq.to(device=device, dtype=torch.float32))
-        self._cos_cached = torch.cos(freqs).to(dtype)
-        self._sin_cached = torch.sin(freqs).to(dtype)
+        positions = torch.arange(max_seq_len, device=device, dtype=torch.float32) / self.scaling_factor
+        freqs = torch.outer(positions, inv_freq)
+        self.register_buffer("_cos_k", torch.cos(freqs), persistent=False)
+        self.register_buffer("_sin_k", torch.sin(freqs), persistent=False)
 
     def forward(self, query_states: torch.Tensor, key_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        self._update_cos_sin_cache(query_states.shape[1], query_states.device, query_states.dtype)
-        assert self._cos_cached is not None, "Cosine rotary cache is not initialized."
-        assert self._sin_cached is not None, "Sine rotary cache is not initialized."
+        seq_len = query_states.shape[1]
+        assert seq_len <= self.max_seq_len, f"seq_len {seq_len} exceeds max_seq_len {self.max_seq_len}"
+        cos = self._cos_k[:seq_len]
+        sin = self._sin_k[:seq_len]
         return (
-            apply_rotary_emb_torch(query_states, self._cos_cached, self._sin_cached, self.interleaved),
-            apply_rotary_emb_torch(key_states, self._cos_cached, self._sin_cached, self.interleaved),
+            apply_rotary_emb_torch(query_states, cos, sin, self.interleaved),
+            apply_rotary_emb_torch(key_states, cos, sin, self.interleaved),
         )
 
 
@@ -121,6 +100,7 @@ class MultiHeadAttention(nn.Module):
         rotary: bool = True,
         attention_backend: str = "flex",
         use_bias: bool = False,
+        max_seq_len: int = 2048,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -132,7 +112,7 @@ class MultiHeadAttention(nn.Module):
         self.k_proj = Linear(hidden_size, hidden_size, bias=use_bias)
         self.v_proj = Linear(hidden_size, hidden_size, bias=use_bias)
         self.out_proj = Linear(hidden_size, hidden_size, bias=use_bias)
-        self.rotary = RotaryEmbedding(self.d_head) if rotary else None
+        self.rotary = RotaryEmbedding(self.d_head, max_seq_len=max_seq_len) if rotary else None
         self.attention_backend = resolve_attention_backend(attention_backend)
 
     def set_attention_backend(self, attention_backend: str) -> None:
