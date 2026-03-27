@@ -85,6 +85,7 @@ class TrainerArguments:
             make_plots: bool = True,
             num_runs: int = 1,
             torch_compile: bool = True,
+            eval_accumulation_steps: int = 100,
             **kwargs
     ):
         self.model_save_dir = model_save_dir
@@ -110,6 +111,7 @@ class TrainerArguments:
         self.make_plots = make_plots
         self.num_runs = num_runs
         self.torch_compile = torch_compile
+        self.eval_accumulation_steps = eval_accumulation_steps
 
     def __call__(self, probe: Optional[bool] = True):
         if self.train_data_size > 350000:
@@ -157,6 +159,7 @@ class TrainerArguments:
             fp16=False,
             bf16=False,
             torch_compile=self.torch_compile,
+            eval_accumulation_steps=self.eval_accumulation_steps,
             **eval_strats
         )
 
