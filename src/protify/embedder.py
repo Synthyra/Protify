@@ -4,6 +4,7 @@ import os
 import math
 import queue
 import threading
+import time
 import torch
 import torch.multiprocessing as mp
 import warnings
@@ -12,7 +13,7 @@ import gzip
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 from huggingface_hub import hf_hub_download
 
 try:
@@ -60,6 +61,75 @@ def get_embedding_filename(model_name: str, matrix_embed: bool, pooling_types: L
         pooling_str = '_'.join(sorted(pooling_types))  # Sort for consistency
         base_name = f'{base_name}_{pooling_str}'
     return f'{base_name}.{extension}'
+
+
+def _make_embedding_progress(
+    dataloader: DataLoader,
+    padding: str,
+    n_warmup: int = 3,
+    n_calibration: int = 5,
+) -> Iterator[Tuple[int, Any]]:
+    """Progress-bar wrapper for embedding loops. Drop-in replacement for enumerate(dataloader).
+
+    When padding='max_length', all batches have uniform cost so plain tqdm works.
+    When padding='longest' (sorted longest-first), batch times vary dramatically.
+    In that case: yield warmup batches first (compiler warmup + OOM check on longest
+    sequences), then time mid-length calibration batches to estimate total ETA.
+
+    Keep in sync with fastplms/embedding_mixin.py and core/atlas/precomputed.py.
+    """
+    total = len(dataloader)
+    if padding == 'max_length' or total <= n_warmup + n_calibration:
+        for i, batch in tqdm(enumerate(dataloader), total=total, desc='Embedding batches'):
+            yield i, batch
+        return
+
+    dl_iter = iter(dataloader)
+
+    # Phase 1: warmup on longest batches (first n_warmup, since sorted longest-first)
+    warmup_bar = tqdm(range(n_warmup), desc='Warmup (longest batches)', leave=False)
+    for i in warmup_bar:
+        batch = next(dl_iter)
+        yield i, batch
+    warmup_bar.close()
+
+    # Phase 2: skip to middle of dataset for calibration timing
+    # We need to yield all intermediate batches too (they contain real data)
+    mid_start = total // 2
+    intermediate_bar = tqdm(
+        range(n_warmup, mid_start), desc='Embedding batches', leave=False,
+    )
+    for i in intermediate_bar:
+        batch = next(dl_iter)
+        yield i, batch
+    intermediate_bar.close()
+
+    # Phase 3: time calibration batches from the middle
+    calibration_times: List[float] = []
+    cal_bar = tqdm(range(n_calibration), desc='Calibrating ETA', leave=False)
+    for j in cal_bar:
+        t0 = time.perf_counter()
+        batch = next(dl_iter)
+        yield mid_start + j, batch
+        calibration_times.append(time.perf_counter() - t0)
+    cal_bar.close()
+
+    avg_time = sum(calibration_times) / len(calibration_times)
+    remaining_start = mid_start + n_calibration
+    remaining_count = total - remaining_start
+    estimated_total_seconds = avg_time * remaining_count
+
+    # Phase 4: remaining batches with calibrated ETA
+    main_bar = tqdm(
+        range(remaining_count),
+        desc='Embedding batches',
+        bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
+    )
+    main_bar.set_postfix_str(f'ETA ~{estimated_total_seconds:.0f}s (calibrated)')
+    for k in main_bar:
+        batch = next(dl_iter)
+        yield remaining_start + k, batch
+    main_bar.close()
 
 
 @dataclass
@@ -247,7 +317,7 @@ class Embedder:
             else:
                 return pooler(emb=residue_embeddings, attention_mask=attention_mask, attentions=attentions)
 
-        to_embed = sorted(to_embed, key=len)
+        to_embed = sorted(to_embed, key=len, reverse=True)
         dataset = SimpleProteinDataset(to_embed)
         dataloader = DataLoader(
             dataset,
@@ -276,13 +346,11 @@ class Embedder:
 
             def _sql_writer():
                 wc = conn.cursor()
-                batches_written = 0
                 while True:
                     item = sql_queue.get()
                     if item is None:
                         break
                     wc.executemany("INSERT OR REPLACE INTO embeddings VALUES (?, ?)", item)
-                    batches_written += 1
                     if sql_queue.qsize() == 0:
                         conn.commit()
                 conn.commit()
@@ -290,7 +358,7 @@ class Embedder:
             sql_writer_thread = threading.Thread(target=_sql_writer, daemon=True)
             sql_writer_thread.start()
 
-        for i, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc='Embedding batches'):
+        for i, batch in _make_embedding_progress(dataloader, self.padding):
             seqs = to_embed[i * self.batch_size:(i + 1) * self.batch_size]
             batch = {k: v.to(device) for k, v in batch.items() if isinstance(v, torch.Tensor)}
             if 'attention_mask' in batch:
@@ -352,7 +420,7 @@ class Embedder:
             embeddings_dict: Dict[str, torch.Tensor],
     ) -> Optional[Dict[str, torch.Tensor]]:
         n_gpus = torch.cuda.device_count()
-        to_embed = sorted(to_embed, key=len)
+        to_embed = sorted(to_embed, key=len, reverse=True)
         chunk_size = math.ceil(len(to_embed) / n_gpus)
         shards = [to_embed[i * chunk_size:(i + 1) * chunk_size] for i in range(n_gpus)]
         shards = [s for s in shards if len(s) > 0]
