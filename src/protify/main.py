@@ -158,7 +158,8 @@ def parse_arguments():
     parser.add_argument("--full_finetuning", action="store_true", default=False, help="Full finetuning (default: False).")
     parser.add_argument("--hybrid_probe", action="store_true", default=False, help="Hybrid probe (default: False).")
     parser.add_argument("--num_runs", type=int, default=1, help="Number of training runs with different seeds. Results will show mean±std across runs.")
-    
+    parser.add_argument("--no_compile", action="store_true", default=False, help="Disable torch.compile on probes during training (compiled by default).")
+
     # ----------------- ProteinGym Arguments ----------------- #
     parser.add_argument("--dms_ids", nargs="+", default=["all"],
                         help="ProteinGym DMS assay IDs to evaluate (space-separated), or 'all' to run all assays.")
@@ -467,6 +468,9 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
             self.full_args.embed_dtype = self.dtype_map[self.full_args.embed_dtype]
         else:
             self.full_args.embed_dtype = self.full_args.embed_dtype
+        if "torch_compile" not in self.full_args.__dict__:
+            no_compile = getattr(self.full_args, "no_compile", False)
+            self.full_args.torch_compile = not no_compile
         self.data_args = DataArguments(**self.full_args.__dict__)
         self.embedding_args = EmbeddingArguments(**self.full_args.__dict__)
         self.model_args = BaseModelArguments(**self.full_args.__dict__)

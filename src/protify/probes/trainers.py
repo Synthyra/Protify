@@ -84,6 +84,7 @@ class TrainerArguments:
             num_workers: int = 0,
             make_plots: bool = True,
             num_runs: int = 1,
+            torch_compile: bool = True,
             **kwargs
     ):
         self.model_save_dir = model_save_dir
@@ -108,6 +109,7 @@ class TrainerArguments:
         self.num_workers = num_workers
         self.make_plots = make_plots
         self.num_runs = num_runs
+        self.torch_compile = torch_compile
 
     def __call__(self, probe: Optional[bool] = True):
         if self.train_data_size > 350000:
@@ -154,6 +156,7 @@ class TrainerArguments:
             # Explicitly disable mixed precision training to prevent automatic fp16 conversion
             fp16=False,
             bf16=False,
+            torch_compile=self.torch_compile,
             **eval_strats
         )
 
