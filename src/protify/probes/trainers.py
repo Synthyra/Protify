@@ -114,12 +114,16 @@ class TrainerArguments:
         self.eval_accumulation_steps = eval_accumulation_steps
 
     def __call__(self, probe: Optional[bool] = True):
-        if self.train_data_size > 350000:
+        batch_size = self.probe_batch_size if probe else self.base_batch_size
+        grad_accum = self.probe_grad_accum if probe else self.base_grad_accum
+
+        if self.train_data_size > 250000:
+            eval_steps = max(1, int(100000 / (batch_size * grad_accum)))
             eval_strats = {
                 'eval_strategy': 'steps',
-                'eval_steps': 5000,
+                'eval_steps': eval_steps,
                 'save_strategy': 'steps',
-                'save_steps': 5000,
+                'save_steps': eval_steps,
             }
         else:
             eval_strats = {
@@ -132,8 +136,6 @@ class TrainerArguments:
         else:
             save_dir = self.model_save_dir
 
-        batch_size = self.probe_batch_size if probe else self.base_batch_size
-        grad_accum = self.probe_grad_accum if probe else self.base_grad_accum
         warmup_steps = 100 if probe else 1000
         return TrainingArguments(
             output_dir=save_dir,
