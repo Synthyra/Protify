@@ -620,7 +620,28 @@ class DataMixin:
                     if self._is_sigmoid_regression(list(train_set['labels'])):
                         label_type = 'sigmoid_regression'
                     num_labels = 1
-                else: # if classification, get the total number of leabels
+                elif label_type == 'multilabel':
+                    train_labels_list = list(train_set['labels'])
+                    label_lengths = set(len(lab) for lab in train_labels_list)
+                    if len(label_lengths) > 1:
+                        # Variable-length sparse index lists: convert to multi-hot
+                        all_labels = (
+                            list(train_set['labels'])
+                            + list(valid_set['labels'])
+                            + list(test_set['labels'])
+                        )
+                        num_labels = max(idx for lab in all_labels for idx in lab) + 1
+                        def _to_multihot(ex, n=num_labels):
+                            vec = [0] * n
+                            for idx in ex['labels']:
+                                vec[idx] = 1
+                            return {'labels': vec}
+                        train_set = train_set.map(_to_multihot)
+                        valid_set = valid_set.map(_to_multihot)
+                        test_set = test_set.map(_to_multihot)
+                    else:
+                        num_labels = len(train_labels_list[0])
+                else: # singlelabel classification
                     try:
                         train_labels_list = list(train_set['labels'])
                         num_labels = len(train_labels_list[0])
