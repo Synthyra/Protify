@@ -2,7 +2,7 @@ import torch
 import os
 import numpy as np
 from copy import deepcopy
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Union
 from huggingface_hub import HfApi
 from transformers import Trainer, TrainingArguments, EarlyStoppingCallback
 from dataclasses import dataclass
@@ -58,6 +58,42 @@ except ImportError:
     from .get_probe import get_probe
 
 
+def _compute_eval_accumulation_steps(
+    eval_dataset_size: int,
+    batch_size: int,
+    num_labels: int,
+    task_type: str,
+) -> Optional[int]:
+    """Compute eval_accumulation_steps based on prediction size vs GPU memory.
+
+    Returns None when all predictions fit comfortably on GPU (fastest path).
+    Otherwise returns a step count that keeps accumulated predictions under
+    5% of total GPU memory.
+    """
+    if task_type == 'regression':
+        output_dim = 1
+    elif task_type == 'binary':
+        output_dim = 2
+    else:
+        output_dim = num_labels
+
+    total_pred_bytes = eval_dataset_size * output_dim * 4  # float32
+
+    if torch.cuda.is_available():
+        props = torch.cuda.get_device_properties(0)
+        gpu_mem_bytes = props.total_mem
+    else:
+        gpu_mem_bytes = 8 * (1024 ** 3)  # 8 GB fallback
+
+    budget_bytes = gpu_mem_bytes * 0.05
+
+    if total_pred_bytes <= budget_bytes:
+        return None
+
+    bytes_per_step = batch_size * output_dim * 4
+    return max(1, int(budget_bytes / bytes_per_step))
+
+
 @dataclass
 class TrainerArguments:
     def __init__(
@@ -85,7 +121,7 @@ class TrainerArguments:
             make_plots: bool = True,
             num_runs: int = 1,
             torch_compile: bool = True,
-            eval_accumulation_steps: int = 100,
+            eval_accumulation_steps: Union[int, str] = "auto",
             **kwargs
     ):
         self.model_save_dir = model_save_dir
@@ -137,6 +173,17 @@ class TrainerArguments:
             save_dir = self.model_save_dir
 
         warmup_steps = 100 if probe else 1000
+
+        if self.eval_accumulation_steps == "auto":
+            eval_accum = _compute_eval_accumulation_steps(
+                eval_dataset_size=getattr(self, 'eval_dataset_size', 10000),
+                batch_size=batch_size,
+                num_labels=getattr(self, 'num_labels', 2),
+                task_type=self.task_type,
+            )
+        else:
+            eval_accum = self.eval_accumulation_steps
+
         return TrainingArguments(
             output_dir=save_dir,
             num_train_epochs=self.num_epochs,
@@ -161,7 +208,7 @@ class TrainerArguments:
             fp16=False,
             bf16=False,
             torch_compile=self.torch_compile,
-            eval_accumulation_steps=self.eval_accumulation_steps,
+            eval_accumulation_steps=eval_accum,
             **eval_strats
         )
 
@@ -265,6 +312,8 @@ Protify is an open source platform designed to simplify and democratize workflow
         tokenwise = self.probe_args.tokenwise
         compute_metrics = get_compute_metrics(task_type, tokenwise=tokenwise)
         self.trainer_args.train_data_size = len(train_dataset)
+        self.trainer_args.num_labels = self.probe_args.num_labels
+        self.trainer_args.eval_dataset_size = len(valid_dataset) if valid_dataset is not None else len(test_dataset)
         hf_trainer_args = self.trainer_args(probe=probe)
         ### TODO add options for optimizers and schedulers
         trainer = Trainer(
