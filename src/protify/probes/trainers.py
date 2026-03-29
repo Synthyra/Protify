@@ -81,7 +81,7 @@ def _compute_eval_accumulation_steps(
 
     if torch.cuda.is_available():
         props = torch.cuda.get_device_properties(0)
-        gpu_mem_bytes = props.total_mem
+        gpu_mem_bytes = props.total_memory
     else:
         gpu_mem_bytes = 8 * (1024 ** 3)  # 8 GB fallback
 
