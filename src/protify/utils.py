@@ -11,6 +11,8 @@ import numpy as np
 
 torch_load = partial(torch.load, map_location='cpu', weights_only=True)
 
+# Compact blob serialization constants
+# Canonical source: core/embed/blob.py. Keep in sync with fastplms/embedding_mixin.py.
 _COMPACT_VERSION = 0x01
 _DTYPE_TO_CODE = {torch.float16: 0, torch.bfloat16: 1, torch.float32: 2}
 _CODE_TO_DTYPE = {0: torch.float16, 1: torch.bfloat16, 2: torch.float32}
@@ -103,6 +105,43 @@ def embedding_blob_to_tensor(
     raise ValueError(
         "Blob is not in compact/PyTorch format and no fallback_shape provided for legacy float32."
     )
+
+
+class _SQLWriter:
+    """Context manager for async SQL embedding writes. Matches core/embed/storage.SQLEmbeddingWriter."""
+
+    def __init__(self, conn, queue_maxsize: int = 4) -> None:
+        import queue
+        import threading
+        self._conn = conn
+        self._queue = queue.Queue(maxsize=queue_maxsize)
+        self._thread: Optional[threading.Thread] = None
+        self._threading = threading
+
+    def __enter__(self) -> "_SQLWriter":
+        self._thread = self._threading.Thread(target=self._writer_loop, daemon=True)
+        self._thread.start()
+        return self
+
+    def write_batch(self, rows) -> None:
+        self._queue.put(rows)
+
+    def _writer_loop(self) -> None:
+        cursor = self._conn.cursor()
+        while True:
+            item = self._queue.get()
+            if item is None:
+                break
+            cursor.executemany("INSERT OR REPLACE INTO embeddings VALUES (?, ?)", item)
+            if self._queue.qsize() == 0:
+                self._conn.commit()
+        self._conn.commit()
+
+    def __exit__(self, *exc) -> None:
+        if self._thread is not None:
+            self._queue.put(None)
+            self._thread.join()
+            self._thread = None
 
 
 def clear_screen() -> None:

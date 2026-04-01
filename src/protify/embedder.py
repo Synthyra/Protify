@@ -21,13 +21,16 @@ try:
     from data.dataset_classes import SimpleProteinDataset
     from base_models.get_base_models import get_base_model
     from pooler import Pooler
-    from utils import torch_load, print_message, maybe_compile, tensor_to_embedding_blob, batch_tensor_to_blobs
+    from utils import torch_load, print_message, maybe_compile, tensor_to_embedding_blob, batch_tensor_to_blobs, _SQLWriter
 except ImportError:
     from .seed_utils import seed_worker, dataloader_generator, get_global_seed
     from .data.dataset_classes import SimpleProteinDataset
     from .base_models.get_base_models import get_base_model
     from .pooler import Pooler
-    from .utils import torch_load, print_message, maybe_compile, tensor_to_embedding_blob, batch_tensor_to_blobs
+    from .utils import (
+        torch_load, print_message, maybe_compile,
+        tensor_to_embedding_blob, batch_tensor_to_blobs, _SQLWriter,
+    )
 
 
 def build_collator(tokenizer: object, padding: str = 'max_length', max_length: int = 2048) -> Callable[[List[str]], Dict[str, torch.Tensor]]:
@@ -76,7 +79,7 @@ def _make_embedding_progress(
     In that case: yield warmup batches first (compiler warmup + OOM check on longest
     sequences), then time mid-length calibration batches to estimate total ETA.
 
-    Keep in sync with fastplms/embedding_mixin.py and core/atlas/precomputed.py.
+    Keep in sync with fastplms/embedding_mixin.py. Canonical source: core/embed/progress.py.
     """
     total = len(dataloader)
     if padding == 'max_length' or total <= n_warmup + n_calibration:
@@ -342,21 +345,8 @@ class Embedder:
             c.execute('PRAGMA cache_size=-64000')
             c.execute('CREATE TABLE IF NOT EXISTS embeddings (sequence text PRIMARY KEY, embedding blob)')
 
-            sql_queue = queue.Queue(maxsize=4)
-
-            def _sql_writer():
-                wc = conn.cursor()
-                while True:
-                    item = sql_queue.get()
-                    if item is None:
-                        break
-                    wc.executemany("INSERT OR REPLACE INTO embeddings VALUES (?, ?)", item)
-                    if sql_queue.qsize() == 0:
-                        conn.commit()
-                conn.commit()
-
-            sql_writer_thread = threading.Thread(target=_sql_writer, daemon=True)
-            sql_writer_thread.start()
+            sql_writer = _SQLWriter(conn)
+            sql_writer.__enter__()
 
         for i, batch in _make_embedding_progress(dataloader, self.padding):
             seqs = to_embed[i * self.batch_size:(i + 1) * self.batch_size]
@@ -392,7 +382,7 @@ class Embedder:
                 else:
                     blobs = batch_tensor_to_blobs(embeddings)
                     batch_rows = list(zip(seqs, blobs))
-                sql_queue.put(batch_rows)
+                sql_writer.write_batch(batch_rows)
             else:
                 for seq, emb, mask in zip(seqs, embeddings, attention_mask.cpu()):
                     if self.matrix_embed:
@@ -400,8 +390,7 @@ class Embedder:
                     embeddings_dict[seq] = emb.to(self.embed_dtype)
 
         if self.sql:
-            sql_queue.put(None)
-            sql_writer_thread.join()
+            sql_writer.__exit__(None, None, None)
             conn.close()
             return embeddings_dict
         
@@ -470,8 +459,8 @@ class Embedder:
             )
 
             local_dict = {}
-            worker_sql_queue = None
-            worker_sql_thread = None
+            worker_sql_writer = None
+            sql_conn = None
             if self.sql:
                 sql_conn = sqlite3.connect(save_path, timeout=30, check_same_thread=False)
                 sql_c = sql_conn.cursor()
@@ -479,22 +468,8 @@ class Embedder:
                 sql_c.execute('PRAGMA busy_timeout=30000')
                 sql_c.execute('PRAGMA synchronous=OFF')
                 sql_c.execute('PRAGMA cache_size=-64000')
-
-                worker_sql_queue = queue.Queue(maxsize=4)
-
-                def _worker_sql_writer():
-                    wc = sql_conn.cursor()
-                    while True:
-                        item = worker_sql_queue.get()
-                        if item is None:
-                            break
-                        wc.executemany("INSERT OR REPLACE INTO embeddings VALUES (?, ?)", item)
-                        if worker_sql_queue.qsize() == 0:
-                            sql_conn.commit()
-                    sql_conn.commit()
-
-                worker_sql_thread = threading.Thread(target=_worker_sql_writer, daemon=True)
-                worker_sql_thread.start()
+                worker_sql_writer = _SQLWriter(sql_conn)
+                worker_sql_writer.__enter__()
 
             with torch.inference_mode():
                 for i, batch_data in tqdm(
@@ -525,7 +500,7 @@ class Embedder:
                         else:
                             blobs = batch_tensor_to_blobs(embeddings)
                             batch_rows = list(zip(seqs, blobs))
-                        worker_sql_queue.put(batch_rows)
+                        worker_sql_writer.write_batch(batch_rows)
                     else:
                         for seq, emb, mask in zip(seqs, embeddings, attention_mask.cpu()):
                             if self.matrix_embed:
@@ -533,8 +508,7 @@ class Embedder:
                             local_dict[seq] = emb.to(self.embed_dtype)
 
             if self.sql:
-                worker_sql_queue.put(None)
-                worker_sql_thread.join()
+                worker_sql_writer.__exit__(None, None, None)
                 sql_conn.close()
             else:
                 result_dicts[rank] = local_dict
