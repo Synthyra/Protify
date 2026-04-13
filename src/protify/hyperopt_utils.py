@@ -42,12 +42,16 @@ class HyperoptModule:
         self.probe_keys = {
             'hidden_size','dropout','n_layers','pre_ln','classifier_size',
             'classifier_dropout','n_heads','rotary','use_bias','probe_pooling_types',
-            'lora','lora_r','lora_alpha','lora_dropout','probe_type','tokenwise', 'pooling_types'
+            'lora','lora_r','lora_alpha','lora_dropout','probe_type','tokenwise', 'pooling_types',
+            'add_token_ids','bom_k'
         }
         self.trainer_keys = {
             'lr','weight_decay','num_epochs','probe_batch_size',
             'base_batch_size','probe_grad_accum','base_grad_accum',
             'patience','seed'
+        }
+        self.full_args_keys = {
+            'random_pair_flipping',
         }
         self.embedding_keys = {
             'embedding_pooling_types'
@@ -85,6 +89,8 @@ class HyperoptModule:
                 setattr(self.mp.probe_args, k, v)
             if k in self.trainer_keys and hasattr(self.mp.trainer_args, k):
                 setattr(self.mp.trainer_args, k, v)
+            if k in self.full_args_keys and hasattr(self.mp.full_args, k):
+                setattr(self.mp.full_args, k, v)
             # Handle embedding pooling types
             if k in self.embedding_keys:
                 if k == 'embedding_pooling_types':
@@ -230,7 +236,7 @@ class HyperoptModule:
         linear_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'dropout', 'pre_ln', 'use_bias', 'probe_batch_size'}
         transformer_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'transformer_dropout', 'pre_ln',
                                      'classifier_dropout', 'classifier_size', 'use_bias', 'probe_pooling_types', 'embedding_pooling_types', 'probe_batch_size',
-                                     'bom_k', 'n_heads', 'probe_grad_accum'}
+                                     'bom_k', 'n_heads', 'probe_grad_accum', 'add_token_ids', 'random_pair_flipping'}
         lora_params = {'lora_r', 'lora_alpha', 'lora_dropout'}
         
         # Determine which parameters to include
