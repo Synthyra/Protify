@@ -339,6 +339,11 @@ class HyperoptModule:
                     "early_terminate": early_term,
                     "parameters": params_to_hyperopt,
                 }
+                cli_name = getattr(mp.full_args, 'sweep_name', None)
+                if cli_name:
+                    wb_sweep["name"] = cli_name
+                elif "name" in sweep_config:
+                    wb_sweep["name"] = sweep_config["name"]
                 sweep_id = wandb.sweep(sweep=wb_sweep, project=mp.full_args.wandb_project, entity=mp.full_args.wandb_entity)
                 wandb.agent(sweep_id, function=hyperopt_module.objective, count=mp.full_args.sweep_count)
 

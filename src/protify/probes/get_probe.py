@@ -59,6 +59,7 @@ class ProbeArguments:
             attention_backend: str = "flex",
             output_s_max: bool = False,
             probe_pooling_types: List[str] = field(default_factory=lambda: ['mean', 'cls']),
+            bom_k: int = 60,
             expansion_ratio: float = 8 / 3,
             max_length: int = 2048,
             ### LoRA
@@ -89,6 +90,7 @@ class ProbeArguments:
         self.attention_backend = attention_backend
         self.output_s_max = output_s_max
         self.pooling_types = probe_pooling_types
+        self.bom_k = bom_k
         self.expansion_ratio = expansion_ratio
         self.max_seq_len = max_length
         self.lora = lora
@@ -98,6 +100,12 @@ class ProbeArguments:
 
 
 def get_probe(args: ProbeArguments):
+    if 'bom' in args.pooling_types:
+        assert args.probe_type == 'transformer' and not args.tokenwise, (
+            f"'bom' pooling is only supported by the transformer sequence probe "
+            f"(probe_type='transformer', tokenwise=False). Got probe_type={args.probe_type!r}, "
+            f"tokenwise={args.tokenwise}."
+        )
     if args.probe_type == 'linear' and not args.tokenwise:
         config = LinearProbeConfig(**args.__dict__)
         return LinearProbe(config)

@@ -101,6 +101,7 @@ def parse_arguments():
     parser.add_argument("--attention_backend", choices=["kernels", "flex", "sdpa"], default="flex", help="Attention backend for transformer-style probes.")
     parser.add_argument("--output_s_max", action="store_true", default=False, help="Return s_max bounds from transformer-style probe attention layers.")
     parser.add_argument("--probe_pooling_types", nargs="+", default=["mean", "var"], help="Pooling types to use.")
+    parser.add_argument("--bom_k", type=int, default=60, help="K-mer window size for 'bom' pooling in the transformer probe. Default 60 is a cross-task compromise from Hoang & Singh 2025: peak for DPI (Section 4.3), mid-range of the {20,40,60,80,100} sweep on FLUO/BLAC, and close to the reported k=100 optimum for remote homology. Only used when 'bom' is in --probe_pooling_types.")
     parser.add_argument("--use_bias", action="store_true", default=False, help="Use bias in Linear layers (default: False)")
     parser.add_argument("--expansion_ratio", type=float, default=8/3, help="FFN expansion ratio for transformer probes.")
     parser.add_argument("--save_model", action="store_true", default=False, help="Save trained model (default: False).")
@@ -187,6 +188,7 @@ def parse_arguments():
     parser.add_argument("--sweep_metric_cls",type=str,default="eval_loss", help="Classification metric to optimize during sweep (e.g., eval_f1, eval_accuracy, eval_mcc)")
     parser.add_argument("--sweep_metric_reg",type=str,default="eval_loss", help="Regression metric to optimize during sweep (e.g., eval_r_squared, eval_spearman_rho, eval_pearson_rho)")
     parser.add_argument("--sweep_goal", type=str, default='minimize', choices=['maximize', 'minimize'], help="Goal for the sweep metric (maximize/minimize)")
+    parser.add_argument("--sweep_name", type=str, default=None, help="Display name for the W&B sweep. Overrides 'name' in the sweep YAML.")
     args = parser.parse_args()
 
     # Validate model_names vs model_paths/model_types mutual exclusivity

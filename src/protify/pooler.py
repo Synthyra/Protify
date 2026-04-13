@@ -6,6 +6,11 @@ from typing import Callable, Dict, List, Optional
 
 class Pooler:
     def __init__(self, pooling_types: List[str]) -> None:
+        assert 'bom' not in pooling_types, (
+            "'bom' pooling is only supported by the Transformer probe "
+            "(implemented in probes/transformer_probe.py). Pass --probe_type transformer "
+            "with --probe_pooling_types bom, and do not include 'bom' in --embedding_pooling_types."
+        )
         self.pooling_types = pooling_types
         self.pooling_options: Dict[str, Callable] = {
             'mean': self.mean_pooling,
