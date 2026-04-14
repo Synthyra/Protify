@@ -513,8 +513,6 @@ Protify is an open source platform designed to simplify and democratize workflow
         if self.embedding_args.sql:
             print('SQL enabled')
             if ppi:
-                if full:
-                    raise ValueError('Full matrix embeddings not currently supported for SQL and PPI') # TODO: Implement
                 DatasetClass = PairEmbedsLabelsDatasetFromDisk
                 CollatorClass = PairEmbedsLabelsCollator
             elif use_multi:
