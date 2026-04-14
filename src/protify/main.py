@@ -800,7 +800,10 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
                     probe_args.input_size = input_size * 2
                 else:
                     probe_args.input_size = input_size
-            
+                # PPI concatenates two proteins along the sequence dim, so matrix-mode
+                # PPI sequences can reach up to 2 * max_length.
+                probe_args.max_seq_len = self._max_length * 2 if (ppi and self._full) else self._max_length
+
                 self.probe_args.num_labels = num_labels
                 self.probe_args.task_type = label_type
                 ### TODO we currently need both, settings should probably be consolidated
@@ -869,7 +872,10 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
                     probe_args.input_size = input_size * 2
                 else:
                     probe_args.input_size = input_size
-            
+                # PPI concatenates two proteins along the sequence dim, so matrix-mode
+                # PPI sequences can reach up to 2 * max_length.
+                probe_args.max_seq_len = self._max_length * 2 if (ppi and self._full) else self._max_length
+
                 self.probe_args.num_labels = num_labels
                 self.probe_args.task_type = label_type
                 ### TODO we currently need both, settings should probably be consolidated

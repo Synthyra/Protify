@@ -182,7 +182,8 @@ class HyperoptModule:
                 input_dim = self.mp.get_embedding_dim_pth(self.emb_dict, test_seq, tokenizer)
             
             self.mp.probe_args.input_size = input_dim * 2 if (ppi and not self.mp._full) else input_dim
-        
+            self.mp.probe_args.max_seq_len = self.mp._max_length * 2 if (ppi and self.mp._full) else self.mp._max_length
+
         _, valid_metrics, test_metrics = self.train_model(sweep_mode=True)
         
         # Choose task-specific metric to optimize
@@ -291,6 +292,7 @@ class HyperoptModule:
                             emb_dict = torch_load(save_path)
                             input_dim = mp.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)
                         mp.probe_args.input_size = input_dim * 2 if (ppi and not mp._full) else input_dim
+                        mp.probe_args.max_seq_len = mp._max_length * 2 if (ppi and mp._full) else mp._max_length
                     if mp.full_args.full_finetuning:
                         _ = mp._run_full_finetuning(model_name, data_name, train_set, valid_set, test_set, ppi, sweep_mode=False)
                     elif mp.full_args.hybrid_probe:
@@ -318,6 +320,7 @@ class HyperoptModule:
                         emb_dict = torch_load(save_path)
                         input_dim = mp.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)
                     mp.probe_args.input_size = input_dim * 2 if (ppi and not mp._full) else input_dim
+                    mp.probe_args.max_seq_len = mp._max_length * 2 if (ppi and mp._full) else mp._max_length
 
                 # Save base args for restoring after each trial
                 base_probe = copy.deepcopy(mp.probe_args.__dict__)
