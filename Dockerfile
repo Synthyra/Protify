@@ -33,8 +33,8 @@ WORKDIR /app
 COPY requirements.txt .
 
 RUN pip install --upgrade pip setuptools
-RUN pip install -U -r requirements.txt
-RUN pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+RUN pip install -r requirements.txt
+RUN pip install --force-reinstall torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
 RUN pip install numpy==1.26.4
 
 COPY . .

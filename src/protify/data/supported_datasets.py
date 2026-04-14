@@ -64,6 +64,11 @@ supported_datasets = {
     'ecoli_expression': 'GleghornLab/ecoli_expression',
     'KSMoFinder-clustered': 'GleghornLab/ksmo_clustered',
     'KSMoFinder': 'GleghornLab/KSmo_fixed',
+    # bom-pooling paper (Hoang & Singh 2025) datasets
+    'FLUO': 'GleghornLab/bom_fluorescence',
+    'BLAC': 'GleghornLab/bom_blac',
+    'remote_homology': 'GleghornLab/bom_remote_homology',
+    'DPI': 'GleghornLab/bom_dpi',
 }
 
 internal_datasets = {

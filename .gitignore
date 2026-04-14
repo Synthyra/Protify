@@ -30,3 +30,5 @@ src/protify/results/*
 !requirements.txt
 !yamls/vector_benchmark.yaml
 !src/protify/base_models/e1_tokenizer.json
+/prepared
+/raw

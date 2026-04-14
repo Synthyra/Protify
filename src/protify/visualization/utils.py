@@ -193,6 +193,16 @@ DATASET_NAMES = {
     'taxon_genus': r'$taxonomy_{genus}$',
     'taxon_species': r'$taxonomy_{species}$',
 
+    # bom-pooling paper (Hoang & Singh 2025)
+    'FLUO': 'FLUO',
+    'bom_fluorescence': 'FLUO',
+    'BLAC': 'BLAC',
+    'bom_blac': 'BLAC',
+    'remote_homology': r'$RH_{SCOPe}$',
+    'bom_remote_homology': r'$RH_{SCOPe}$',
+    'DPI': 'DPI',
+    'bom_dpi': 'DPI',
+
     # Other datasets
     'plddt': r'$pLDDT_{AlphaFold2}$',
     'af2_plddt': r'$pLDDT_{AlphaFold2}$',
