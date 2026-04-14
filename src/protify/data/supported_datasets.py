@@ -45,7 +45,6 @@ supported_datasets = {
     'foldseek-fold': 'lhallee/foldseek_dataset', # prostt5
     'foldseek-inverse': 'lhallee/foldseek_dataset', # prostt5
     'ec-active': 'lhallee/ec_active',
-    'bernett_processed': 'lhallee/bernett_processed',
     'proteingym_zs': 'proteingym_zs', # not a path, data loading for this is currently handled in benchmarks/proteingym/data_loader.py
     'proteingym_supervised': 'proteingym_supervised', # not a path, data loading for this is currently handled in benchmarks/proteingym/data_loader.py
     'taxon_domain': 'GleghornLab/taxonomy_domain_0.4_clusters',

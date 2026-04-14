@@ -159,7 +159,6 @@ DATASET_NAMES = {
     'foldseek-fold': 'foldseek fold',
     'foldseek-inverse': 'foldseek inverse',
     'foldseek_dataset': 'foldseek',
-    'bernett_processed': r'$Bernett_{processed}$',
 
     # ProteinGym datasets
     'proteingym_zs': r'$ProteinGym_{zero-shot}$',

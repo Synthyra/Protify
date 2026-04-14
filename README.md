@@ -211,7 +211,6 @@ Protify is currently in beta. We're actively working to enhance features and doc
   | KSMoFinder | Kinase substrate prediction dataset. | SLC | Enzyme function prediction | No | Yes |
   | KSMoFinder-clustered | Clustered kinase substrate prediction dataset. | SLC | Enzyme function prediction | No | Yes |
   | plm-interact | PLM-Interact human PPI cross-species dataset. | SLC | PPI prediction | No | Yes |
-  | bernett_processed | Processed Bernett PPI benchmark dataset. | SLC | PPI prediction | No | Yes |
 </details>
 
 For more details about supported models and datasets, including programmatic access and command-line utilities, see the [Resource Listing Documentation](docs/resource_listing.md).
