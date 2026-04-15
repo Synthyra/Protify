@@ -420,6 +420,8 @@ class DataMixin:
 
     def _compute_balanced_weights_for(self, data_name, train_set, valid_set, test_set) -> None:
         """Pre-compute EpHod-style sample weights for train/valid/test once up front."""
+        if 'balanced_weights' not in self.__dict__:
+            self.balanced_weights = {}
         if 'trainer_args' not in self.__dict__ or self.trainer_args is None:
             return
         ta = self.trainer_args

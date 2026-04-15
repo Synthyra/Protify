@@ -398,6 +398,53 @@ def test_data_mixin_honors_explicit_bin_borders(monkeypatch):
     assert not np.allclose(w_explicit, w_default)
 
 
+def test_data_mixin_compute_balanced_weights_without_init():
+    """Regression guard: MainProcess skips DataMixin.__init__ due to super() chain,
+    so _compute_balanced_weights_for must self-initialize self.balanced_weights."""
+    try:
+        from protify.data.data_mixin import DataMixin
+    except ImportError:
+        try:
+            from ..data.data_mixin import DataMixin
+        except ImportError:
+            from src.protify.data.data_mixin import DataMixin
+
+    class FakeTrainerArgs:
+        def __init__(self):
+            self.balanced_regression_metrics = True
+            self.balanced_weight_method = 'bin_inv'
+            self.balanced_bin_borders = [5.0, 9.0]
+            self.balanced_n_resamples = 10
+            self.balanced_lds_bins = 100
+            self.balanced_lds_ks = 5
+            self.balanced_lds_sigma = 2.0
+
+    class FakeSplit:
+        def __init__(self, labels):
+            self._labels = labels
+        def __getitem__(self, key):
+            assert key == 'labels'
+            return self._labels
+
+    rng = np.random.default_rng(200)
+    labels = _skewed_labels(rng).tolist()
+    split = FakeSplit(labels)
+
+    # Bypass DataMixin.__init__ the same way MainProcess does.
+    mixin = DataMixin.__new__(DataMixin)
+    mixin.trainer_args = FakeTrainerArgs()
+    assert 'balanced_weights' not in mixin.__dict__
+
+    # Must not raise AttributeError
+    mixin._compute_balanced_weights_for('fake_dataset', split, split, split)
+
+    assert 'balanced_weights' in mixin.__dict__
+    assert 'fake_dataset' in mixin.balanced_weights
+    bw = mixin.balanced_weights['fake_dataset']
+    assert set(bw.keys()) >= {'train', 'valid', 'test', 'bin_borders', 'method'}
+    assert bw['bin_borders'] == [5.0, 9.0]
+
+
 def test_bin_borders_digitize_semantics():
     """Document np.digitize semantics that bin_borders relies on."""
     y = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0])
