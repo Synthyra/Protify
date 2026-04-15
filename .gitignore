@@ -32,3 +32,4 @@ src/protify/results/*
 !src/protify/base_models/e1_tokenizer.json
 /prepared
 /raw
+/scripts

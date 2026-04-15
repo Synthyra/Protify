@@ -15,6 +15,17 @@ else:
     pass
 
 
+def _parse_pooling_types(value):
+    """Accept a list, a single token ('mean'), or a hyphen/comma-joined string ('mean-cls', 'mean,var')."""
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    assert isinstance(value, str), f'pooling types must be str or list, got {type(value)}'
+    for sep in ('-', ','):
+        if sep in value:
+            return [tok.strip() for tok in value.split(sep) if tok.strip()]
+    return [value.strip()]
+
+
 class HyperoptModule:
     def __init__(
         self, 
@@ -82,7 +93,10 @@ class HyperoptModule:
             cfg['transformer_dropout'] = cfg['dropout']
 
         if 'probe_pooling_types' in cfg:
+            cfg['probe_pooling_types'] = _parse_pooling_types(cfg['probe_pooling_types'])
             cfg['pooling_types'] = cfg['probe_pooling_types']
+        if 'embedding_pooling_types' in cfg:
+            cfg['embedding_pooling_types'] = _parse_pooling_types(cfg['embedding_pooling_types'])
 
         for k, v in cfg.items():
             if k in self.probe_keys and hasattr(self.mp.probe_args, k):
@@ -94,8 +108,6 @@ class HyperoptModule:
             # Handle embedding pooling types
             if k in self.embedding_keys:
                 if k == 'embedding_pooling_types':
-                    if isinstance(v, str):
-                        v = [v]
                     self.mp.embedding_args.pooling_types = v
 
     def train_model(self, sweep_mode=True):
