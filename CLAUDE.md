@@ -81,6 +81,8 @@ _FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 
 **Training modes:** probe-only (frozen PLM), full fine-tune, hybrid, scikit (embeddings → sklearn), W&B hyperparameter sweep.
 
+**Balanced regression metrics (EpHod-style):** For `task_type in ('regression', 'sigmoid_regression')`, Protify reports a second suite of weighted and resampled metrics (weighted RMSE / R^2, resampled Pearson / Spearman, binned MCC / F1 / ROC-AUC) alongside standard ones. Sample weights come from the training label distribution (schemes: `bin_inv`, `bin_inv_sqrt`, `LDS_inv`, `LDS_inv_sqrt`, `LDS_extreme`, `none`) and are pre-computed once in `DataMixin._compute_balanced_weights_for`. Bin borders default to tertiles; override with `--balanced_bin_borders 5 9` (pH). Implementation in `src/protify/metrics_balanced.py`.
+
 **Registries (authoritative source of truth):**
 - Supported models: `base_models/supported_models.py` (`currently_supported_models` list, 45 entries)
 - Supported datasets: `data/supported_datasets.py` (`supported_datasets` dict, 67 entries)

@@ -42,6 +42,7 @@ try:
     from visualization.ci_plots import regression_ci_plot, classification_ci_plot
     from utils import print_message
     from metrics import get_compute_metrics
+    from metrics_balanced import compute_balanced_regression_metrics
     from seed_utils import set_global_seed
     from probes.get_probe import get_probe
 except ImportError:
@@ -54,6 +55,7 @@ except ImportError:
     from ..visualization.ci_plots import regression_ci_plot, classification_ci_plot
     from ..utils import print_message
     from ..metrics import get_compute_metrics
+    from ..metrics_balanced import compute_balanced_regression_metrics
     from ..seed_utils import set_global_seed
     from .get_probe import get_probe
 
@@ -122,6 +124,13 @@ class TrainerArguments:
             num_runs: int = 1,
             torch_compile: bool = True,
             eval_accumulation_steps: Union[int, str] = "auto",
+            balanced_regression_metrics: bool = True,
+            balanced_weight_method: str = 'bin_inv',
+            balanced_bin_borders: Optional[List[float]] = None,
+            balanced_n_resamples: int = 100,
+            balanced_lds_bins: int = 100,
+            balanced_lds_ks: int = 5,
+            balanced_lds_sigma: float = 2.0,
             **kwargs
     ):
         self.model_save_dir = model_save_dir
@@ -148,6 +157,13 @@ class TrainerArguments:
         self.num_runs = num_runs
         self.torch_compile = torch_compile
         self.eval_accumulation_steps = eval_accumulation_steps
+        self.balanced_regression_metrics = balanced_regression_metrics
+        self.balanced_weight_method = balanced_weight_method
+        self.balanced_bin_borders = balanced_bin_borders
+        self.balanced_n_resamples = balanced_n_resamples
+        self.balanced_lds_bins = balanced_lds_bins
+        self.balanced_lds_ks = balanced_lds_ks
+        self.balanced_lds_sigma = balanced_lds_sigma
 
     def __call__(self, probe: Optional[bool] = True):
         batch_size = self.probe_batch_size if probe else self.base_batch_size
@@ -335,6 +351,14 @@ Protify is an open source platform designed to simplify and democratize workflow
         valid_metrics = trainer.evaluate(valid_dataset)
         print_message(f'Final validation metrics: {valid_metrics}')
 
+        y_pred_valid, y_true_valid, _vm_raw = trainer.predict(valid_dataset)
+        if isinstance(y_pred_valid, tuple):
+            y_pred_valid = y_pred_valid[0]
+        if isinstance(y_true_valid, tuple):
+            y_true_valid = y_true_valid[0]
+        y_pred_valid = y_pred_valid.astype(np.float32)
+        y_true_valid = y_true_valid.astype(np.float32)
+
         y_pred, y_true, test_metrics = trainer.predict(test_dataset)
         if isinstance(y_pred, tuple):
             y_pred = y_pred[0]
@@ -342,13 +366,40 @@ Protify is an open source platform designed to simplify and democratize workflow
             y_true = y_true[0]
 
         y_pred, y_true = y_pred.astype(np.float32), y_true.astype(np.float32)
-        
+
         # Remove singleton dimension if present
         if y_pred.ndim == 3 and y_pred.shape[1] == 1:
             y_pred = y_pred.squeeze(1)
         if y_true.ndim == 3 and y_true.shape[1] == 1:
             y_true = y_true.squeeze(1)
-        
+
+        if task_type in ('regression', 'sigmoid_regression') and self.trainer_args.balanced_regression_metrics:
+            bw_store = self.balanced_weights if 'balanced_weights' in self.__dict__ else None
+            bw = bw_store[data_name] if (bw_store is not None and data_name in bw_store) else None
+            if bw is not None:
+                bin_borders = bw['bin_borders']
+                n_res = self.trainer_args.balanced_n_resamples
+                valid_bal = compute_balanced_regression_metrics(
+                    y_true_valid.flatten(),
+                    y_pred_valid.flatten(),
+                    bw['valid'],
+                    bin_borders=bin_borders,
+                    n_resamples=n_res,
+                    seed=self.trainer_args.seed,
+                )
+                test_bal = compute_balanced_regression_metrics(
+                    y_true.flatten(),
+                    y_pred.flatten(),
+                    bw['test'],
+                    bin_borders=bin_borders,
+                    n_resamples=n_res,
+                    seed=self.trainer_args.seed,
+                )
+                for k, v in valid_bal.items():
+                    valid_metrics[f'balanced_{k}'] = v
+                for k, v in test_bal.items():
+                    test_metrics[f'balanced_{k}'] = v
+
         test_metrics['training_time_seconds'] = train_runtime
         print_message(f'y_pred: {y_pred.shape}\ny_true: {y_true.shape}\nFinal test metrics: \n{test_metrics}\n')
 

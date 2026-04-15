@@ -304,10 +304,10 @@ class Embedder:
         model = maybe_compile(model, dynamic=dynamic)
         device = self.device
         collate_fn = build_collator(tokenizer, padding=self.padding, max_length=self.max_length)
-        print_message(f'Pooling types: {self.pooling_types}')
         if self.matrix_embed:
             pooler = None
         else:
+            print_message(f'Pooling types: {self.pooling_types}')
             pooler = Pooler(self.pooling_types)
 
         def _get_embeddings(

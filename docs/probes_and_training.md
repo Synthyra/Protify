@@ -110,6 +110,11 @@ Defined in [trainers.py](../src/protify/probes/trainers.py).
 | `num_workers` | int | 0 | DataLoader workers. |
 | `make_plots` | bool | True | Generate CI plots. |
 | `num_runs` | int | 1 | Number of seeds; aggregate mean and std. |
+| `balanced_regression_metrics` | bool | True | Compute EpHod-style balanced metrics for regression tasks. See [Balanced regression metrics](#balanced-regression-metrics). |
+| `balanced_weight_method` | str | bin_inv | One of `none`, `bin_inv`, `bin_inv_sqrt`, `LDS_inv`, `LDS_inv_sqrt`, `LDS_extreme`. |
+| `balanced_bin_borders` | List[float] | None | Explicit bin borders for digitization (e.g. `[5, 9]` for pH). None uses 1/3 and 2/3 quantiles of training labels. |
+| `balanced_n_resamples` | int | 100 | Number of weight-draws for resampled Pearson/Spearman. |
+| `balanced_lds_bins`, `balanced_lds_ks`, `balanced_lds_sigma` | int, int, float | 100, 5, 2.0 | LDS kernel hyperparameters (only used for `LDS_*` methods). |
 
 Calling `trainer_args(probe=True)` or `trainer_args(probe=False)` returns HuggingFace `TrainingArguments` with the appropriate batch size and grad accumulation.
 
@@ -127,6 +132,61 @@ Calling `trainer_args(probe=True)` or `trainer_args(probe=False)` returns Huggin
 ## num_runs aggregation
 
 When `num_runs > 1`, the trainer runs training `num_runs` times with different seeds, collects metrics (e.g. test loss, spearman), and computes mean and std. The best run (by test loss or selected metric) is used for optional CI plots and reporting. Metrics logged include `*_mean` and `*_std` variants.
+
+---
+
+## Balanced regression metrics
+
+For regression tasks, Protify reports a second set of metrics designed to handle skewed label distributions, ported from EpHod (Gado et al., *Nature Machine Intelligence* 2025; [github.com/jafetgado/EpHod](https://github.com/jafetgado/EpHod)). The motivation: when ~75% of labels cluster in a narrow region (e.g. pH 6-8), standard RMSE, R^2, Pearson, and Spearman are dominated by the mode and understate error on rare extremes.
+
+Sample weights are derived from the **training** labels once at dataset-load time and reused for valid and test scoring. Implementation in [src/protify/metrics_balanced.py](../src/protify/metrics_balanced.py).
+
+### Weighting schemes
+
+| Method | Description |
+|--------|-------------|
+| `none` | Uniform weights (mean 1). |
+| `bin_inv` | Digitize labels with `bin_borders`; weight = 1 / bin_count. **EpHod default.** |
+| `bin_inv_sqrt` | `sqrt(bin_inv)` (milder upweighting). |
+| `LDS_inv` | Label Distribution Smoothing (Yang et al. 2021): Gaussian-smoothed histogram over 100 bins; weight = 1 / smoothed density. |
+| `LDS_inv_sqrt` | `sqrt(LDS_inv)`. |
+| `LDS_extreme` | `LDS_inv` with rare values (`y <= borders[0]` or `y >= borders[-1]`) doubled. |
+
+All schemes are normalized to mean 1.
+
+### Reported metrics (`balanced_` prefix)
+
+- `balanced_weighted_rmse`, `balanced_weighted_r_squared`
+- `balanced_weighted_pearson_rho`, `balanced_weighted_spearman_rho` (mean over `n_resamples` weight-balanced bootstrap draws)
+- `balanced_weighted_pearson_rho_std`, `balanced_weighted_spearman_rho_std`
+- `balanced_binned_mcc` (multi-class MCC on digitized labels)
+- `balanced_binned_f1_per_bin`, `balanced_binned_f1_mean` (one-vs-rest F1)
+- `balanced_binned_roc_auc_per_bin`, `balanced_binned_roc_auc_mean` (one-vs-rest ROC-AUC)
+- `balanced_bin_borders`, `balanced_n_bins`, `balanced_n_resamples` (echoed for transparency)
+
+### Example: pH regression with explicit borders
+
+```bash
+py -m main --model_names ESM2-8 --data_names EpHod \
+    --balanced_weight_method bin_inv \
+    --balanced_bin_borders 5 9
+```
+
+### Example: auto bin borders (tertiles)
+
+Omit `--balanced_bin_borders` to use `[quantile(y_train, 1/3), quantile(y_train, 2/3)]`:
+
+```bash
+py -m main --model_names ESM2-8 --data_names MyRegressionDataset \
+    --balanced_weight_method bin_inv_sqrt
+```
+
+### Disable
+
+```bash
+py -m main --model_names ESM2-8 --data_names MyRegressionDataset \
+    --no_balanced_regression_metrics
+```
 
 ---
 

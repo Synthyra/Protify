@@ -104,3 +104,12 @@ patience: !!int 1
 full_finetuning: !!bool false
 hybrid_probe: !!bool false
 num_runs: !!int 1
+
+# Balanced regression metrics (EpHod-style; ignored for non-regression tasks)
+balanced_regression_metrics: !!bool true
+balanced_weight_method: bin_inv  # none | bin_inv | bin_inv_sqrt | LDS_inv | LDS_inv_sqrt | LDS_extreme
+balanced_bin_borders: null  # e.g. [5, 9] for pH; null -> 1/3 and 2/3 quantiles of train labels
+balanced_n_resamples: !!int 100
+balanced_lds_bins: !!int 100
+balanced_lds_ks: !!int 5
+balanced_lds_sigma: !!float 2.0

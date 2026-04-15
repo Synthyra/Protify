@@ -13,10 +13,12 @@ try:
     from utils import print_message, embedding_blob_to_tensor
     from seed_utils import get_global_seed
     from embedder import get_embedding_filename
+    from metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
 except ImportError:
     from ..utils import print_message, embedding_blob_to_tensor
     from ..seed_utils import get_global_seed
     from ..embedder import get_embedding_filename
+    from ..metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
 from .supported_datasets import supported_datasets, standard_data_benchmark, vector_benchmark
 from .utils import (
     AA_SET,
@@ -108,6 +110,7 @@ class DataArguments:
 class DataMixin:
     def __init__(self, data_args: Optional[DataArguments] = None) -> None:
         # intialize defaults
+        self.balanced_weights: Dict[str, Dict] = {}
         self._sql = False
         self._full = False
         self._max_length = 1024
@@ -415,6 +418,67 @@ class DataMixin:
                     return True
         return False
 
+    def _compute_balanced_weights_for(self, data_name, train_set, valid_set, test_set) -> None:
+        """Pre-compute EpHod-style sample weights for train/valid/test once up front."""
+        if 'trainer_args' not in self.__dict__ or self.trainer_args is None:
+            return
+        ta = self.trainer_args
+        if 'balanced_regression_metrics' not in ta.__dict__ or not ta.balanced_regression_metrics:
+            return
+
+        def _extract(split):
+            labels = np.asarray(list(split['labels']), dtype=object)
+            flat = []
+            for item in labels:
+                if isinstance(item, (list, tuple, np.ndarray)):
+                    arr = np.asarray(item).flatten()
+                    flat.extend([float(v) for v in arr if v != -100])
+                else:
+                    flat.append(float(item))
+            return np.asarray(flat, dtype=np.float64)
+
+        train_labels = _extract(train_set)
+        valid_labels = _extract(valid_set)
+        test_labels = _extract(test_set)
+
+        if len(train_labels) < 2 or float(np.max(train_labels)) == float(np.min(train_labels)):
+            print_message(f'Skipping balanced weights for {data_name} (degenerate label distribution)')
+            return
+
+        bin_borders = ta.balanced_bin_borders if ta.balanced_bin_borders else _default_bin_borders(train_labels)
+        method = ta.balanced_weight_method
+
+        train_w = compute_sample_weights(
+            train_labels,
+            method=method,
+            bin_borders=bin_borders,
+            lds_bins=ta.balanced_lds_bins,
+            lds_ks=ta.balanced_lds_ks,
+            lds_sigma=ta.balanced_lds_sigma,
+        )
+        valid_w = apply_weights_from_reference(
+            valid_labels, train_labels,
+            method=method, bin_borders=bin_borders,
+            lds_bins=ta.balanced_lds_bins, lds_ks=ta.balanced_lds_ks, lds_sigma=ta.balanced_lds_sigma,
+        )
+        test_w = apply_weights_from_reference(
+            test_labels, train_labels,
+            method=method, bin_borders=bin_borders,
+            lds_bins=ta.balanced_lds_bins, lds_ks=ta.balanced_lds_ks, lds_sigma=ta.balanced_lds_sigma,
+        )
+
+        self.balanced_weights[data_name] = {
+            'train': train_w,
+            'valid': valid_w,
+            'test': test_w,
+            'bin_borders': list(bin_borders),
+            'method': method,
+        }
+        print_message(
+            f'Balanced weights for {data_name}: method={method} bin_borders={bin_borders} '
+            f'sizes train/valid/test={len(train_w)}/{len(valid_w)}/{len(test_w)}'
+        )
+
     def process_datasets(
             self,
             hf_datasets: List[Tuple[Dataset, Dataset, Dataset, bool]],
@@ -651,6 +715,9 @@ class DataMixin:
                         full_list = np.arange(0, max_label+1)
                         num_labels = len(full_list)
             datasets[data_name] = (train_set, valid_set, test_set, num_labels, label_type, ppi)
+
+            if label_type in ('regression', 'sigmoid_regression'):
+                self._compute_balanced_weights_for(data_name, train_set, valid_set, test_set)
 
         print(f'Label type: {label_type}')
         print(f'Number of labels: {num_labels}')

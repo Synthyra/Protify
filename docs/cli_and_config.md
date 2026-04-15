@@ -157,6 +157,20 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--hybrid_probe` | flag | False | Hybrid probe then finetune. |
 | `--num_runs` | int | 1 | Number of seeds; report mean and std. |
 
+### Balanced regression metrics (EpHod-style)
+
+Applied only for regression tasks. See [Probes and Training > Balanced regression metrics](probes_and_training.md#balanced-regression-metrics) for details.
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--balanced_regression_metrics` / `--no_balanced_regression_metrics` | flag | True | Toggle computation. |
+| `--balanced_weight_method` | choice | `bin_inv` | `none`, `bin_inv`, `bin_inv_sqrt`, `LDS_inv`, `LDS_inv_sqrt`, `LDS_extreme`. |
+| `--balanced_bin_borders` | list[float] | None | Explicit bin borders (e.g. `5 9` for pH). None uses training-label tertiles. |
+| `--balanced_n_resamples` | int | 100 | Weight-bootstrap draws for resampled Pearson/Spearman. |
+| `--balanced_lds_bins` | int | 100 | LDS histogram bin count. |
+| `--balanced_lds_ks` | int | 5 | LDS Gaussian kernel size. |
+| `--balanced_lds_sigma` | float | 2.0 | LDS Gaussian sigma. |
+
 ### ProteinGym
 
 | Argument | Type | Default | Description |

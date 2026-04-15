@@ -161,6 +161,25 @@ def parse_arguments():
     parser.add_argument("--num_runs", type=int, default=1, help="Number of training runs with different seeds. Results will show mean±std across runs.")
     parser.add_argument("--no_compile", action="store_true", default=False, help="Disable torch.compile on probes during training (compiled by default).")
 
+    # ----------------- Balanced Regression Metrics (EpHod-style) ----------------- #
+    parser.add_argument("--balanced_regression_metrics", action="store_true", default=True,
+                        help="Compute EpHod-style balanced regression metrics on valid/test (default: True).")
+    parser.add_argument("--no_balanced_regression_metrics", dest="balanced_regression_metrics", action="store_false",
+                        help="Disable balanced regression metrics.")
+    parser.add_argument("--balanced_weight_method", type=str, default='bin_inv',
+                        choices=['none', 'bin_inv', 'bin_inv_sqrt', 'LDS_inv', 'LDS_inv_sqrt', 'LDS_extreme'],
+                        help="Weighting scheme for balanced regression metrics.")
+    parser.add_argument("--balanced_bin_borders", type=float, nargs='+', default=None,
+                        help="Explicit bin borders for balanced metrics (e.g., 5 9 for pH). Default: 1/3 and 2/3 quantiles of training labels.")
+    parser.add_argument("--balanced_n_resamples", type=int, default=100,
+                        help="Number of resamples for balanced Pearson/Spearman (default: 100).")
+    parser.add_argument("--balanced_lds_bins", type=int, default=100,
+                        help="Number of bins for LDS density estimation.")
+    parser.add_argument("--balanced_lds_ks", type=int, default=5,
+                        help="Kernel size for LDS Gaussian smoothing.")
+    parser.add_argument("--balanced_lds_sigma", type=float, default=2.0,
+                        help="Sigma for LDS Gaussian smoothing.")
+
     # ----------------- ProteinGym Arguments ----------------- #
     parser.add_argument("--dms_ids", nargs="+", default=["all"],
                         help="ProteinGym DMS assay IDs to evaluate (space-separated), or 'all' to run all assays.")
