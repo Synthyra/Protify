@@ -41,7 +41,7 @@ try:
     )
     from visualization.ci_plots import regression_ci_plot, classification_ci_plot
     from utils import print_message
-    from metrics import get_compute_metrics
+    from metrics import get_compute_metrics, get_compute_metrics_with_balanced
     from metrics_balanced import compute_balanced_regression_metrics
     from seed_utils import set_global_seed
     from probes.get_probe import get_probe
@@ -54,7 +54,7 @@ except ImportError:
     )
     from ..visualization.ci_plots import regression_ci_plot, classification_ci_plot
     from ..utils import print_message
-    from ..metrics import get_compute_metrics
+    from ..metrics import get_compute_metrics, get_compute_metrics_with_balanced
     from ..metrics_balanced import compute_balanced_regression_metrics
     from ..seed_utils import set_global_seed
     from .get_probe import get_probe
@@ -345,6 +345,22 @@ Protify is an open source platform designed to simplify and democratize workflow
         metrics = trainer.evaluate(test_dataset)
         print_message(f'Initial metrics: {metrics}')
 
+        bw_store = self.balanced_weights if 'balanced_weights' in self.__dict__ else None
+        bw = bw_store[data_name] if (bw_store is not None and data_name in bw_store) else None
+        balanced_active = (
+            task_type in ('regression', 'sigmoid_regression')
+            and self.trainer_args.balanced_regression_metrics
+            and bw is not None
+        )
+        if balanced_active:
+            trainer.compute_metrics = get_compute_metrics_with_balanced(
+                compute_metrics,
+                weights=bw['valid'],
+                bin_borders=bw['bin_borders'],
+                n_resamples=self.trainer_args.balanced_n_resamples,
+                seed=self.trainer_args.seed,
+            )
+
         train_output = trainer.train()
         train_runtime = train_output.metrics.get('train_runtime', 0.0)
 
@@ -359,6 +375,8 @@ Protify is an open source platform designed to simplify and democratize workflow
         y_pred_valid = y_pred_valid.astype(np.float32)
         y_true_valid = y_true_valid.astype(np.float32)
 
+        if balanced_active:
+            trainer.compute_metrics = compute_metrics
         y_pred, y_true, test_metrics = trainer.predict(test_dataset)
         if isinstance(y_pred, tuple):
             y_pred = y_pred[0]
