@@ -24,12 +24,12 @@ except ImportError:
         from model_components.mlp import intermediate_correction_fn
 
 try:
-    from ..model_components.transformer import Transformer
+    from ..model_components.transformer import Transformer, _UNSET, _resolve_head_size
 except ImportError:
     try:
-        from protify.model_components.transformer import Transformer
+        from protify.model_components.transformer import Transformer, _UNSET, _resolve_head_size
     except ImportError:
-        from model_components.transformer import Transformer
+        from model_components.transformer import Transformer, _UNSET, _resolve_head_size
 
 from .losses import get_loss_fct
 
@@ -118,7 +118,7 @@ class TransformerProbeConfig(PretrainedConfig):
         classifier_dropout: float = 0.2,
         num_labels: int = 2,
         n_layers: int = 1,
-        n_heads: int = 4,
+        head_size=_UNSET,
         task_type: str = "singlelabel",
         rotary: bool = True,
         pre_ln: bool = True,
@@ -131,6 +131,8 @@ class TransformerProbeConfig(PretrainedConfig):
         bom_k: int = 60,
         **kwargs,
     ):
+        legacy_n_heads = kwargs.pop("n_heads", None)
+        head_size = _resolve_head_size(hidden_size, head_size, legacy_n_heads, default_head_size=128)
         super().__init__(**kwargs)
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -139,7 +141,8 @@ class TransformerProbeConfig(PretrainedConfig):
         self.classifier_dropout = classifier_dropout
         self.task_type = task_type
         self.num_labels = num_labels
-        self.n_heads = n_heads
+        self.head_size = head_size
+        self.n_heads = hidden_size // head_size
         self.n_layers = n_layers
         self.rotary = rotary
         self.pre_ln = pre_ln

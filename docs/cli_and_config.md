@@ -96,7 +96,8 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--classifier_size` | int | 4096 | Classifier feed-forward dimension. |
 | `--transformer_dropout` | float | 0.1 | Transformer layer dropout. |
 | `--classifier_dropout` | float | 0.2 | Classifier dropout. |
-| `--n_heads` | int | 4 | Number of attention heads. |
+| `--head_size` | int | 128 | Attention head dimension. `n_heads` is derived as `hidden_size // head_size` and `hidden_size % head_size == 0` is asserted. |
+| `--n_heads` | int | None | DEPRECATED. Use `--head_size`. If supplied, emits a `DeprecationWarning` and `head_size` is derived as `hidden_size // n_heads`. Conflicts with an explicit `--head_size` raise an assertion. |
 | `--rotary` | flag | True | Use rotary embeddings (store_false to disable). |
 | `--attention_backend` | choice | flex | kernels, flex, sdpa. |
 | `--output_s_max` | flag | False | Return s_max from attention layers. |

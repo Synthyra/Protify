@@ -64,7 +64,8 @@ Defined in [get_probe.py](../src/protify/probes/get_probe.py). Key attributes (C
 | `classifier_size` | int | 4096 | Classifier FF dimension. |
 | `transformer_dropout` | float | 0.1 | Transformer dropout. |
 | `classifier_dropout` | float | 0.2 | Classifier dropout. |
-| `n_heads` | int | 4 | Attention heads. |
+| `head_size` | int | 128 | Attention head dimension; `n_heads = hidden_size // head_size`. |
+| `n_heads` | int | None | DEPRECATED (kept for backwards compatibility with old configs/checkpoints). Set `head_size` instead. |
 | `rotary` | bool | True | Rotary embeddings. |
 | `attention_backend` | str | flex | kernels, flex, sdpa. |
 | `output_s_max` | bool | False | Return s_max from attention. |

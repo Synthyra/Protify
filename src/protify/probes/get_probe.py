@@ -54,7 +54,7 @@ class ProbeArguments:
             classifier_size: int = 4096,
             transformer_dropout: float = 0.1,
             classifier_dropout: float = 0.2,
-            n_heads: int = 4,
+            head_size: int = 128,
             rotary: bool = True,
             attention_backend: str = "flex",
             output_s_max: bool = False,
@@ -85,7 +85,10 @@ class ProbeArguments:
         self.classifier_size = classifier_size
         self.transformer_dropout = transformer_dropout
         self.classifier_dropout = classifier_dropout
-        self.n_heads = n_heads
+        self.head_size = head_size
+        legacy_n_heads = kwargs.pop("n_heads", None)
+        if legacy_n_heads is not None and self.hidden_size % legacy_n_heads == 0:
+            self.head_size = self.hidden_size // legacy_n_heads
         self.rotary = rotary
         self.attention_backend = attention_backend
         self.output_s_max = output_s_max

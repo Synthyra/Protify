@@ -52,7 +52,7 @@ class HyperoptModule:
         
         self.probe_keys = {
             'hidden_size','dropout','n_layers','pre_ln','classifier_size',
-            'classifier_dropout','n_heads','rotary','use_bias','probe_pooling_types',
+            'classifier_dropout','head_size','rotary','use_bias','probe_pooling_types',
             'lora','lora_r','lora_alpha','lora_dropout','probe_type','tokenwise', 'pooling_types',
             'add_token_ids','bom_k'
         }
@@ -68,7 +68,7 @@ class HyperoptModule:
             'embedding_pooling_types'
         }
         self.int_keys = {
-            'hidden_size', 'n_layers', 'classifier_size', 'n_heads', 
+            'hidden_size', 'n_layers', 'classifier_size', 'head_size',
             'lora_r', 'lora_alpha', 'num_epochs', 'probe_batch_size',
             'base_batch_size', 'probe_grad_accum', 'base_grad_accum',
             'patience', 'seed'
@@ -77,17 +77,29 @@ class HyperoptModule:
     def apply_config(self, cfg: Dict[str, Any]):
         self.mp.probe_args.__dict__.update(copy.deepcopy(self.base_probe_args))
         self.mp.trainer_args.__dict__.update(copy.deepcopy(self.base_trainer_args))
-        
-        # Ensure integer parameters are actually integers
+
+        if 'n_heads' in cfg and 'head_size' not in cfg:
+            import warnings
+            warnings.warn(
+                "'n_heads' in sweep config is deprecated; use 'head_size' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            hs = int(cfg['hidden_size']) if 'hidden_size' in cfg else self.mp.probe_args.hidden_size
+            legacy = int(cfg.pop('n_heads'))
+            assert hs % legacy == 0, f"hidden_size {hs} not divisible by legacy n_heads {legacy}"
+            cfg['head_size'] = hs // legacy
+
         for key in self.int_keys:
             if key in cfg:
                 cfg[key] = int(cfg[key])
-        
+
         if 'hidden_size' in cfg:
-            val = cfg['hidden_size']
-            # Automatically set n_heads based on hidden_size (linear probe)
-            n_heads = max(1, val // 64)
-            cfg['n_heads'] = n_heads
+            hs = int(cfg['hidden_size'])
+            head_size = int(cfg['head_size']) if 'head_size' in cfg else self.mp.probe_args.head_size
+            assert hs % head_size == 0, (
+                f"sweep hidden_size {hs} not divisible by head_size {head_size}"
+            )
 
         if 'dropout' in cfg:
             cfg['transformer_dropout'] = cfg['dropout']
@@ -249,7 +261,7 @@ class HyperoptModule:
         linear_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'dropout', 'pre_ln', 'use_bias', 'probe_batch_size'}
         transformer_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'transformer_dropout', 'pre_ln',
                                      'classifier_dropout', 'classifier_size', 'use_bias', 'probe_pooling_types', 'embedding_pooling_types', 'probe_batch_size',
-                                     'bom_k', 'n_heads', 'probe_grad_accum', 'add_token_ids', 'random_pair_flipping'}
+                                     'bom_k', 'head_size', 'probe_grad_accum', 'add_token_ids', 'random_pair_flipping'}
         lora_params = {'lora_r', 'lora_alpha', 'lora_dropout'}
         
         # Determine which parameters to include

@@ -129,7 +129,7 @@ def test_transformer_packaged_roundtrip() -> None:
             classifier_dropout=0.1,
             num_labels=2,
             n_layers=1,
-            n_heads=2,
+            head_size=8,
             task_type="singlelabel",
             rotary=False,
             attention_backend="sdpa",

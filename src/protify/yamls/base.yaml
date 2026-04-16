@@ -55,7 +55,7 @@ pre_ln: !!bool true
 classifier_size: !!int 4096
 transformer_dropout: !!float 0.1
 classifier_dropout: !!float 0.2
-n_heads: !!int 4
+head_size: !!int 2048  # n_heads = hidden_size // head_size; 8192/2048=4 to match the prior default. `n_heads` is deprecated; use `head_size` instead.
 rotary: !!bool true
 attention_backend: flex
 output_s_max: !!bool false

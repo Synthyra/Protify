@@ -27,7 +27,7 @@ When `--use_wandb_hyperopt` is set, the pipeline runs a W&B sweep over the param
 Defined in [hyperopt_utils.py](../src/protify/hyperopt_utils.py).
 
 - **Constructor:** `HyperoptModule(main_process, model_name, data_name, dataset, emb_dict, sweep_config, results_list, swept_param_keys=None)`. Keeps deep copies of base `probe_args` and `trainer_args` and defines which keys are probe/trainer/embedding and which are int-cast.
-- **apply_config(cfg):** Restores base probe and trainer args, then applies `cfg`: ints for int_keys; `n_heads` derived from `hidden_size` or `transformer_hidden_size`; `transformer_dropout` from `dropout`; `pooling_types` from `probe_pooling_types`; sets attributes on `mp.probe_args`, `mp.trainer_args`, and `mp.embedding_args.pooling_types` where applicable.
+- **apply_config(cfg):** Restores base probe and trainer args, then applies `cfg`: legacy `n_heads` (deprecated) is migrated to `head_size = hidden_size // n_heads` with a `DeprecationWarning`; asserts `hidden_size % head_size == 0`; ints for int_keys; `transformer_dropout` from `dropout`; `pooling_types` from `probe_pooling_types`; sets attributes on `mp.probe_args`, `mp.trainer_args`, and `mp.embedding_args.pooling_types` where applicable.
 - **train_model(sweep_mode=True):** Dispatches to `_run_full_finetuning`, `_run_hybrid_probe`, or `_run_nn_probe` depending on `full_args`; returns (model/probe, valid_metrics, test_metrics).
 - **select_metric(valid_metrics, test_metrics, sweep_metric):** Returns the float value for `sweep_metric` from valid or test; raises with available keys if missing.
 - **objective():** W&B entry: init, apply_config, train_model, log metrics, append to results_list, return metric for the goal.

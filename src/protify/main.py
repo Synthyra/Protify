@@ -95,7 +95,8 @@ def parse_arguments():
     parser.add_argument("--classifier_size", type=int, default=4096, help="Feed-forward dimension.")
     parser.add_argument("--transformer_dropout", type=float, default=0.1, help="Dropout rate for the transformer layers.")
     parser.add_argument("--classifier_dropout", type=float, default=0.2, help="Dropout rate for the classifier.")
-    parser.add_argument("--n_heads", type=int, default=4, help="Number of heads in multi-head attention.")
+    parser.add_argument("--head_size", type=int, default=128, help="Attention head dimension. n_heads is derived as hidden_size // head_size.")
+    parser.add_argument("--n_heads", type=int, default=None, help="[DEPRECATED] Use --head_size. If provided, head_size is derived as hidden_size // n_heads.")
     parser.add_argument("--rotary", action="store_false", default=True,
                         help="Disable rotary embeddings (default: enabled). Use --rotary to toggle off.")
     parser.add_argument("--attention_backend", choices=["kernels", "flex", "sdpa"], default="flex", help="Attention backend for transformer-style probes.")
@@ -209,6 +210,27 @@ def parse_arguments():
     parser.add_argument("--sweep_goal", type=str, default='minimize', choices=['maximize', 'minimize'], help="Goal for the sweep metric (maximize/minimize)")
     parser.add_argument("--sweep_name", type=str, default=None, help="Display name for the W&B sweep. Overrides 'name' in the sweep YAML.")
     args = parser.parse_args()
+
+    if args.n_heads is not None:
+        import warnings
+        warnings.warn(
+            "--n_heads is deprecated and will be removed in a future release. "
+            "Use --head_size instead (n_heads = hidden_size // head_size).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        assert args.hidden_size % args.n_heads == 0, (
+            f"--hidden_size {args.hidden_size} not divisible by deprecated --n_heads {args.n_heads}"
+        )
+        derived_head_size = args.hidden_size // args.n_heads
+        explicit_head_size = "--head_size" in raw_argv
+        if explicit_head_size:
+            assert derived_head_size == args.head_size, (
+                f"--head_size {args.head_size} conflicts with deprecated --n_heads {args.n_heads} "
+                f"(derived head_size={derived_head_size})"
+            )
+        args.head_size = derived_head_size
+        args.n_heads = None
 
     # Validate model_names vs model_paths/model_types mutual exclusivity
     if args.model_paths is not None:

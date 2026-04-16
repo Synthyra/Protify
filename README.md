@@ -566,8 +566,10 @@ parameters:
     values: [True, False]
   classifier_dim:
     values: [4096, 8192]
-  n_heads:  # number of attention heads
-    values: [2, 4, 8]
+  head_size:  # attention head dimension; n_heads = hidden_size // head_size
+    values: [64, 128, 256]
+  # `n_heads` is deprecated as a sweep key. Old configs that use it are auto-migrated
+  # to `head_size = hidden_size // n_heads` with a DeprecationWarning.
   
   # LoRA parameters
   lora_r:

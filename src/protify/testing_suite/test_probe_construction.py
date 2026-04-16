@@ -35,7 +35,7 @@ def _make_args(**kwargs) -> ProbeArguments:
         n_layers=1,
         dropout=0.1,
         task_type="singlelabel",
-        n_heads=2,
+        head_size=16,
         classifier_size=24,
         transformer_dropout=0.1,
         classifier_dropout=0.1,
@@ -149,3 +149,68 @@ def test_rebuild_probe_from_saved_config_linear() -> None:
     rebuilt = rebuild_probe_from_saved_config("linear", False, config_dict)
     assert isinstance(rebuilt, LinearProbe)
     assert rebuilt.config.num_labels == 3
+
+
+def test_transformer_probe_config_legacy_n_heads_kwarg() -> None:
+    """Back-compat: checkpoints serialized with `n_heads` must still load."""
+    try:
+        from src.protify.probes.transformer_probe import TransformerProbeConfig
+    except ImportError:
+        try:
+            from protify.probes.transformer_probe import TransformerProbeConfig
+        except ImportError:
+            from ..probes.transformer_probe import TransformerProbeConfig
+    cfg = TransformerProbeConfig(hidden_size=512, n_heads=4)
+    assert cfg.head_size == 128
+    assert cfg.n_heads == 4
+
+
+def test_transformer_probe_config_head_size_and_legacy_agree() -> None:
+    """Both head_size and legacy n_heads provided, consistent values."""
+    try:
+        from src.protify.probes.transformer_probe import TransformerProbeConfig
+    except ImportError:
+        try:
+            from protify.probes.transformer_probe import TransformerProbeConfig
+        except ImportError:
+            from ..probes.transformer_probe import TransformerProbeConfig
+    cfg = TransformerProbeConfig(hidden_size=512, head_size=128, n_heads=4)
+    assert cfg.head_size == 128
+    assert cfg.n_heads == 4
+
+
+def test_transformer_probe_config_head_size_and_legacy_conflict() -> None:
+    try:
+        from src.protify.probes.transformer_probe import TransformerProbeConfig
+    except ImportError:
+        try:
+            from protify.probes.transformer_probe import TransformerProbeConfig
+        except ImportError:
+            from ..probes.transformer_probe import TransformerProbeConfig
+    with pytest.raises(AssertionError):
+        TransformerProbeConfig(hidden_size=512, head_size=64, n_heads=4)
+
+
+def test_transformer_probe_config_rebuild_from_legacy_dict() -> None:
+    """A saved config.json with only `n_heads` must roundtrip through rebuild_probe_from_saved_config."""
+    legacy_dict = {
+        "input_size": 16,
+        "hidden_size": 32,
+        "classifier_size": 24,
+        "transformer_dropout": 0.1,
+        "classifier_dropout": 0.1,
+        "num_labels": 2,
+        "n_layers": 1,
+        "n_heads": 2,  # legacy key only
+        "task_type": "singlelabel",
+        "rotary": False,
+        "attention_backend": "sdpa",
+        "pre_ln": True,
+        "pooling_types": ["mean"],
+        "use_bias": False,
+        "add_token_ids": False,
+    }
+    rebuilt = rebuild_probe_from_saved_config("transformer", False, legacy_dict)
+    assert isinstance(rebuilt, TransformerForSequenceClassification)
+    assert rebuilt.config.head_size == 16
+    assert rebuilt.config.n_heads == 2
