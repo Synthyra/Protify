@@ -112,6 +112,7 @@ class TrainerArguments:
             patience: int = 3,
             base_num_epochs: Optional[int] = None,
             base_patience: Optional[int] = None,
+            base_lr: Optional[float] = None,
             read_scaler: int = 100,
             save_model: bool = False,
             push_raw_probe: bool = False,
@@ -147,6 +148,7 @@ class TrainerArguments:
         self.patience = patience
         self.base_num_epochs = base_num_epochs
         self.base_patience = base_patience
+        self.base_lr = base_lr
         self.save = save_model
         self.push_raw_probe = push_raw_probe
         self.push_raw_probe_repo = push_raw_probe_repo
@@ -173,6 +175,7 @@ class TrainerArguments:
         batch_size = self.probe_batch_size if probe else self.base_batch_size
         grad_accum = self.probe_grad_accum if probe else self.base_grad_accum
         num_epochs = self.num_epochs if (probe or self.base_num_epochs is None) else self.base_num_epochs
+        lr = self.lr if (probe or self.base_lr is None) else self.base_lr
 
         if self.train_data_size > 250000:
             eval_steps = max(1, int(100000 / (batch_size * grad_accum)))
@@ -211,7 +214,7 @@ class TrainerArguments:
             per_device_train_batch_size=batch_size,
             per_device_eval_batch_size=batch_size,
             gradient_accumulation_steps=grad_accum,
-            learning_rate=float(self.lr),
+            learning_rate=float(lr),
             lr_scheduler_type='cosine',
             weight_decay=float(self.weight_decay),
             warmup_steps=warmup_steps,

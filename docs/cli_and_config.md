@@ -149,9 +149,12 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--base_batch_size` | int | 4 | Base model batch size. |
 | `--probe_grad_accum` | int | 1 | Gradient accumulation steps (probe). |
 | `--base_grad_accum` | int | 8 | Gradient accumulation steps (base). |
-| `--lr` | float | 1e-4 | Learning rate. |
+| `--lr` | float | 1e-4 | Learning rate (shared by probe and base phases unless `--base_lr` is set). |
 | `--weight_decay` | float | 0.00 | Weight decay. |
-| `--patience` | int | 1 | Early-stopping patience. |
+| `--patience` | int | 1 | Early-stopping patience (probe phase, and base phase unless `--base_patience` is set). |
+| `--base_num_epochs` | int | None | Epoch count for the base-model phase of hybrid / full-finetuning training. If omitted, falls back to `--num_epochs`. |
+| `--base_patience` | int | None | Early-stopping patience for the base-model phase. If omitted, falls back to `--patience`. |
+| `--base_lr` | float | None | Learning rate for the base-model phase (useful when LoRA / full-FT wants a different LR than the probe). If omitted, falls back to `--lr`. |
 | `--seed` | int | None | Random seed (None: time-based). |
 | `--deterministic` | flag | False | Deterministic mode. |
 | `--full_finetuning` | flag | False | Full model finetuning. |

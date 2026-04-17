@@ -157,6 +157,8 @@ def parse_arguments():
                         help="Epoch count for the base-model phase of hybrid / full-finetuning training. If omitted, falls back to --num_epochs.")
     parser.add_argument("--base_patience", type=int, default=None,
                         help="Early-stopping patience for the base-model phase of hybrid / full-finetuning training. If omitted, falls back to --patience.")
+    parser.add_argument("--base_lr", type=float, default=None,
+                        help="Learning rate for the base-model phase of hybrid / full-finetuning training (useful when LoRA/full-FT wants a different LR than the probe). If omitted, falls back to --lr.")
     parser.add_argument("--seed", type=int, default=None, help="Seed for reproducibility (if omitted, current time is used).")
     parser.add_argument("--deterministic", action="store_true",
                         help="Enable deterministic behavior for reproducibility (slightly slower training).")

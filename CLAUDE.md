@@ -81,6 +81,8 @@ _FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 
 **Training modes:** probe-only (frozen PLM), full fine-tune, hybrid, scikit (embeddings → sklearn), W&B hyperparameter sweep.
 
+**Hybrid probe phase decoupling:** `--hybrid_probe` runs a probe-only phase followed by a joint base-model phase (optionally LoRA-wrapped via `--lora`). By default both phases share `--num_epochs`, `--patience`, and `--lr`; override the base phase independently with `--base_num_epochs`, `--base_patience`, `--base_lr` (each defaults to the probe value when omitted). Implementation: `TrainerArguments.__call__` selects epochs/lr per phase at [trainers.py:174](src/protify/probes/trainers.py#L174), and `_train` selects the EarlyStoppingCallback patience at [trainers.py:342-345](src/protify/probes/trainers.py#L342-L345).
+
 **Balanced regression metrics (EpHod-style):** For `task_type in ('regression', 'sigmoid_regression')`, Protify reports a second suite of weighted and resampled metrics (weighted RMSE / R^2, resampled Pearson / Spearman, binned MCC / F1 / ROC-AUC) alongside standard ones. Sample weights come from the training label distribution (schemes: `bin_inv`, `bin_inv_sqrt`, `LDS_inv`, `LDS_inv_sqrt`, `LDS_extreme`, `none`) and are pre-computed once in `DataMixin._compute_balanced_weights_for`. Bin borders default to tertiles; override with `--balanced_bin_borders 5 9` (pH). Implementation in `src/protify/metrics_balanced.py`.
 
 **Registries (authoritative source of truth):**
