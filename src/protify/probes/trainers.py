@@ -110,6 +110,8 @@ class TrainerArguments:
             weight_decay: float = 0.00,
             task_type: str = 'regression',
             patience: int = 3,
+            base_num_epochs: Optional[int] = None,
+            base_patience: Optional[int] = None,
             read_scaler: int = 100,
             save_model: bool = False,
             push_raw_probe: bool = False,
@@ -143,6 +145,8 @@ class TrainerArguments:
         self.weight_decay = weight_decay
         self.task_type = task_type
         self.patience = patience
+        self.base_num_epochs = base_num_epochs
+        self.base_patience = base_patience
         self.save = save_model
         self.push_raw_probe = push_raw_probe
         self.push_raw_probe_repo = push_raw_probe_repo
@@ -168,6 +172,7 @@ class TrainerArguments:
     def __call__(self, probe: Optional[bool] = True):
         batch_size = self.probe_batch_size if probe else self.base_batch_size
         grad_accum = self.probe_grad_accum if probe else self.base_grad_accum
+        num_epochs = self.num_epochs if (probe or self.base_num_epochs is None) else self.base_num_epochs
 
         if self.train_data_size > 250000:
             eval_steps = max(1, int(100000 / (batch_size * grad_accum)))
@@ -202,7 +207,7 @@ class TrainerArguments:
 
         return TrainingArguments(
             output_dir=save_dir,
-            num_train_epochs=self.num_epochs,
+            num_train_epochs=num_epochs,
             per_device_train_batch_size=batch_size,
             per_device_eval_batch_size=batch_size,
             gradient_accumulation_steps=grad_accum,
@@ -331,6 +336,10 @@ Protify is an open source platform designed to simplify and democratize workflow
         self.trainer_args.num_labels = self.probe_args.num_labels
         self.trainer_args.eval_dataset_size = len(valid_dataset) if valid_dataset is not None else len(test_dataset)
         hf_trainer_args = self.trainer_args(probe=probe)
+        if probe or self.trainer_args.base_patience is None:
+            early_stopping_patience = self.trainer_args.patience
+        else:
+            early_stopping_patience = self.trainer_args.base_patience
         ### TODO add options for optimizers and schedulers
         trainer = Trainer(
             model=model,
@@ -339,7 +348,7 @@ Protify is an open source platform designed to simplify and democratize workflow
             eval_dataset=valid_dataset,
             data_collator=data_collator,
             compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=self.trainer_args.patience)]
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)]
         )
         trainer.can_return_loss = True
         metrics = trainer.evaluate(test_dataset)
