@@ -568,6 +568,10 @@ class Vec2VecForEmbedding(nn.Module):
     returns an approximation of the larger model's pooled embedding.
     """
 
+    # forward() returns a fully pooled + translated (B, D) vector; callers
+    # (e.g. Protify's embedder) must not apply their own pooler on top.
+    already_pooled: bool = True
+
     def __init__(
         self,
         config: Vec2VecConfig,
