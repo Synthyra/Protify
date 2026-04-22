@@ -599,10 +599,15 @@ class Vec2VecForEmbedding(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         base_state = self.base_model(input_ids, attention_mask=attention_mask).last_hidden_state
+        # Translator weights are loaded fp32; under autocast, base_state may be
+        # bf16 which collides with the Linear weight dtype. Cast base output to
+        # the translator's parameter dtype so autocast does not hand a bf16
+        # input to an fp32 Linear mid-way through the wrapper.
+        translator_dtype = next(self.vec2vec_model.parameters()).dtype
         if self.learned_pooling:
             # Translator has its own AttentionPooler; pass raw hidden states.
             translated = self.vec2vec_model.translate(
-                base_state,
+                base_state.to(translator_dtype),
                 src=self.model_name_a,
                 tgt=self.model_name_b,
                 attention_mask=attention_mask,
@@ -612,7 +617,7 @@ class Vec2VecForEmbedding(nn.Module):
             if self.normalize:
                 base_vec = F.normalize(base_vec, p=2, dim=1)
             translated = self.vec2vec_model.translate(
-                base_vec,
+                base_vec.to(translator_dtype),
                 src=self.model_name_a,
                 tgt=self.model_name_b,
             )
