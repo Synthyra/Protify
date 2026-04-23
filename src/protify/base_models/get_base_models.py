@@ -40,7 +40,10 @@ class BaseModelArguments:
 
 
 def get_base_model(model_name: str, masked_lm: bool = False, dtype=None, model_path: str = None):
-    if 'random' in model_name.lower():
+    if 'vec2vec' in model_name.lower():
+        from .vec2vec import build_vec2vec_model
+        return build_vec2vec_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
+    elif 'random' in model_name.lower():
         from .random import build_random_model
         return build_random_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
     elif 'esm2' in model_name.lower() and model_name.lower().count('esm2') == 1:
@@ -82,9 +85,6 @@ def get_base_model(model_name: str, masked_lm: bool = False, dtype=None, model_p
     elif 'e1' in model_name.lower():
         from .e1 import build_e1_model
         return build_e1_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
-    elif 'vec2vec' in model_name.lower():
-        from .vec2vec import build_vec2vec_model
-        return build_vec2vec_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
     elif 'calm' in model_name.lower():
         from .calm import build_calm_model
         return build_calm_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
@@ -142,6 +142,9 @@ def get_tokenizer(model_name: str, model_path: str = None):
         from .custom_model import build_custom_tokenizer
         assert model_path is not None, "model_path is required for custom models. Use --model_paths and --model_types custom."
         return build_custom_tokenizer(model_path)
+    if 'vec2vec' in model_name.lower():
+        from .vec2vec import get_vec2vec_tokenizer
+        return get_vec2vec_tokenizer(model_name, model_path=model_path)
     if 'esm2' in model_name.lower() or 'random' in model_name.lower() or 'dsm' in model_name.lower():
         from .esm2 import get_esm2_tokenizer
         return get_esm2_tokenizer(model_name, model_path=model_path)

@@ -536,6 +536,8 @@ presets = {
     'vec2vec-ESM2-150-ESM2-650': 'lhallee/ESM2-150-ESM2-650-sequence-sequence',
     'vec2vec-ESM2-150-ESM2-3B': 'lhallee/ESM2-150-ESM2-3B-sequence-sequence',
     'vec2vec-ESM2-650-ESM2-3B': 'lhallee/ESM2-650-ESM2-3B-sequence-sequence',
+    'vec2vec-ESM2-650-ModernBERT-base-contrastive': 'lhallee/ESM2-650-ModernBERT-base-sequence-sequence-contrastive',
+    'vec2vec-ESM2-650-ModernBERT-large-contrastive': 'lhallee/ESM2-650-ModernBERT-large-sequence-sequence-contrastive',
 }
 
 
@@ -599,10 +601,15 @@ class Vec2VecForEmbedding(nn.Module):
         **kwargs,
     ) -> torch.Tensor:
         base_state = self.base_model(input_ids, attention_mask=attention_mask).last_hidden_state
+        # Translator weights are loaded fp32; under autocast, base_state may be
+        # bf16 which collides with the Linear weight dtype. Cast base output to
+        # the translator's parameter dtype so autocast does not hand a bf16
+        # input to an fp32 Linear mid-way through the wrapper.
+        translator_dtype = next(self.vec2vec_model.parameters()).dtype
         if self.learned_pooling:
             # Translator has its own AttentionPooler; pass raw hidden states.
             translated = self.vec2vec_model.translate(
-                base_state,
+                base_state.to(translator_dtype),
                 src=self.model_name_a,
                 tgt=self.model_name_b,
                 attention_mask=attention_mask,
@@ -612,7 +619,7 @@ class Vec2VecForEmbedding(nn.Module):
             if self.normalize:
                 base_vec = F.normalize(base_vec, p=2, dim=1)
             translated = self.vec2vec_model.translate(
-                base_vec,
+                base_vec.to(translator_dtype),
                 src=self.model_name_a,
                 tgt=self.model_name_b,
             )
@@ -624,8 +631,13 @@ def get_vec2vec_tokenizer(preset: str, model_path: str = None):
     try:
         tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
     except Exception:
-        model = AutoModel.from_pretrained(path, trust_remote_code=True)
-        tokenizer = AutoTokenizer.from_pretrained(model.config.tokenizer_name)
+        # vec2vec repos often don't ship a tokenizer; AutoModel can't load a
+        # `vec2vec` model_type via AutoFactory either. Resolve the source
+        # encoder from the Vec2VecConfig and load its tokenizer directly.
+        config = Vec2VecConfig.from_pretrained(path)
+        encoder_a_preset = config.encoder_names[0]
+        encoder_a_path = all_presets_with_paths[encoder_a_preset]
+        tokenizer = AutoTokenizer.from_pretrained(encoder_a_path, trust_remote_code=True)
     return Vec2VecTokenizerWrapper(tokenizer)
 
 
