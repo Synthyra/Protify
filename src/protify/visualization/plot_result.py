@@ -108,7 +108,8 @@ def plot_radar(*,
                data: List[List[float]],
                title: str,
                outfile: Path,
-               normalize: bool = False):
+               normalize: bool = False,
+               no_title: bool = False):
     # Use pretty names for categories (datasets) and models
     pretty_categories = [DATASET_NAMES.get(cat, cat) for cat in categories]
     pretty_models = [MODEL_NAMES.get(m, m) for m in models]
@@ -137,7 +138,8 @@ def plot_radar(*,
         ax.fill(ang, val, alpha=.25, color=palette[i])
 
     ax.grid(True)
-    plt.title(title, pad=20)
+    if not no_title:
+        plt.title(title, pad=20)
     plt.legend(bbox_to_anchor=(1.25, 1.05))
     plt.tight_layout()
     plt.savefig(outfile, dpi=450, bbox_inches="tight")
@@ -148,7 +150,8 @@ def bar_plot(datasets: List[str],
              models: List[str],
              data: List[List[float]],
              metric_name: str,
-             outfile: Path):
+             outfile: Path,
+             no_title: bool = False):
     rows = [
         {"Dataset": DATASET_NAMES.get(d, d), "Model": MODEL_NAMES.get(m, m), "Score": s}
         for m, col in zip(models, data)
@@ -157,7 +160,8 @@ def bar_plot(datasets: List[str],
     dfp = pd.DataFrame(rows)
     plt.figure(figsize=(max(12, .8 * len(datasets)), 8))
     sns.barplot(dfp, x="Dataset", y="Score", hue="Model")
-    plt.title(f"{metric_name} across datasets (Cls→F1, Reg→Spearman)")
+    if not no_title:
+        plt.title(f"{metric_name} across datasets (Cls→F1, Reg→Spearman)")
     plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
     plt.savefig(outfile, dpi=450, bbox_inches="tight")
@@ -190,7 +194,8 @@ def heatmap_plot(datasets: List[str],
                  outfile: Path,
                  normalize: bool = False,
                  display_strings: List[List[str]] = None,
-                 no_std: bool = False):
+                 no_std: bool = False,
+                 no_title: bool = False):
     """
     Create a heatmap plot.
     
@@ -323,7 +328,8 @@ def heatmap_plot(datasets: List[str],
     else:
         title = f'{annot_label} Heatmap (Cls\u2192F1, Reg\u2192Spearman)\nRaw metric values'
         
-    plt.title(title, pad=20, fontsize=21)
+    if not no_title:
+        plt.title(title, pad=20, fontsize=21)
     plt.ylabel('Dataset', fontsize=17)
     plt.xlabel('Model', fontsize=17)
     plt.tight_layout()
@@ -339,7 +345,7 @@ def load_tsv(tsv: Path) -> pd.DataFrame:
     return df
 
 
-def create_plots(tsv: str, outdir: str, no_std: bool = False):
+def create_plots(tsv: str, outdir: str, no_std: bool = False, no_title: bool = False):
     tsv, outdir = Path(tsv), Path(outdir)
     df = load_tsv(tsv)
     models = [c for c in df.columns if c != "dataset"]
@@ -461,27 +467,29 @@ def create_plots(tsv: str, outdir: str, no_std: bool = False):
                data=plot_matrix,
                title=subtitle,
                outfile=radar_path,
-               normalize=False)
+               normalize=False,
+               no_title=no_title)
     plot_radar(categories=datasets,
                models=models,
                data=plot_matrix,
                title=subtitle + " (Normalized)",
                outfile=radar_path_norm,
-               normalize=True)
+               normalize=True,
+               no_title=no_title)
     # Bar and heatmap use sorted order
-    bar_plot(datasets, sorted_models, sorted_plot_matrix, metric_name, bar_path)
+    bar_plot(datasets, sorted_models, sorted_plot_matrix, metric_name, bar_path, no_title=no_title)
     # Normalized bar plot
     # For bar plot normalization, use min-max per dataset (column-wise normalization)
     arr = np.asarray(sorted_plot_matrix)
     rng = np.where(np.ptp(arr, axis=0) == 0, 1, np.ptp(arr, axis=0))
     arr_norm = (arr - arr.min(0)) / rng
-    bar_plot(datasets, sorted_models, arr_norm.tolist(), metric_name + " (Normalized)", bar_path_norm)
+    bar_plot(datasets, sorted_models, arr_norm.tolist(), metric_name + " (Normalized)", bar_path_norm, no_title=no_title)
     # Heatmap - pass display strings for mean±std annotation
-    heatmap_plot(datasets, sorted_models, sorted_plot_matrix, metric_name, heatmap_path, 
-                 normalize=False, display_strings=sorted_display_matrix, no_std=no_std)
+    heatmap_plot(datasets, sorted_models, sorted_plot_matrix, metric_name, heatmap_path,
+                 normalize=False, display_strings=sorted_display_matrix, no_std=no_std, no_title=no_title)
     # Normalized heatmap uses sorting based on normalized averages
-    heatmap_plot(datasets, sorted_models_norm, sorted_plot_matrix_norm, metric_name, heatmap_path_norm, 
-                 normalize=True, display_strings=sorted_display_matrix_norm, no_std=no_std)
+    heatmap_plot(datasets, sorted_models_norm, sorted_plot_matrix_norm, metric_name, heatmap_path_norm,
+                 normalize=True, display_strings=sorted_display_matrix_norm, no_std=no_std, no_title=no_title)
     print(f"Radar saved to {radar_path}")
     print(f"Radar (normalized) saved to {radar_path_norm}")
     print(f"Bar   saved to {bar_path}")
@@ -495,9 +503,10 @@ def main() -> None:
     ap.add_argument("--input", required=True, help="TSV file with metrics")
     ap.add_argument("--output_dir", default="plots", help="Directory for plots")
     ap.add_argument("--no_std", action="store_true", help="Do not display standard deviation in heatmap plots")
+    ap.add_argument("--no_title", action="store_true", help="Suppress the main title on every plot")
     args = ap.parse_args()
 
-    create_plots(Path(args.input), Path(args.output_dir), no_std=args.no_std)
+    create_plots(Path(args.input), Path(args.output_dir), no_std=args.no_std, no_title=args.no_title)
     print("Finished.")
 
 
