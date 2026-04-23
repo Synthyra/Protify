@@ -536,6 +536,8 @@ presets = {
     'vec2vec-ESM2-150-ESM2-650': 'lhallee/ESM2-150-ESM2-650-sequence-sequence',
     'vec2vec-ESM2-150-ESM2-3B': 'lhallee/ESM2-150-ESM2-3B-sequence-sequence',
     'vec2vec-ESM2-650-ESM2-3B': 'lhallee/ESM2-650-ESM2-3B-sequence-sequence',
+    'vec2vec-ESM2-650-ModernBERT-base-contrastive': 'lhallee/ESM2-650-ModernBERT-base-sequence-sequence-contrastive',
+    'vec2vec-ESM2-650-ModernBERT-large-contrastive': 'lhallee/ESM2-650-ModernBERT-large-sequence-sequence-contrastive',
 }
 
 
@@ -629,8 +631,13 @@ def get_vec2vec_tokenizer(preset: str, model_path: str = None):
     try:
         tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
     except Exception:
-        model = AutoModel.from_pretrained(path, trust_remote_code=True)
-        tokenizer = AutoTokenizer.from_pretrained(model.config.tokenizer_name)
+        # vec2vec repos often don't ship a tokenizer; AutoModel can't load a
+        # `vec2vec` model_type via AutoFactory either. Resolve the source
+        # encoder from the Vec2VecConfig and load its tokenizer directly.
+        config = Vec2VecConfig.from_pretrained(path)
+        encoder_a_preset = config.encoder_names[0]
+        encoder_a_path = all_presets_with_paths[encoder_a_preset]
+        tokenizer = AutoTokenizer.from_pretrained(encoder_a_path, trust_remote_code=True)
     return Vec2VecTokenizerWrapper(tokenizer)
 
 
