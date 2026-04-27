@@ -81,6 +81,8 @@ DATASET_NAMES = {
     'optimal_temperature': 'optimal temperature',
     'optimal-ph': 'optimal pH',
     'optimal_ph': 'optimal pH',
+    'optimal-ph-rigor': r'optimal pH$_{rigor}$',
+    'optimal_ph_rigor': r'optimal pH$_{rigor}$',
     'material-production': 'material production',
     'material_production': 'material production',
     'fitness-prediction': 'fitness',

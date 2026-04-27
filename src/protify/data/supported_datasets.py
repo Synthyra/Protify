@@ -15,6 +15,7 @@ supported_datasets = {
     'peptide-HLA-MHC-affinity': 'GleghornLab/peptide_HLA_MHC_affinity_ppi',
     'optimal-temperature': 'GleghornLab/optimal_temperature',
     'optimal-ph': 'GleghornLab/optimal_ph',
+    'optimal-ph-rigor': 'GleghornLab/optimal_ph_rigor',
     'material-production': 'GleghornLab/material_production',
     'fitness-prediction': 'GleghornLab/fitness_prediction',
     'number-of-folds': 'GleghornLab/fold_prediction',

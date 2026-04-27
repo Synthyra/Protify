@@ -239,6 +239,12 @@ dataset_descriptions = {
         'task': 'Protein property prediction',
         'citation': 'Gleghorn Lab'
     },
+    'optimal-ph-rigor': {
+        'description': 'Rigorously curated variant of the optimal pH dataset for predicting the optimal pH for protein function.',
+        'type': 'Regression',
+        'task': 'Protein property prediction',
+        'citation': 'Gleghorn Lab'
+    },
     'material-production': {
         'description': 'Dataset for predicting protein suitability for material production.',
         'type': 'Classification',
