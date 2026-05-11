@@ -46,5 +46,7 @@ class HybridProbe(PreTrainedModel):
         x = self.model(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
         if self.pool_before_probe:
             x = self.pooler(x, attention_mask)
-        y = self.probe(x, labels=labels)
+            y = self.probe(x, labels=labels)
+        else:
+            y = self.probe(x, attention_mask=attention_mask, labels=labels)
         return y

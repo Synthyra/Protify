@@ -15,6 +15,17 @@ else:
     pass
 
 
+def _parse_pooling_types(value):
+    """Accept a list, a single token ('mean'), or a hyphen/comma-joined string ('mean-cls', 'mean,var')."""
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    assert isinstance(value, str), f'pooling types must be str or list, got {type(value)}'
+    for sep in ('-', ','):
+        if sep in value:
+            return [tok.strip() for tok in value.split(sep) if tok.strip()]
+    return [value.strip()]
+
+
 class HyperoptModule:
     def __init__(
         self, 
@@ -41,19 +52,23 @@ class HyperoptModule:
         
         self.probe_keys = {
             'hidden_size','dropout','n_layers','pre_ln','classifier_size',
-            'classifier_dropout','n_heads','rotary','use_bias','probe_pooling_types',
-            'lora','lora_r','lora_alpha','lora_dropout','probe_type','tokenwise', 'pooling_types'
+            'classifier_dropout','head_size','rotary','use_bias','probe_pooling_types',
+            'lora','lora_r','lora_alpha','lora_dropout','probe_type','tokenwise', 'pooling_types',
+            'add_token_ids','bom_k'
         }
         self.trainer_keys = {
             'lr','weight_decay','num_epochs','probe_batch_size',
             'base_batch_size','probe_grad_accum','base_grad_accum',
             'patience','seed'
         }
+        self.full_args_keys = {
+            'random_pair_flipping',
+        }
         self.embedding_keys = {
             'embedding_pooling_types'
         }
         self.int_keys = {
-            'hidden_size', 'n_layers', 'classifier_size', 'n_heads', 
+            'hidden_size', 'n_layers', 'classifier_size', 'head_size',
             'lora_r', 'lora_alpha', 'num_epochs', 'probe_batch_size',
             'base_batch_size', 'probe_grad_accum', 'base_grad_accum',
             'patience', 'seed'
@@ -62,34 +77,49 @@ class HyperoptModule:
     def apply_config(self, cfg: Dict[str, Any]):
         self.mp.probe_args.__dict__.update(copy.deepcopy(self.base_probe_args))
         self.mp.trainer_args.__dict__.update(copy.deepcopy(self.base_trainer_args))
-        
-        # Ensure integer parameters are actually integers
+
+        if 'n_heads' in cfg and 'head_size' not in cfg:
+            import warnings
+            warnings.warn(
+                "'n_heads' in sweep config is deprecated; use 'head_size' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            hs = int(cfg['hidden_size']) if 'hidden_size' in cfg else self.mp.probe_args.hidden_size
+            legacy = int(cfg.pop('n_heads'))
+            assert hs % legacy == 0, f"hidden_size {hs} not divisible by legacy n_heads {legacy}"
+            cfg['head_size'] = hs // legacy
+
         for key in self.int_keys:
             if key in cfg:
                 cfg[key] = int(cfg[key])
-        
+
         if 'hidden_size' in cfg:
-            val = cfg['hidden_size']
-            # Automatically set n_heads based on hidden_size (linear probe)
-            n_heads = max(1, val // 64)
-            cfg['n_heads'] = n_heads
+            hs = int(cfg['hidden_size'])
+            head_size = int(cfg['head_size']) if 'head_size' in cfg else self.mp.probe_args.head_size
+            assert hs % head_size == 0, (
+                f"sweep hidden_size {hs} not divisible by head_size {head_size}"
+            )
 
         if 'dropout' in cfg:
             cfg['transformer_dropout'] = cfg['dropout']
 
         if 'probe_pooling_types' in cfg:
+            cfg['probe_pooling_types'] = _parse_pooling_types(cfg['probe_pooling_types'])
             cfg['pooling_types'] = cfg['probe_pooling_types']
+        if 'embedding_pooling_types' in cfg:
+            cfg['embedding_pooling_types'] = _parse_pooling_types(cfg['embedding_pooling_types'])
 
         for k, v in cfg.items():
             if k in self.probe_keys and hasattr(self.mp.probe_args, k):
                 setattr(self.mp.probe_args, k, v)
             if k in self.trainer_keys and hasattr(self.mp.trainer_args, k):
                 setattr(self.mp.trainer_args, k, v)
+            if k in self.full_args_keys and hasattr(self.mp.full_args, k):
+                setattr(self.mp.full_args, k, v)
             # Handle embedding pooling types
             if k in self.embedding_keys:
                 if k == 'embedding_pooling_types':
-                    if isinstance(v, str):
-                        v = [v]
                     self.mp.embedding_args.pooling_types = v
 
     def train_model(self, sweep_mode=True):
@@ -176,7 +206,8 @@ class HyperoptModule:
                 input_dim = self.mp.get_embedding_dim_pth(self.emb_dict, test_seq, tokenizer)
             
             self.mp.probe_args.input_size = input_dim * 2 if (ppi and not self.mp._full) else input_dim
-        
+            self.mp.probe_args.max_seq_len = self.mp._max_length * 2 if (ppi and self.mp._full) else self.mp._max_length
+
         _, valid_metrics, test_metrics = self.train_model(sweep_mode=True)
         
         # Choose task-specific metric to optimize
@@ -228,8 +259,9 @@ class HyperoptModule:
         
         # Define which parameters are relevant for each probe type
         linear_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'dropout', 'pre_ln', 'use_bias', 'probe_batch_size'}
-        transformer_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'transformer_dropout', 'pre_ln', 
-                                     'classifier_dropout', 'classifier_size', 'use_bias', 'probe_pooling_types', 'embedding_pooling_types', 'probe_batch_size'}
+        transformer_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'transformer_dropout', 'pre_ln',
+                                     'classifier_dropout', 'classifier_size', 'use_bias', 'probe_pooling_types', 'embedding_pooling_types', 'probe_batch_size',
+                                     'bom_k', 'head_size', 'probe_grad_accum', 'add_token_ids', 'random_pair_flipping'}
         lora_params = {'lora_r', 'lora_alpha', 'lora_dropout'}
         
         # Determine which parameters to include
@@ -284,6 +316,7 @@ class HyperoptModule:
                             emb_dict = torch_load(save_path)
                             input_dim = mp.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)
                         mp.probe_args.input_size = input_dim * 2 if (ppi and not mp._full) else input_dim
+                        mp.probe_args.max_seq_len = mp._max_length * 2 if (ppi and mp._full) else mp._max_length
                     if mp.full_args.full_finetuning:
                         _ = mp._run_full_finetuning(model_name, data_name, train_set, valid_set, test_set, ppi, sweep_mode=False)
                     elif mp.full_args.hybrid_probe:
@@ -311,6 +344,7 @@ class HyperoptModule:
                         emb_dict = torch_load(save_path)
                         input_dim = mp.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)
                     mp.probe_args.input_size = input_dim * 2 if (ppi and not mp._full) else input_dim
+                    mp.probe_args.max_seq_len = mp._max_length * 2 if (ppi and mp._full) else mp._max_length
 
                 # Save base args for restoring after each trial
                 base_probe = copy.deepcopy(mp.probe_args.__dict__)
@@ -339,6 +373,11 @@ class HyperoptModule:
                     "early_terminate": early_term,
                     "parameters": params_to_hyperopt,
                 }
+                cli_name = getattr(mp.full_args, 'sweep_name', None)
+                if cli_name:
+                    wb_sweep["name"] = cli_name
+                elif "name" in sweep_config:
+                    wb_sweep["name"] = sweep_config["name"]
                 sweep_id = wandb.sweep(sweep=wb_sweep, project=mp.full_args.wandb_project, entity=mp.full_args.wandb_entity)
                 wandb.agent(sweep_id, function=hyperopt_module.objective, count=mp.full_args.sweep_count)
 

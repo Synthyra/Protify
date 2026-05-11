@@ -241,6 +241,13 @@ dataset_descriptions = {
         "tokenwise": False,
         "multiple_inputs": False,
     },
+    "optimal-ph-rigor": {
+        "type": "R",
+        "task": "Protein property prediction",
+        "description": "Rigorously curated variant of the optimal pH dataset for predicting the optimal pH for protein function.",
+        "tokenwise": False,
+        "multiple_inputs": False,
+    },
     "fluorescence-prediction": {
         "type": "R",
         "task": "Protein property prediction",

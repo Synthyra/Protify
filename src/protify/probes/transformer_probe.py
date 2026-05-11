@@ -1,6 +1,7 @@
 import torch
 from dataclasses import dataclass
 from torch import nn
+from torch.nn import functional as F
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassifierOutput
 from typing import List, Optional
@@ -23,14 +24,76 @@ except ImportError:
         from model_components.mlp import intermediate_correction_fn
 
 try:
-    from ..model_components.transformer import Transformer
+    from ..model_components.transformer import Transformer, _UNSET, _resolve_head_size
 except ImportError:
     try:
-        from protify.model_components.transformer import Transformer
+        from protify.model_components.transformer import Transformer, _UNSET, _resolve_head_size
     except ImportError:
-        from model_components.transformer import Transformer
+        from model_components.transformer import Transformer, _UNSET, _resolve_head_size
 
 from .losses import get_loss_fct
+
+
+class BoMPooling(nn.Module):
+    """Bag-of-Mers pooling (Hoang & Singh 2025, eq. 5, Avg-based variant).
+
+    K-mer average representations of the transformer output H are used as queries
+    in a cross-attention over H (keys/values); the resulting per-k-mer outputs
+    are averaged to a single d-vector. Padding positions are excluded both from
+    the attention (key mask) and from the final average (k-mers that touch any
+    padded position are dropped).
+    """
+
+    def __init__(self, hidden_size: int, k: int = 4, num_heads: int = 4, dropout: float = 0.0) -> None:
+        super().__init__()
+        assert hidden_size % num_heads == 0, f'hidden_size {hidden_size} not divisible by num_heads {num_heads}'
+        assert k >= 1, f'bom_k must be >= 1, got {k}'
+        self.hidden_size = hidden_size
+        self.k = k
+        self.num_heads = num_heads
+        self.head_dim = hidden_size // num_heads
+        self.q_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.k_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.out_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.dropout = dropout
+
+    def forward(self, emb: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        b, L, d = emb.shape
+        k = min(self.k, L)
+        kernel = torch.ones(d, 1, k, device=emb.device, dtype=emb.dtype) / k
+        H_prime = F.conv1d(emb.transpose(1, 2), kernel, groups=d).transpose(1, 2)  # (b, m, d), m = L - k + 1
+
+        Q = self.q_proj(H_prime)
+        K = self.k_proj(emb)
+        V = self.v_proj(emb)
+        m = Q.shape[1]
+        Q = Q.view(b, m, self.num_heads, self.head_dim).transpose(1, 2)
+        K = K.view(b, L, self.num_heads, self.head_dim).transpose(1, 2)
+        V = V.view(b, L, self.num_heads, self.head_dim).transpose(1, 2)
+
+        attn_mask = None
+        if attention_mask is not None:
+            key_mask = attention_mask[:, None, None, :].to(Q.dtype)
+            attn_mask = (1.0 - key_mask) * torch.finfo(Q.dtype).min
+
+        out = F.scaled_dot_product_attention(
+            Q, K, V, attn_mask=attn_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+        )
+        out = out.transpose(1, 2).contiguous().view(b, m, d)
+        out = self.out_proj(out)
+
+        if attention_mask is not None and k > 1:
+            kmer_valid = attention_mask.unfold(dimension=1, size=k, step=1).min(dim=-1).values.to(out.dtype)  # (b, m)
+            kmer_valid = kmer_valid.unsqueeze(-1)
+            pooled = (out * kmer_valid).sum(dim=1) / kmer_valid.sum(dim=1).clamp(min=1.0)
+        elif attention_mask is not None:
+            mask = attention_mask.to(out.dtype).unsqueeze(-1)
+            pooled = (out * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
+        else:
+            pooled = out.mean(dim=1)
+        return pooled
 
 
 @dataclass
@@ -55,7 +118,7 @@ class TransformerProbeConfig(PretrainedConfig):
         classifier_dropout: float = 0.2,
         num_labels: int = 2,
         n_layers: int = 1,
-        n_heads: int = 4,
+        head_size=_UNSET,
         task_type: str = "singlelabel",
         rotary: bool = True,
         pre_ln: bool = True,
@@ -65,8 +128,11 @@ class TransformerProbeConfig(PretrainedConfig):
         attention_backend: str = "flex",
         output_s_max: bool = False,
         max_seq_len: int = 2048,
+        bom_k: int = 60,
         **kwargs,
     ):
+        legacy_n_heads = kwargs.pop("n_heads", None)
+        head_size = _resolve_head_size(hidden_size, head_size, legacy_n_heads, default_head_size=128)
         super().__init__(**kwargs)
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -75,7 +141,8 @@ class TransformerProbeConfig(PretrainedConfig):
         self.classifier_dropout = classifier_dropout
         self.task_type = task_type
         self.num_labels = num_labels
-        self.n_heads = n_heads
+        self.head_size = head_size
+        self.n_heads = hidden_size // head_size
         self.n_layers = n_layers
         self.rotary = rotary
         self.pre_ln = pre_ln
@@ -85,6 +152,7 @@ class TransformerProbeConfig(PretrainedConfig):
         self.attention_backend = attention_backend
         self.output_s_max = output_s_max
         self.max_seq_len = max_seq_len
+        self.bom_k = bom_k
 
 
 class TransformerForSequenceClassification(PreTrainedModel):
@@ -135,7 +203,16 @@ class TransformerForSequenceClassification(PreTrainedModel):
             nn.Dropout(config.classifier_dropout),
             nn.Linear(proj_dim, config.num_labels, bias=config.use_bias),
         )
-        self.pooler = Pooler(config.pooling_types)
+        self.use_bom = 'bom' in config.pooling_types
+        non_bom_types = [p for p in config.pooling_types if p != 'bom']
+        self.pooler = Pooler(non_bom_types) if non_bom_types else None
+        if self.use_bom:
+            self.bom = BoMPooling(
+                hidden_size=config.hidden_size,
+                k=config.bom_k,
+                num_heads=config.n_heads,
+                dropout=config.transformer_dropout,
+            )
 
     def forward(
         self,
@@ -164,7 +241,12 @@ class TransformerForSequenceClassification(PreTrainedModel):
             output_s_max=output_s_max,
         )
         x = transformer_outputs.last_hidden_state
-        pooled = self.pooler(x, attention_mask)
+        pooled_parts = []
+        if self.pooler is not None:
+            pooled_parts.append(self.pooler(x, attention_mask))
+        if self.use_bom:
+            pooled_parts.append(self.bom(x, attention_mask))
+        pooled = torch.cat(pooled_parts, dim=-1)
         logits = self.classifier(pooled)
         if self.task_type == "sigmoid_regression":
             logits = logits.sigmoid()

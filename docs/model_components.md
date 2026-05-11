@@ -24,7 +24,7 @@ Probes that use these components:
 - **rotate_half(x, interleaved):** Rotates half the dimensions for rotary embeddings.
 - **apply_rotary_emb_torch(x, cos, sin, interleaved):** Applies rotary embeddings to a tensor.
 - **RotaryEmbedding(dim, base, interleaved, scaling_factor):** Module that caches cos/sin for a max sequence length.
-- **MultiHeadAttention(hidden_size, n_heads, rotary, attention_backend, use_bias):** Multi-head attention with optional rotary. Dispatches to flex_attention_func, kernels_attention_func, or sdpa_attention_func from attention_utils. Supports 2D and 4D attention masks and optional BlockMask for flex. Can return attention weights and s_max.
+- **MultiHeadAttention(hidden_size, n_heads, rotary, attention_backend, use_bias):** Multi-head attention with optional rotary. Dispatches to flex_attention_func, kernels_attention_func, or sdpa_attention_func from attention_utils. Supports 2D and 4D attention masks and optional BlockMask for flex. Can return attention weights and s_max. (Note: configs that wrap this module now expose `head_size` as the primary knob and derive `n_heads = hidden_size // head_size`. Passing `n_heads` to the *configs* is deprecated; the primitive itself still accepts `n_heads` directly.)
 - **AttentionLogitsSequence,** **AttentionLogitsToken:** Cross-attention modules for sequence-level and token-level classification from attention over learned parameters.
 - **Linear,** **LayerNorm:** Re-exports of `nn.Linear` and `nn.LayerNorm` for use across probes.
 

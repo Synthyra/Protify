@@ -81,6 +81,8 @@ DATASET_NAMES = {
     'optimal_temperature': 'optimal temperature',
     'optimal-ph': 'optimal pH',
     'optimal_ph': 'optimal pH',
+    'optimal-ph-rigor': r'optimal pH$_{rigor}$',
+    'optimal_ph_rigor': r'optimal pH$_{rigor}$',
     'material-production': 'material production',
     'material_production': 'material production',
     'fitness-prediction': 'fitness',
@@ -159,7 +161,6 @@ DATASET_NAMES = {
     'foldseek-fold': 'foldseek fold',
     'foldseek-inverse': 'foldseek inverse',
     'foldseek_dataset': 'foldseek',
-    'bernett_processed': r'$Bernett_{processed}$',
 
     # ProteinGym datasets
     'proteingym_zs': r'$ProteinGym_{zero-shot}$',
@@ -192,6 +193,16 @@ DATASET_NAMES = {
     'taxon_family': r'$taxonomy_{family}$',
     'taxon_genus': r'$taxonomy_{genus}$',
     'taxon_species': r'$taxonomy_{species}$',
+
+    # bom-pooling paper (Hoang & Singh 2025)
+    'FLUO': 'FLUO',
+    'bom_fluorescence': 'FLUO',
+    'BLAC': 'BLAC',
+    'bom_blac': 'BLAC',
+    'remote_homology': r'$RH_{SCOPe}$',
+    'bom_remote_homology': r'$RH_{SCOPe}$',
+    'DPI': 'DPI',
+    'bom_dpi': 'DPI',
 
     # Other datasets
     'plddt': r'$pLDDT_{AlphaFold2}$',

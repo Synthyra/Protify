@@ -1,9 +1,10 @@
 ### imports
 import random
+import sqlite3
 import torch
 import numpy as np
-import sqlite3
 import torch.nn.functional as F
+from collections import OrderedDict
 from torch.utils.data import Dataset as TorchDataset
 from tqdm.auto import tqdm
 
@@ -21,7 +22,7 @@ class PairEmbedsLabelsDatasetFromDisk(TorchDataset):
             col_a='SeqA',
             col_b='SeqB',
             label_col='labels',
-            full=False, 
+            full=False,
             db_path='embeddings.db',
             batch_size=64,
             read_scaler=100,
@@ -33,16 +34,14 @@ class PairEmbedsLabelsDatasetFromDisk(TorchDataset):
         ):
         self.seqs_a, self.seqs_b, self.labels = list(hf_dataset[col_a]), list(hf_dataset[col_b]), list(hf_dataset[label_col])
         self.db_file = db_path
-        self.batch_size = batch_size
         self.input_size = input_size
         self.full = full
         self.length = len(self.labels)
-        self.read_amt = read_scaler * self.batch_size
-        self.embeddings_a, self.embeddings_b, self.current_labels = [], [], []
-        self.count, self.index = 0, 0
         self.task_type = task_type
         self.train = train
         self.random_pair_flipping = random_pair_flipping
+        self._cache_max = max(read_scaler * batch_size, 1)
+        self._emb_cache: "OrderedDict[str, torch.Tensor]" = OrderedDict()
         self._conn = sqlite3.connect(self.db_file, timeout=30)
         self._cursor = self._conn.cursor()
 
@@ -56,57 +55,27 @@ class PairEmbedsLabelsDatasetFromDisk(TorchDataset):
         else:
             print_message('All sequences in embeddings')
 
-    def reset_epoch(self):
-        data = list(zip(self.seqs_a, self.seqs_b, self.labels))
-        random.shuffle(data)
-        self.seqs_a, self.seqs_b, self.labels = zip(*data)
-        self.seqs_a, self.seqs_b, self.labels = list(self.seqs_a), list(self.seqs_b), list(self.labels)
-        self.embeddings_a, self.embeddings_b, self.current_labels = [], [], []
-        self.count, self.index = 0, 0
-
-    def _batch_fetch(self, seqs: List[str]) -> Dict[str, torch.Tensor]:
-        unique_seqs = list(set(seqs))
-        placeholders = ','.join('?' * len(unique_seqs))
+    def _get_emb(self, seq: str) -> torch.Tensor:
+        cached = self._emb_cache.get(seq)
+        if cached is not None:
+            self._emb_cache.move_to_end(seq)
+            return cached
         self._cursor.execute(
-            f"SELECT sequence, embedding FROM embeddings WHERE sequence IN ({placeholders})",
-            unique_seqs,
+            "SELECT embedding FROM embeddings WHERE sequence = ?",
+            (seq,),
         )
-        cache = {}
-        for seq, blob in self._cursor.fetchall():
-            cache[seq] = embedding_blob_to_tensor(blob, fallback_shape=(-1, self.input_size))
-        missing = [s for s in unique_seqs if s not in cache]
-        assert not missing, f"Embeddings not found for {len(missing)} sequences: {missing[:5]}"
-        return cache
-
-    def read_embeddings(self):
-        embeddings_a, embeddings_b, labels = [], [], []
-        self.count += self.read_amt
-        if self.count >= self.length:
-            self.reset_epoch()
-
-        end = min(self.count + self.read_amt, self.length)
-        chunk_a = self.seqs_a[self.count:end]
-        chunk_b = self.seqs_b[self.count:end]
-        cache = self._batch_fetch(chunk_a + chunk_b)
-
-        for seq_a, seq_b, lbl in zip(chunk_a, chunk_b, self.labels[self.count:end]):
-            embeddings_a.append(cache[seq_a])
-            embeddings_b.append(cache[seq_b])
-            labels.append(lbl)
-        self.index = 0
-        self.embeddings_a = embeddings_a
-        self.embeddings_b = embeddings_b
-        self.current_labels = labels
+        row = self._cursor.fetchone()
+        assert row is not None, f"Embedding not found for sequence of length {len(seq)}"
+        emb = embedding_blob_to_tensor(row[0], fallback_shape=(-1, self.input_size))
+        self._emb_cache[seq] = emb
+        while len(self._emb_cache) > self._cache_max:
+            self._emb_cache.popitem(last=False)
+        return emb
 
     def __getitem__(self, idx):
-        if self.index >= len(self.current_labels) or len(self.current_labels) == 0:
-            self.read_embeddings()
-
-        emb_a = self.embeddings_a[self.index]
-        emb_b = self.embeddings_b[self.index]
-        label = self.current_labels[self.index]
-
-        self.index += 1
+        emb_a = self._get_emb(self.seqs_a[idx])
+        emb_b = self._get_emb(self.seqs_b[idx])
+        label = self.labels[idx]
 
         # Optional random pair order augmentation during training only.
         if self.train and self.random_pair_flipping and random.random() < 0.5:
@@ -187,25 +156,20 @@ class EmbedsLabelsDatasetFromDisk(TorchDataset):
             input_size=768,
             task_type='singlelabel',
             **kwargs
-        ): 
+        ):
         self.seqs, self.labels = list(hf_dataset[col_name]), list(hf_dataset[label_col])
         self.length = len(self.labels)
         self.max_length = len(max(self.seqs, key=len))
         print_message(f'Max length: {self.max_length}')
 
         self.db_file = db_path
-        self.batch_size = batch_size
         self.input_size = input_size
         self.full = full
-
         self.task_type = task_type
-        self.read_amt = read_scaler * self.batch_size
-        self.embeddings, self.current_labels = [], []
-        self.count, self.index = 0, 0
+        self._cache_max = max(read_scaler * batch_size, 1)
+        self._emb_cache: "OrderedDict[str, torch.Tensor]" = OrderedDict()
         self._conn = sqlite3.connect(self.db_file, timeout=30)
         self._cursor = self._conn.cursor()
-
-        self.reset_epoch()
 
     def __len__(self):
         return self.length
@@ -222,58 +186,29 @@ class EmbedsLabelsDatasetFromDisk(TorchDataset):
         else:
             print_message('All sequences in embeddings')
 
-    def reset_epoch(self):
-        data = list(zip(self.seqs, self.labels))
-        random.shuffle(data)
-        self.seqs, self.labels = zip(*data)
-        self.seqs, self.labels = list(self.seqs), list(self.labels)
-        self.embeddings, self.current_labels = [], []
-        self.count, self.index = 0, 0
-
-    def _batch_fetch(self, seqs: List[str]) -> Dict[str, torch.Tensor]:
-        unique_seqs = list(set(seqs))
-        placeholders = ','.join('?' * len(unique_seqs))
+    def _get_emb(self, seq: str) -> torch.Tensor:
+        cached = self._emb_cache.get(seq)
+        if cached is not None:
+            self._emb_cache.move_to_end(seq)
+            return cached
         self._cursor.execute(
-            f"SELECT sequence, embedding FROM embeddings WHERE sequence IN ({placeholders})",
-            unique_seqs,
+            "SELECT embedding FROM embeddings WHERE sequence = ?",
+            (seq,),
         )
-        cache = {}
-        for seq, blob in self._cursor.fetchall():
-            cache[seq] = embedding_blob_to_tensor(blob, fallback_shape=(-1, self.input_size))
-        missing = [s for s in unique_seqs if s not in cache]
-        assert not missing, f"Embeddings not found for {len(missing)} sequences: {missing[:5]}"
-        return cache
-
-    def read_embeddings(self):
-        embeddings, labels = [], []
-        self.count += self.read_amt
-        if self.count >= self.length:
-            self.reset_epoch()
-
-        end = min(self.count + self.read_amt, self.length)
-        chunk_seqs = self.seqs[self.count:end]
-        cache = self._batch_fetch(chunk_seqs)
-
-        for seq, lbl in zip(chunk_seqs, self.labels[self.count:end]):
-            emb = cache[seq]
-            if self.full:
-                padding_needed = self.max_length - emb.size(0)
-                emb = F.pad(emb, (0, 0, 0, padding_needed), value=0)
-            embeddings.append(emb)
-            labels.append(lbl)
-        self.index = 0
-        self.embeddings = embeddings
-        self.current_labels = labels
+        row = self._cursor.fetchone()
+        assert row is not None, f"Embedding not found for sequence of length {len(seq)}"
+        emb = embedding_blob_to_tensor(row[0], fallback_shape=(-1, self.input_size))
+        self._emb_cache[seq] = emb
+        while len(self._emb_cache) > self._cache_max:
+            self._emb_cache.popitem(last=False)
+        return emb
 
     def __getitem__(self, idx):
-        if self.index >= len(self.current_labels) or len(self.current_labels) == 0:
-            self.read_embeddings()
-
-        emb = self.embeddings[self.index]
-        label = self.current_labels[self.index]
-
-        self.index += 1
-
+        emb = self._get_emb(self.seqs[idx])
+        if self.full:
+            padding_needed = self.max_length - emb.size(0)
+            emb = F.pad(emb, (0, 0, 0, padding_needed), value=0)
+        label = self.labels[idx]
         if self.task_type in ['multilabel', 'regression', 'sigmoid_regression']:
             label = torch.tensor(label, dtype=torch.float)
         else:
@@ -383,11 +318,11 @@ class MultiEmbedsLabelsDatasetFromDisk(TorchDataset):
         self.length = len(self.labels)
         self.full = full
         self.db_file = db_path
-        self.batch_size = batch_size
-        self.read_amt = read_scaler * self.batch_size
         self.input_size = input_size // len(seq_cols) if not full else input_size # already scaled if multi-column
         self.task_type = task_type
         self.train = train
+        self._cache_max = max(read_scaler * batch_size, 1)
+        self._emb_cache: "OrderedDict[str, torch.Tensor]" = OrderedDict()
 
         # Store sequences per column
         self.col_to_seqs = {col: list(hf_dataset[col]) for col in seq_cols}
@@ -398,37 +333,28 @@ class MultiEmbedsLabelsDatasetFromDisk(TorchDataset):
                 return sum(len(self.col_to_seqs[c][i]) for c in self.seq_cols) + (len(self.seq_cols) - 1)
             self.max_length = max(combined_len_at(i) for i in range(self.length)) if self.length > 0 else 0
 
-        self.embeddings, self.current_labels = [], []
-        self.count, self.index = 0, 0
         self._conn = sqlite3.connect(self.db_file, timeout=30)
         self._cursor = self._conn.cursor()
 
     def __len__(self):
         return self.length
 
-    def reset_epoch(self):
-        # shuffle consistently across columns
-        idxs = list(range(self.length))
-        random.shuffle(idxs)
-        for col in self.seq_cols:
-            self.col_to_seqs[col] = [self.col_to_seqs[col][i] for i in idxs]
-        self.labels = [self.labels[i] for i in idxs]
-        self.embeddings, self.current_labels = [], []
-        self.count, self.index = 0, 0
-
-    def _batch_fetch(self, seqs: List[str]) -> Dict[str, torch.Tensor]:
-        unique_seqs = list(set(seqs))
-        placeholders = ','.join('?' * len(unique_seqs))
+    def _get_emb(self, seq: str) -> torch.Tensor:
+        cached = self._emb_cache.get(seq)
+        if cached is not None:
+            self._emb_cache.move_to_end(seq)
+            return cached
         self._cursor.execute(
-            f"SELECT sequence, embedding FROM embeddings WHERE sequence IN ({placeholders})",
-            unique_seqs,
+            "SELECT embedding FROM embeddings WHERE sequence = ?",
+            (seq,),
         )
-        cache = {}
-        for seq, blob in self._cursor.fetchall():
-            cache[seq] = embedding_blob_to_tensor(blob, fallback_shape=(-1, self.input_size))
-        missing = [s for s in unique_seqs if s not in cache]
-        assert not missing, f"Embeddings not found for {len(missing)} sequences: {missing[:5]}"
-        return cache
+        row = self._cursor.fetchone()
+        assert row is not None, f"Embedding not found for sequence of length {len(seq)}"
+        emb = embedding_blob_to_tensor(row[0], fallback_shape=(-1, self.input_size))
+        self._emb_cache[seq] = emb
+        while len(self._emb_cache) > self._cache_max:
+            self._emb_cache.popitem(last=False)
+        return emb
 
     def _combine_matrix(self, parts: List[torch.Tensor]) -> torch.Tensor:
         if len(parts) == 0:
@@ -441,42 +367,18 @@ class MultiEmbedsLabelsDatasetFromDisk(TorchDataset):
                 out.append(sep)
         return torch.cat(out, dim=0)
 
-    def read_embeddings(self):
-        embeddings, labels = [], []
-        self.count += self.read_amt
-        if self.count >= self.length:
-            self.reset_epoch()
-
-        end = min(self.count + self.read_amt, self.length)
-        all_seqs = []
-        for col in self.seq_cols:
-            all_seqs.extend(self.col_to_seqs[col][self.count:end])
-        cache = self._batch_fetch(all_seqs)
-
-        for i in range(self.count, end):
-            parts = [cache[self.col_to_seqs[col][i]] for col in self.seq_cols]
-            if self.full:
-                emb = self._combine_matrix(parts)
-                if self.full and self.max_length:
-                    pad_needed = self.max_length - emb.size(0)
-                    if pad_needed > 0:
-                        emb = F.pad(emb, (0, 0, 0, pad_needed), value=0)
-            else:
-                emb = torch.cat([p.reshape(1, -1) for p in parts], dim=-1)
-            embeddings.append(emb)
-            labels.append(self.labels[i])
-        self.index = 0
-        self.embeddings = embeddings
-        self.current_labels = labels
-
     def __getitem__(self, idx):
-        if self.index >= len(self.current_labels) or len(self.current_labels) == 0:
-            self.read_embeddings()
+        parts = [self._get_emb(self.col_to_seqs[col][idx]) for col in self.seq_cols]
+        if self.full:
+            emb = self._combine_matrix(parts)
+            if self.max_length:
+                pad_needed = self.max_length - emb.size(0)
+                if pad_needed > 0:
+                    emb = F.pad(emb, (0, 0, 0, pad_needed), value=0)
+        else:
+            emb = torch.cat([p.reshape(1, -1) for p in parts], dim=-1)
 
-        emb = self.embeddings[self.index]
-        label = self.current_labels[self.index]
-        self.index += 1
-
+        label = self.labels[idx]
         if self.task_type in ['multilabel', 'regression', 'sigmoid_regression']:
             label = torch.tensor(label, dtype=torch.float)
         else:

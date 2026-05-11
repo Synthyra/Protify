@@ -40,20 +40,13 @@ parameters:
     q: 8
   
   # Transformer probe pooling (only swept when probe_type=transformer)
+  # Strings are parsed: 'mean-cls' -> ['mean', 'cls']
   probe_pooling_types:
-    values:
-      - ['mean']
-      - ['cls']
-      - ['mean', 'cls']
-      - ['mean', 'var']
+    values: ['mean', 'cls', 'mean-cls', 'mean-var']
 
   # Embedding pooling (only swept when probe_type=transformer)
   embedding_pooling_types:
-    values:
-      - ['mean']
-      - ['var']
-      - ['mean', 'var']
-      - ['cls']
+    values: ['mean', 'var', 'mean-var', 'cls']
 
   # LoRA parameters (only swept when lora=true)
   lora_r:

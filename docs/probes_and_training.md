@@ -64,7 +64,8 @@ Defined in [get_probe.py](../src/protify/probes/get_probe.py). Key attributes (C
 | `classifier_size` | int | 4096 | Classifier FF dimension. |
 | `transformer_dropout` | float | 0.1 | Transformer dropout. |
 | `classifier_dropout` | float | 0.2 | Classifier dropout. |
-| `n_heads` | int | 4 | Attention heads. |
+| `head_size` | int | 128 | Attention head dimension; `n_heads = hidden_size // head_size`. |
+| `n_heads` | int | None | DEPRECATED (kept for backwards compatibility with old configs/checkpoints). Set `head_size` instead. |
 | `rotary` | bool | True | Rotary embeddings. |
 | `attention_backend` | str | flex | kernels, flex, sdpa. |
 | `output_s_max` | bool | False | Return s_max from attention. |
@@ -96,10 +97,13 @@ Defined in [trainers.py](../src/protify/probes/trainers.py).
 | `base_batch_size` | int | 4 | Batch size (base model). |
 | `probe_grad_accum` | int | 1 | Gradient accumulation (probe). |
 | `base_grad_accum` | int | 1 | Gradient accumulation (base). |
-| `lr` | float | 1e-4 | Learning rate. |
+| `lr` | float | 1e-4 | Learning rate (shared by probe and base phases unless `base_lr` is set). |
 | `weight_decay` | float | 0.00 | Weight decay. |
 | `task_type` | str | regression | regression or classification. |
-| `patience` | int | 3 | Early-stopping patience. |
+| `patience` | int | 3 | Early-stopping patience (probe phase, and base phase unless `base_patience` is set). |
+| `base_num_epochs` | Optional[int] | None | Epoch count for the base-model phase of hybrid / full-finetuning training. `None` falls back to `num_epochs`. |
+| `base_patience` | Optional[int] | None | Early-stopping patience for the base-model phase. `None` falls back to `patience`. |
+| `base_lr` | Optional[float] | None | Learning rate for the base-model phase. `None` falls back to `lr`. |
 | `read_scaler` | int | 100 | For dataset read scaling (e.g. SQL). |
 | `save_model` | bool | False | Save/push model (e.g. to Hub). |
 | `push_raw_probe` | bool | False | With save_model, push raw probe class to Hub (load with Class.from_pretrained(repo_id)) instead of packaged AutoModel. |
@@ -110,6 +114,11 @@ Defined in [trainers.py](../src/protify/probes/trainers.py).
 | `num_workers` | int | 0 | DataLoader workers. |
 | `make_plots` | bool | True | Generate CI plots. |
 | `num_runs` | int | 1 | Number of seeds; aggregate mean and std. |
+| `balanced_regression_metrics` | bool | True | Compute EpHod-style balanced metrics for regression tasks. See [Balanced regression metrics](#balanced-regression-metrics). |
+| `balanced_weight_method` | str | bin_inv | One of `none`, `bin_inv`, `bin_inv_sqrt`, `LDS_inv`, `LDS_inv_sqrt`, `LDS_extreme`. |
+| `balanced_bin_borders` | List[float] | None | Explicit bin borders for digitization (e.g. `[5, 9]` for pH). None uses 1/3 and 2/3 quantiles of training labels. |
+| `balanced_n_resamples` | int | 100 | Number of weight-draws for resampled Pearson/Spearman. |
+| `balanced_lds_bins`, `balanced_lds_ks`, `balanced_lds_sigma` | int, int, float | 100, 5, 2.0 | LDS kernel hyperparameters (only used for `LDS_*` methods). |
 
 Calling `trainer_args(probe=True)` or `trainer_args(probe=False)` returns HuggingFace `TrainingArguments` with the appropriate batch size and grad accumulation.
 
@@ -127,6 +136,61 @@ Calling `trainer_args(probe=True)` or `trainer_args(probe=False)` returns Huggin
 ## num_runs aggregation
 
 When `num_runs > 1`, the trainer runs training `num_runs` times with different seeds, collects metrics (e.g. test loss, spearman), and computes mean and std. The best run (by test loss or selected metric) is used for optional CI plots and reporting. Metrics logged include `*_mean` and `*_std` variants.
+
+---
+
+## Balanced regression metrics
+
+For regression tasks, Protify reports a second set of metrics designed to handle skewed label distributions, ported from EpHod (Gado et al., *Nature Machine Intelligence* 2025; [github.com/jafetgado/EpHod](https://github.com/jafetgado/EpHod)). The motivation: when ~75% of labels cluster in a narrow region (e.g. pH 6-8), standard RMSE, R^2, Pearson, and Spearman are dominated by the mode and understate error on rare extremes.
+
+Sample weights are derived from the **training** labels once at dataset-load time and reused for valid and test scoring. Implementation in [src/protify/metrics_balanced.py](../src/protify/metrics_balanced.py).
+
+### Weighting schemes
+
+| Method | Description |
+|--------|-------------|
+| `none` | Uniform weights (mean 1). |
+| `bin_inv` | Digitize labels with `bin_borders`; weight = 1 / bin_count. **EpHod default.** |
+| `bin_inv_sqrt` | `sqrt(bin_inv)` (milder upweighting). |
+| `LDS_inv` | Label Distribution Smoothing (Yang et al. 2021): Gaussian-smoothed histogram over 100 bins; weight = 1 / smoothed density. |
+| `LDS_inv_sqrt` | `sqrt(LDS_inv)`. |
+| `LDS_extreme` | `LDS_inv` with rare values (`y <= borders[0]` or `y >= borders[-1]`) doubled. |
+
+All schemes are normalized to mean 1.
+
+### Reported metrics (`balanced_` prefix)
+
+- `balanced_weighted_rmse`, `balanced_weighted_r_squared`
+- `balanced_weighted_pearson_rho`, `balanced_weighted_spearman_rho` (mean over `n_resamples` weight-balanced bootstrap draws)
+- `balanced_weighted_pearson_rho_std`, `balanced_weighted_spearman_rho_std`
+- `balanced_binned_mcc` (multi-class MCC on digitized labels)
+- `balanced_binned_f1_per_bin`, `balanced_binned_f1_mean` (one-vs-rest F1)
+- `balanced_binned_roc_auc_per_bin`, `balanced_binned_roc_auc_mean` (one-vs-rest ROC-AUC)
+- `balanced_bin_borders`, `balanced_n_bins`, `balanced_n_resamples` (echoed for transparency)
+
+### Example: pH regression with explicit borders
+
+```bash
+py -m main --model_names ESM2-8 --data_names EpHod \
+    --balanced_weight_method bin_inv \
+    --balanced_bin_borders 5 9
+```
+
+### Example: auto bin borders (tertiles)
+
+Omit `--balanced_bin_borders` to use `[quantile(y_train, 1/3), quantile(y_train, 2/3)]`:
+
+```bash
+py -m main --model_names ESM2-8 --data_names MyRegressionDataset \
+    --balanced_weight_method bin_inv_sqrt
+```
+
+### Disable
+
+```bash
+py -m main --model_names ESM2-8 --data_names MyRegressionDataset \
+    --no_balanced_regression_metrics
+```
 
 ---
 
@@ -172,6 +236,19 @@ py -m src.protify.main --model_names ESM2-8 --data_names DeepLoc-2 --full_finetu
 ```bash
 py -m src.protify.main --model_names ESM2-8 --data_names DeepLoc-2 --hybrid_probe
 ```
+
+The hybrid flow runs in two phases with the same `--num_epochs`, `--patience`, and `--lr` by default: first a probe-only phase on frozen PLM embeddings, then a joint phase that unfreezes the base model (optionally LoRA-wrapped via `--lora`). Use `--base_num_epochs`, `--base_patience`, and `--base_lr` to decouple the phases - for example, training the probe for many epochs and then doing a short LoRA pass at a higher LR:
+
+```bash
+py -m src.protify.main \
+    --model_names DPLM2-3B --data_names optimal-ph \
+    --matrix_embed --sql --probe_type transformer \
+    --hybrid_probe --lora \
+    --num_epochs 15 --patience 3 --lr 2e-5 \
+    --base_num_epochs 1 --base_patience 1 --base_lr 2e-4
+```
+
+When any `--base_*` flag is omitted, that phase falls back to the probe-phase value, preserving the original single-setting behavior.
 
 ### Scikit path
 

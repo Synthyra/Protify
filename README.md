@@ -211,7 +211,6 @@ Protify is currently in beta. We're actively working to enhance features and doc
   | KSMoFinder | Kinase substrate prediction dataset. | SLC | Enzyme function prediction | No | Yes |
   | KSMoFinder-clustered | Clustered kinase substrate prediction dataset. | SLC | Enzyme function prediction | No | Yes |
   | plm-interact | PLM-Interact human PPI cross-species dataset. | SLC | PPI prediction | No | Yes |
-  | bernett_processed | Processed Bernett PPI benchmark dataset. | SLC | PPI prediction | No | Yes |
 </details>
 
 For more details about supported models and datasets, including programmatic access and command-line utilities, see the [Resource Listing Documentation](docs/resource_listing.md).
@@ -275,8 +274,8 @@ Run all commands from the **repository root** on your host (no need to `cd src/p
 git clone https://github.com/Gleghorn-Lab/Protify.git
 cd Protify
 git submodule update --init --remote --recursive
-docker build -t protify-env:latest .
-docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify protify-env:latest python -m main --data_names EC --model_names ESM2 --probe_type transformer --max_length 128 --probe_batch_size 4
+docker build -t protify .
+docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify protify python -m main --data_names EC --model_names ESM2 --probe_type transformer --max_length 128 --probe_batch_size 4
 ```
 
 **Windows (PowerShell or cmd):**
@@ -284,8 +283,8 @@ docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify 
 git clone https://github.com/Gleghorn-Lab/Protify.git
 cd Protify
 git submodule update --init --remote --recursive
-docker build -t protify-env:latest .
-docker run --rm -it --gpus all -v "%CD%":/workspace -w /workspace/src/protify protify-env:latest py -m main --data_names EC --model_names ESM2 --probe_type transformer --max_length 128 --probe_batch_size 4
+docker build -t protify .
+docker run --rm -it --gpus all -v "%CD%":/workspace -w /workspace/src/protify protify py -m main --data_names EC --model_names ESM2 --probe_type transformer --max_length 128 --probe_batch_size 4
 ```
 
 Omit the `--data_names` and other CLI args to see help, or add any options you need. Output paths like `--log_dir` and `--results_dir` are relative to `/workspace/src/protify`; use e.g. `--log_dir /workspace/logs` to write at project root. Note: you may need `sudo` before the docker commands on Linux.
@@ -429,7 +428,7 @@ pip install -v -U git+https://github.com/facebookresearch/xformers.git@main#egg=
 
   With Docker (from the repo root on your host):
   ```
-  docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify protify-env:latest python -m main --model_names ESM2-8 ESM2-35 ESMC-300 ProtBert ANKH-Base Random Random-Transformer --data_names EC DeepLoc-2 enzyme-kcat MB solubility --patience 3
+  docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify protify python -m main --model_names ESM2-8 ESM2-35 ESMC-300 ProtBert ANKH-Base Random Random-Transformer --data_names EC DeepLoc-2 enzyme-kcat MB solubility --patience 3
   ```
   On Windows use `-v "%CD%":/workspace` and `py -m main` instead of `python -m main`.
 
@@ -567,8 +566,10 @@ parameters:
     values: [True, False]
   classifier_dim:
     values: [4096, 8192]
-  n_heads:  # number of attention heads
-    values: [2, 4, 8]
+  head_size:  # attention head dimension; n_heads = hidden_size // head_size
+    values: [64, 128, 256]
+  # `n_heads` is deprecated as a sweep key. Old configs that use it are auto-migrated
+  # to `head_size = hidden_size // n_heads` with a DeprecationWarning.
   
   # LoRA parameters
   lora_r:
@@ -662,14 +663,14 @@ The suite covers metrics, pooling, probe construction, model components, loss fu
 For Docker-based testing (recommended for GPU-dependent tests):
 
 ```bash
-docker build -t protify-env:latest .
-docker run --rm --gpus all -v "${PWD}":/workspace -w /workspace protify-env:latest python -m pytest src/protify/testing_suite/ -v
+docker build -t protify .
+docker run --rm --gpus all -v "${PWD}":/workspace -w /workspace protify python -m pytest src/protify/testing_suite/ -v
 ```
 
 To run only CPU tests (no GPU required):
 
 ```bash
-docker run --rm -v "${PWD}":/workspace -w /workspace protify-env:latest python -m pytest src/protify/testing_suite/ -v -m "not gpu and not slow"
+docker run --rm -v "${PWD}":/workspace -w /workspace protify python -m pytest src/protify/testing_suite/ -v -m "not gpu and not slow"
 ```
 
 See [docs/testing.md](docs/testing.md) for full details.

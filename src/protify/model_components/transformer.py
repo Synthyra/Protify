@@ -10,6 +10,32 @@ from .attention_utils import AttentionBackend, BlockMask, build_attention_masks,
 from .mlp import swiglu_ln_ffn
 
 
+_UNSET = object()
+
+
+def _resolve_head_size(hidden_size: int, head_size, n_heads_legacy, default_head_size: int) -> int:
+    if head_size is _UNSET and n_heads_legacy is None:
+        head_size = default_head_size
+    elif head_size is _UNSET and n_heads_legacy is not None:
+        assert hidden_size % n_heads_legacy == 0, (
+            f"hidden_size {hidden_size} not divisible by legacy n_heads {n_heads_legacy}"
+        )
+        head_size = hidden_size // n_heads_legacy
+    elif head_size is not _UNSET and n_heads_legacy is not None:
+        assert hidden_size % n_heads_legacy == 0, (
+            f"hidden_size {hidden_size} not divisible by legacy n_heads {n_heads_legacy}"
+        )
+        derived = hidden_size // n_heads_legacy
+        assert derived == head_size, (
+            f"Conflicting head_size={head_size} and legacy n_heads={n_heads_legacy} "
+            f"(derived head_size={derived})"
+        )
+    assert hidden_size % head_size == 0, (
+        f"hidden_size {hidden_size} not divisible by head_size {head_size}"
+    )
+    return head_size
+
+
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -164,7 +190,7 @@ class TransformerConfig(PretrainedConfig):
     def __init__(
         self,
         hidden_size: int = 512,
-        n_heads: int = 8,
+        head_size=_UNSET,
         n_layers: int = 12,
         vocab_size: int = 32000,
         expansion_ratio: float = 8 / 3,
@@ -176,9 +202,12 @@ class TransformerConfig(PretrainedConfig):
         attn_implementation: Optional[str] = None,
         **kwargs,
     ):
+        legacy_n_heads = kwargs.pop("n_heads", None)
+        head_size = _resolve_head_size(hidden_size, head_size, legacy_n_heads, default_head_size=64)
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
-        self.n_heads = n_heads
+        self.head_size = head_size
+        self.n_heads = hidden_size // head_size
         self.n_layers = n_layers
         self.expansion_ratio = expansion_ratio
         self.dropout = dropout

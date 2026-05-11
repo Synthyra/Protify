@@ -304,10 +304,17 @@ class Embedder:
         model = maybe_compile(model, dynamic=dynamic)
         device = self.device
         collate_fn = build_collator(tokenizer, padding=self.padding, max_length=self.max_length)
-        print_message(f'Pooling types: {self.pooling_types}')
-        if self.matrix_embed:
+        # Models that self-pool (e.g. Vec2VecForEmbedding: base+pooler+translator
+        # bundled) set already_pooled=True; forward() returns (B, D) directly and
+        # the Protify embedder must skip its own Pooler to avoid double-pooling.
+        already_pooled = bool(
+            getattr(model, 'already_pooled', False)
+            or getattr(getattr(model, '_orig_mod', None), 'already_pooled', False)
+        )
+        if self.matrix_embed or already_pooled:
             pooler = None
         else:
+            print_message(f'Pooling types: {self.pooling_types}')
             pooler = Pooler(self.pooling_types)
 
         def _get_embeddings(
@@ -315,7 +322,7 @@ class Embedder:
                 attention_mask: Optional[torch.Tensor] = None,
                 attentions: Optional[torch.Tensor] = None
             ) -> torch.Tensor:
-            if residue_embeddings.ndim == 2 or self.matrix_embed: # sometimes already vector emb
+            if residue_embeddings.ndim == 2 or self.matrix_embed or already_pooled:
                 return residue_embeddings
             else:
                 return pooler(emb=residue_embeddings, attention_mask=attention_mask, attentions=attentions)
@@ -359,7 +366,7 @@ class Embedder:
                 attention_mask = torch.ones_like(batch['input_ids'], device=device)
 
             with torch.autocast(device.type, dtype=self.embed_dtype, enabled=self.autocast):
-                if 'parti' in self.pooling_types:
+                if 'parti' in self.pooling_types and not already_pooled:
                     try:
                         residue_embeddings, attentions = model(**batch, output_attentions=True)
                         embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask, attentions=attentions).cpu()

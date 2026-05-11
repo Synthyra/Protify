@@ -41,7 +41,8 @@ try:
     )
     from visualization.ci_plots import regression_ci_plot, classification_ci_plot
     from utils import print_message
-    from metrics import get_compute_metrics
+    from metrics import get_compute_metrics, get_compute_metrics_with_balanced
+    from metrics_balanced import compute_balanced_regression_metrics
     from seed_utils import set_global_seed
     from probes.get_probe import get_probe
 except ImportError:
@@ -53,7 +54,8 @@ except ImportError:
     )
     from ..visualization.ci_plots import regression_ci_plot, classification_ci_plot
     from ..utils import print_message
-    from ..metrics import get_compute_metrics
+    from ..metrics import get_compute_metrics, get_compute_metrics_with_balanced
+    from ..metrics_balanced import compute_balanced_regression_metrics
     from ..seed_utils import set_global_seed
     from .get_probe import get_probe
 
@@ -108,6 +110,9 @@ class TrainerArguments:
             weight_decay: float = 0.00,
             task_type: str = 'regression',
             patience: int = 3,
+            base_num_epochs: Optional[int] = None,
+            base_patience: Optional[int] = None,
+            base_lr: Optional[float] = None,
             read_scaler: int = 100,
             save_model: bool = False,
             push_raw_probe: bool = False,
@@ -122,6 +127,13 @@ class TrainerArguments:
             num_runs: int = 1,
             torch_compile: bool = True,
             eval_accumulation_steps: Union[int, str] = "auto",
+            balanced_regression_metrics: bool = True,
+            balanced_weight_method: str = 'bin_inv',
+            balanced_bin_borders: Optional[List[float]] = None,
+            balanced_n_resamples: int = 100,
+            balanced_lds_bins: int = 100,
+            balanced_lds_ks: int = 5,
+            balanced_lds_sigma: float = 2.0,
             **kwargs
     ):
         self.model_save_dir = model_save_dir
@@ -134,6 +146,9 @@ class TrainerArguments:
         self.weight_decay = weight_decay
         self.task_type = task_type
         self.patience = patience
+        self.base_num_epochs = base_num_epochs
+        self.base_patience = base_patience
+        self.base_lr = base_lr
         self.save = save_model
         self.push_raw_probe = push_raw_probe
         self.push_raw_probe_repo = push_raw_probe_repo
@@ -148,10 +163,19 @@ class TrainerArguments:
         self.num_runs = num_runs
         self.torch_compile = torch_compile
         self.eval_accumulation_steps = eval_accumulation_steps
+        self.balanced_regression_metrics = balanced_regression_metrics
+        self.balanced_weight_method = balanced_weight_method
+        self.balanced_bin_borders = balanced_bin_borders
+        self.balanced_n_resamples = balanced_n_resamples
+        self.balanced_lds_bins = balanced_lds_bins
+        self.balanced_lds_ks = balanced_lds_ks
+        self.balanced_lds_sigma = balanced_lds_sigma
 
     def __call__(self, probe: Optional[bool] = True):
         batch_size = self.probe_batch_size if probe else self.base_batch_size
         grad_accum = self.probe_grad_accum if probe else self.base_grad_accum
+        num_epochs = self.num_epochs if (probe or self.base_num_epochs is None) else self.base_num_epochs
+        lr = self.lr if (probe or self.base_lr is None) else self.base_lr
 
         if self.train_data_size > 250000:
             eval_steps = max(1, int(100000 / (batch_size * grad_accum)))
@@ -186,11 +210,11 @@ class TrainerArguments:
 
         return TrainingArguments(
             output_dir=save_dir,
-            num_train_epochs=self.num_epochs,
+            num_train_epochs=num_epochs,
             per_device_train_batch_size=batch_size,
             per_device_eval_batch_size=batch_size,
             gradient_accumulation_steps=grad_accum,
-            learning_rate=float(self.lr),
+            learning_rate=float(lr),
             lr_scheduler_type='cosine',
             weight_decay=float(self.weight_decay),
             warmup_steps=warmup_steps,
@@ -315,6 +339,10 @@ Protify is an open source platform designed to simplify and democratize workflow
         self.trainer_args.num_labels = self.probe_args.num_labels
         self.trainer_args.eval_dataset_size = len(valid_dataset) if valid_dataset is not None else len(test_dataset)
         hf_trainer_args = self.trainer_args(probe=probe)
+        if probe or self.trainer_args.base_patience is None:
+            early_stopping_patience = self.trainer_args.patience
+        else:
+            early_stopping_patience = self.trainer_args.base_patience
         ### TODO add options for optimizers and schedulers
         trainer = Trainer(
             model=model,
@@ -323,11 +351,27 @@ Protify is an open source platform designed to simplify and democratize workflow
             eval_dataset=valid_dataset,
             data_collator=data_collator,
             compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=self.trainer_args.patience)]
+            callbacks=[EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)]
         )
         trainer.can_return_loss = True
         metrics = trainer.evaluate(test_dataset)
         print_message(f'Initial metrics: {metrics}')
+
+        bw_store = self.balanced_weights if 'balanced_weights' in self.__dict__ else None
+        bw = bw_store[data_name] if (bw_store is not None and data_name in bw_store) else None
+        balanced_active = (
+            task_type in ('regression', 'sigmoid_regression')
+            and self.trainer_args.balanced_regression_metrics
+            and bw is not None
+        )
+        if balanced_active:
+            trainer.compute_metrics = get_compute_metrics_with_balanced(
+                compute_metrics,
+                weights=bw['valid'],
+                bin_borders=bw['bin_borders'],
+                n_resamples=self.trainer_args.balanced_n_resamples,
+                seed=self.trainer_args.seed,
+            )
 
         train_output = trainer.train()
         train_runtime = train_output.metrics.get('train_runtime', 0.0)
@@ -335,6 +379,16 @@ Protify is an open source platform designed to simplify and democratize workflow
         valid_metrics = trainer.evaluate(valid_dataset)
         print_message(f'Final validation metrics: {valid_metrics}')
 
+        y_pred_valid, y_true_valid, _vm_raw = trainer.predict(valid_dataset)
+        if isinstance(y_pred_valid, tuple):
+            y_pred_valid = y_pred_valid[0]
+        if isinstance(y_true_valid, tuple):
+            y_true_valid = y_true_valid[0]
+        y_pred_valid = y_pred_valid.astype(np.float32)
+        y_true_valid = y_true_valid.astype(np.float32)
+
+        if balanced_active:
+            trainer.compute_metrics = compute_metrics
         y_pred, y_true, test_metrics = trainer.predict(test_dataset)
         if isinstance(y_pred, tuple):
             y_pred = y_pred[0]
@@ -342,13 +396,40 @@ Protify is an open source platform designed to simplify and democratize workflow
             y_true = y_true[0]
 
         y_pred, y_true = y_pred.astype(np.float32), y_true.astype(np.float32)
-        
+
         # Remove singleton dimension if present
         if y_pred.ndim == 3 and y_pred.shape[1] == 1:
             y_pred = y_pred.squeeze(1)
         if y_true.ndim == 3 and y_true.shape[1] == 1:
             y_true = y_true.squeeze(1)
-        
+
+        if task_type in ('regression', 'sigmoid_regression') and self.trainer_args.balanced_regression_metrics:
+            bw_store = self.balanced_weights if 'balanced_weights' in self.__dict__ else None
+            bw = bw_store[data_name] if (bw_store is not None and data_name in bw_store) else None
+            if bw is not None:
+                bin_borders = bw['bin_borders']
+                n_res = self.trainer_args.balanced_n_resamples
+                valid_bal = compute_balanced_regression_metrics(
+                    y_true_valid.flatten(),
+                    y_pred_valid.flatten(),
+                    bw['valid'],
+                    bin_borders=bin_borders,
+                    n_resamples=n_res,
+                    seed=self.trainer_args.seed,
+                )
+                test_bal = compute_balanced_regression_metrics(
+                    y_true.flatten(),
+                    y_pred.flatten(),
+                    bw['test'],
+                    bin_borders=bin_borders,
+                    n_resamples=n_res,
+                    seed=self.trainer_args.seed,
+                )
+                for k, v in valid_bal.items():
+                    valid_metrics[f'balanced_{k}'] = v
+                for k, v in test_bal.items():
+                    test_metrics[f'balanced_{k}'] = v
+
         test_metrics['training_time_seconds'] = train_runtime
         print_message(f'y_pred: {y_pred.shape}\ny_true: {y_true.shape}\nFinal test metrics: \n{test_metrics}\n')
 
@@ -513,8 +594,6 @@ Protify is an open source platform designed to simplify and democratize workflow
         if self.embedding_args.sql:
             print('SQL enabled')
             if ppi:
-                if full:
-                    raise ValueError('Full matrix embeddings not currently supported for SQL and PPI') # TODO: Implement
                 DatasetClass = PairEmbedsLabelsDatasetFromDisk
                 CollatorClass = PairEmbedsLabelsCollator
             elif use_multi:

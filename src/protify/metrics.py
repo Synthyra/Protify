@@ -613,6 +613,64 @@ def get_compute_metrics(task_type: str, tokenwise: bool = False) -> Callable:
     return compute_metrics
 
 
+def get_compute_metrics_with_balanced(
+    base_compute: Callable,
+    weights: np.ndarray,
+    bin_borders: list,
+    n_resamples: int = 100,
+    seed: int = 42,
+) -> Callable:
+    """
+    Wrap a base compute_metrics callable to also emit balanced regression metrics
+    (EpHod-style). Appends `balanced_*` keys. Assumes flattened predictions (after
+    dropping -100 positions) align in length with `weights`.
+    """
+    try:
+        from metrics_balanced import compute_balanced_regression_metrics
+    except ImportError:
+        from .metrics_balanced import compute_balanced_regression_metrics
+
+    weights_arr = np.asarray(weights, dtype=np.float64).flatten()
+
+    def wrapper(p: EvalPrediction) -> Dict[str, float]:
+        base_metrics = base_compute(p)
+        preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
+        labels = p.label_ids[1] if isinstance(p.label_ids, tuple) else p.label_ids
+        y_pred = np.asarray(preds, dtype=np.float64)
+        y_true = np.asarray(labels, dtype=np.float64)
+
+        if y_pred.ndim == y_true.ndim + 1 and y_pred.shape[-1] == 1:
+            y_pred = np.squeeze(y_pred, axis=-1)
+
+        y_pred = y_pred.flatten()
+        y_true = y_true.flatten()
+
+        valid_mask = y_true != -100.0
+        if valid_mask.sum() != y_true.size:
+            y_true = y_true[valid_mask]
+            y_pred = y_pred[valid_mask]
+
+        if np.isnan(y_true).any():
+            y_true = np.where(np.isnan(y_true), 0.0, y_true)
+        if np.isnan(y_pred).any():
+            y_pred = np.where(np.isnan(y_pred), 0.0, y_pred)
+
+        assert y_true.shape == weights_arr.shape, (
+            f'balanced metrics shape mismatch: preds={y_true.shape}, weights={weights_arr.shape}'
+        )
+        bal = compute_balanced_regression_metrics(
+            y_true, y_pred, weights_arr,
+            bin_borders=bin_borders,
+            n_resamples=n_resamples,
+            seed=seed,
+        )
+        for k, v in bal.items():
+            base_metrics[f'balanced_{k}'] = v
+        return base_metrics
+
+    return wrapper
+
+
 if __name__ == "__main__":
     # py -m metrics
 

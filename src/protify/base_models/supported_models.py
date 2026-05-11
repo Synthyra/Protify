@@ -59,16 +59,20 @@ all_presets_with_paths = {
     'OneHot-RNA': 'OneHot-RNA',
     'OneHot-Codon': 'OneHot-Codon',
     # Vec2Vec models (from vec2vec.py)
-    'vec2vec-ESM2-8-ESM2-35': 'Synthyra/ESM2-8-ESM2-35-sequence-sequence',
-    'vec2vec-ESM2-8-ESM2-150': 'Synthyra/ESM2-8-ESM2-150-sequence-sequence',
-    'vec2vec-ESM2-8-ESM2-650': 'Synthyra/ESM2-8-ESM2-650-sequence-sequence',
-    'vec2vec-ESM2-8-ESM2-3B': 'Synthyra/ESM2-8-ESM2-3B-sequence-sequence',
-    'vec2vec-ESM2-35-ESM2-150': 'Synthyra/ESM2-35-ESM2-150-sequence-sequence',
-    'vec2vec-ESM2-35-ESM2-650': 'Synthyra/ESM2-35-ESM2-650-sequence-sequence',
-    'vec2vec-ESM2-35-ESM2-3B': 'Synthyra/ESM2-35-ESM2-3B-sequence-sequence',
-    'vec2vec-ESM2-150-ESM2-650': 'Synthyra/ESM2-150-ESM2-650-sequence-sequence',
-    'vec2vec-ESM2-150-ESM2-3B': 'Synthyra/ESM2-150-ESM2-3B-sequence-sequence',
-    'vec2vec-ESM2-650-ESM2-3B': 'Synthyra/ESM2-650-ESM2-3B-sequence-sequence',
+    'vec2vec-ESM2-8-ESM2-35': 'lhallee/ESM2-8-ESM2-35-sequence-sequence',
+    'vec2vec-ESM2-8-ESM2-150': 'lhallee/ESM2-8-ESM2-150-sequence-sequence',
+    'vec2vec-ESM2-8-ESM2-650': 'lhallee/ESM2-8-ESM2-650-sequence-sequence',
+    'vec2vec-ESM2-8-ESM2-3B': 'lhallee/ESM2-8-ESM2-3B-sequence-sequence',
+    'vec2vec-ESM2-35-ESM2-150': 'lhallee/ESM2-35-ESM2-150-sequence-sequence',
+    'vec2vec-ESM2-35-ESM2-650': 'lhallee/ESM2-35-ESM2-650-sequence-sequence',
+    'vec2vec-ESM2-35-ESM2-3B': 'lhallee/ESM2-35-ESM2-3B-sequence-sequence',
+    'vec2vec-ESM2-150-ESM2-650': 'lhallee/ESM2-150-ESM2-650-sequence-sequence',
+    'vec2vec-ESM2-150-ESM2-3B': 'lhallee/ESM2-150-ESM2-3B-sequence-sequence',
+    'vec2vec-ESM2-650-ESM2-3B': 'lhallee/ESM2-650-ESM2-3B-sequence-sequence',
+    # Contrastive vec2vec adapters (ESM2-650 -> NLP), from run with
+    # --paired_batches --loss_coefficient_contrastive 4.0 --hub_suffix contrastive
+    'vec2vec-ESM2-650-ModernBERT-base-contrastive': 'lhallee/ESM2-650-ModernBERT-base-sequence-sequence-contrastive',
+    'vec2vec-ESM2-650-ModernBERT-large-contrastive': 'lhallee/ESM2-650-ModernBERT-large-sequence-sequence-contrastive',
     # CaLM models (from calm.py)
     'CaLM': 'multimolecule/calm',
 }

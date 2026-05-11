@@ -54,11 +54,12 @@ class ProbeArguments:
             classifier_size: int = 4096,
             transformer_dropout: float = 0.1,
             classifier_dropout: float = 0.2,
-            n_heads: int = 4,
+            head_size: int = 128,
             rotary: bool = True,
             attention_backend: str = "flex",
             output_s_max: bool = False,
             probe_pooling_types: List[str] = field(default_factory=lambda: ['mean', 'cls']),
+            bom_k: int = 60,
             expansion_ratio: float = 8 / 3,
             max_length: int = 2048,
             ### LoRA
@@ -84,11 +85,15 @@ class ProbeArguments:
         self.classifier_size = classifier_size
         self.transformer_dropout = transformer_dropout
         self.classifier_dropout = classifier_dropout
-        self.n_heads = n_heads
+        self.head_size = head_size
+        legacy_n_heads = kwargs.pop("n_heads", None)
+        if legacy_n_heads is not None and self.hidden_size % legacy_n_heads == 0:
+            self.head_size = self.hidden_size // legacy_n_heads
         self.rotary = rotary
         self.attention_backend = attention_backend
         self.output_s_max = output_s_max
         self.pooling_types = probe_pooling_types
+        self.bom_k = bom_k
         self.expansion_ratio = expansion_ratio
         self.max_seq_len = max_length
         self.lora = lora
@@ -98,6 +103,12 @@ class ProbeArguments:
 
 
 def get_probe(args: ProbeArguments):
+    if 'bom' in args.pooling_types:
+        assert args.probe_type == 'transformer' and not args.tokenwise, (
+            f"'bom' pooling is only supported by the transformer sequence probe "
+            f"(probe_type='transformer', tokenwise=False). Got probe_type={args.probe_type!r}, "
+            f"tokenwise={args.tokenwise}."
+        )
     if args.probe_type == 'linear' and not args.tokenwise:
         config = LinearProbeConfig(**args.__dict__)
         return LinearProbe(config)

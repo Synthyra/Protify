@@ -64,55 +64,56 @@ def parse_arguments():
         default="max_length",
         help="Padding strategy. 'max_length' pads all sequences to --max_length (recommended for torch.compile + flex attention). 'longest' pads to the longest sequence in each batch.",
     )
-    parser.add_argument("--trim", action="store_true", default=False,
-                        help="Whether to trim sequences (default: False). If False, sequences are removed from the dataset if they are longer than max length. If True, they are truncated to max length."
-                        )
+    parser.add_argument("--trim", action="store_true",
+                        help="Truncate sequences longer than --max_length instead of dropping them from the dataset.")
     parser.add_argument("--data_names", nargs="+", default=[], help="List of HF dataset names.") # TODO rename to data_names
     parser.add_argument("--data_dirs", nargs="+", default=[], help="List of local data directories.")
-    parser.add_argument("--aa_to_dna", action="store_true", default=False, help="Translate amino-acid sequences to DNA codon sequences using common human synonymous codons.")
-    parser.add_argument("--aa_to_rna", action="store_true", default=False, help="Translate amino-acid sequences to RNA codon sequences using common human synonymous codons.")
-    parser.add_argument("--dna_to_aa", action="store_true", default=False, help="Translate DNA codon sequences to amino-acid sequences and drop stop codons.")
-    parser.add_argument("--rna_to_aa", action="store_true", default=False, help="Translate RNA codon sequences to amino-acid sequences and drop stop codons.")
-    parser.add_argument("--codon_to_aa", action="store_true", default=False, help="Translate codon-token sequences to amino-acid sequences and drop stop codons.")
-    parser.add_argument("--aa_to_codon", action="store_true", default=False, help="Translate amino-acid sequences to codon-token sequences.")
-    parser.add_argument("--random_pair_flipping", action="store_true", default=False, help="Enable random swapping of paired inputs during training.")
+    parser.add_argument("--aa_to_dna", action="store_true", help="Translate amino-acid sequences to DNA codon sequences using common human synonymous codons.")
+    parser.add_argument("--aa_to_rna", action="store_true", help="Translate amino-acid sequences to RNA codon sequences using common human synonymous codons.")
+    parser.add_argument("--dna_to_aa", action="store_true", help="Translate DNA codon sequences to amino-acid sequences and drop stop codons.")
+    parser.add_argument("--rna_to_aa", action="store_true", help="Translate RNA codon sequences to amino-acid sequences and drop stop codons.")
+    parser.add_argument("--codon_to_aa", action="store_true", help="Translate codon-token sequences to amino-acid sequences and drop stop codons.")
+    parser.add_argument("--aa_to_codon", action="store_true", help="Translate amino-acid sequences to codon-token sequences.")
+    parser.add_argument("--random_pair_flipping", action="store_true", help="Randomly swap paired inputs during training.")
 
     # ----------------- BaseModelArguments ----------------- #
     parser.add_argument("--model_names", nargs="+", default=None, help="List of preset model names to use (e.g. ESM2-8). Mutually exclusive with --model_paths/--model_types.")
     parser.add_argument("--model_paths", nargs="+", default=None, help="List of model paths (HuggingFace or local). Must be paired with --model_types. Mutually exclusive with --model_names.")
     parser.add_argument("--model_types", nargs="+", default=None, help="List of model type keywords paired with --model_paths (e.g. esm2, esmc, protbert, prott5, ankh, glm, dplm, dplm2, protclm, onehot, amplify, e1, vec2vec, calm, custom, random).")
     parser.add_argument("--model_dtype", type=str, choices=["fp32", "fp16", "bf16", "float32", "float16", "bfloat16"], default="bf16", help="Data type for loading base models.")
-    parser.add_argument("--use_xformers", action="store_true", default=False, help="Use xformers memory efficient attention for AMPLIFY models (default: False).")
+    parser.add_argument("--use_xformers", action="store_true", help="Use xformers memory-efficient attention for AMPLIFY models.")
 
     # ----------------- ProbeArguments ----------------- #
     parser.add_argument("--probe_type", choices=["linear", "transformer", "lyra"], default="linear", help="Type of probe.")
-    parser.add_argument("--tokenwise", action="store_true", default=False, help="Tokenwise probe (default: False).")
+    parser.add_argument("--tokenwise", action="store_true", help="Use a tokenwise probe (per-token outputs) instead of a sequence-level probe.")
     parser.add_argument("--hidden_size", type=int, default=8192, help="Hidden dimension size for probe.")
     parser.add_argument("--dropout", type=float, default=0.2, help="Dropout rate.")
     parser.add_argument("--n_layers", type=int, default=1, help="Number of layers.")
-    parser.add_argument("--pre_ln", action="store_false", default=True,
-                        help="Disable pre-layernorm (default: enabled). Use --pre_ln to toggle off.")
+    parser.add_argument("--pre_ln", action="store_false",
+                        help="Disable pre-layernorm in the transformer probe (pre-LN enabled by default).")
     parser.add_argument("--classifier_size", type=int, default=4096, help="Feed-forward dimension.")
     parser.add_argument("--transformer_dropout", type=float, default=0.1, help="Dropout rate for the transformer layers.")
     parser.add_argument("--classifier_dropout", type=float, default=0.2, help="Dropout rate for the classifier.")
-    parser.add_argument("--n_heads", type=int, default=4, help="Number of heads in multi-head attention.")
-    parser.add_argument("--rotary", action="store_false", default=True,
-                        help="Disable rotary embeddings (default: enabled). Use --rotary to toggle off.")
+    parser.add_argument("--head_size", type=int, default=128, help="Attention head dimension. n_heads is derived as hidden_size // head_size.")
+    parser.add_argument("--n_heads", type=int, default=None, help="[DEPRECATED] Use --head_size. If provided, head_size is derived as hidden_size // n_heads.")
+    parser.add_argument("--rotary", action="store_false",
+                        help="Disable rotary embeddings in the transformer probe (rotary enabled by default).")
     parser.add_argument("--attention_backend", choices=["kernels", "flex", "sdpa"], default="flex", help="Attention backend for transformer-style probes.")
-    parser.add_argument("--output_s_max", action="store_true", default=False, help="Return s_max bounds from transformer-style probe attention layers.")
+    parser.add_argument("--output_s_max", action="store_true", help="Return s_max bounds from transformer-style probe attention layers.")
     parser.add_argument("--probe_pooling_types", nargs="+", default=["mean", "var"], help="Pooling types to use.")
-    parser.add_argument("--use_bias", action="store_true", default=False, help="Use bias in Linear layers (default: False)")
+    parser.add_argument("--bom_k", type=int, default=60, help="K-mer window size for 'bom' pooling in the transformer probe. Default 60 is a cross-task compromise from Hoang & Singh 2025: peak for DPI (Section 4.3), mid-range of the {20,40,60,80,100} sweep on FLUO/BLAC, and close to the reported k=100 optimum for remote homology. Only used when 'bom' is in --probe_pooling_types.")
+    parser.add_argument("--use_bias", action="store_true", help="Use bias terms in Linear layers.")
     parser.add_argument("--expansion_ratio", type=float, default=8/3, help="FFN expansion ratio for transformer probes.")
-    parser.add_argument("--save_model", action="store_true", default=False, help="Save trained model (default: False).")
-    parser.add_argument("--push_raw_probe", action="store_true", default=False, help="With --save_model, push raw probe class to Hub instead of packaged AutoModel.")
+    parser.add_argument("--save_model", action="store_true", help="Save the trained model/probe to disk.")
+    parser.add_argument("--push_raw_probe", action="store_true", help="With --save_model, push the raw probe class to the Hub instead of the packaged AutoModel.")
     parser.add_argument("--push_raw_probe_repo", type=str, default=None, help="Custom HF repo id for --push_raw_probe. If omitted, auto-generated.")
-    parser.add_argument("--production_model", action="store_true", default=False, help="Production model (default: False).")
-    parser.add_argument("--lora", action="store_true", default=False, help="Use LoRA (default: False).")
+    parser.add_argument("--production_model", action="store_true", help="Train a production-grade scikit model (used with --use_scikit).")
+    parser.add_argument("--lora", action="store_true", help="Wrap the base model in LoRA adapters during full-finetuning / hybrid training.")
     parser.add_argument("--lora_r", type=int, default=8, help="Number of trainable parameters in the LoRA model.")
     parser.add_argument("--lora_alpha", type=float, default=32.0, help="Alpha for the LoRA model.")
     parser.add_argument("--lora_dropout", type=float, default=0.01, help="Dropout rate for the LoRA model.")
     parser.add_argument("--sim_type", choices=["dot", "euclidean", "cosine"], default="dot", help="Cross-attention mechanism for token-parameter-attention")
-    parser.add_argument("--add_token_ids", action="store_true", default=False, help="If true, add learned token type embeddings to distinguish protein A vs B in PPI tasks.")
+    parser.add_argument("--add_token_ids", action="store_true", help="Add learned token-type embeddings to distinguish protein A vs B in PPI tasks.")
 
     # ----------------- ScikitArguments ----------------- #
     parser.add_argument("--scikit_n_iter", type=int, default=10, help="Number of iterations for scikit model.")
@@ -120,19 +121,19 @@ def parse_arguments():
     parser.add_argument("--scikit_random_state", type=int, default=None, help="Random state for scikit model (if None, uses global seed).")
     parser.add_argument("--scikit_model_name", type=str, default=None, help="Name of the scikit model to use.")
     parser.add_argument("--scikit_model_args", type=str, default=None, help="JSON string of hyperparameters to use (skips tuning). E.g. '{\"n_estimators\": 500, \"max_depth\": 7}'")
-    parser.add_argument("--use_scikit", action="store_true", default=False, help="Use scikit model (default: False).")
+    parser.add_argument("--use_scikit", action="store_true", help="Use a scikit-learn model instead of a neural probe.")
     parser.add_argument("--n_jobs", type=int, default=1, help="Number of processes to use in scikit.") # TODO integrate with GUI and main
 
     # ----------------- EmbeddingArguments ----------------- #
     parser.add_argument("--embedding_batch_size", type=int, default=16, help="Batch size for embedding generation.")
     parser.add_argument("--embedding_num_workers", type=int, default=0, help="Number of worker processes for embedding generation.")
     parser.add_argument("--num_workers", type=int, default=0, help="Number of worker processes for data loading.")
-    parser.add_argument("--download_embeddings", action="store_true", default=False, help="Whether to download embeddings (default: False).")
-    parser.add_argument("--matrix_embed", action="store_true", default=False, help="Use matrix embedding (default: False).")
+    parser.add_argument("--download_embeddings", action="store_true", help="Download pre-computed embeddings from the Hub instead of computing them locally.")
+    parser.add_argument("--matrix_embed", action="store_true", help="Store per-token (matrix) embeddings instead of pooled vector embeddings.")
     parser.add_argument("--embedding_pooling_types", nargs="+", default=["mean", "var"], help="Pooling types for embeddings.")
-    parser.add_argument("--save_embeddings", action="store_true", default=False, help="Save computed embeddings (default: False).")
+    parser.add_argument("--save_embeddings", action="store_true", help="Save computed embeddings to disk.")
     parser.add_argument("--embed_dtype", type=str, choices=["fp32", "fp16", "bf16", "float32", "float16", "bfloat16"], default=None, help="Data type for embeddings. If omitted, uses --model_dtype.")
-    parser.add_argument("--sql", action="store_true", default=False, help="Whether to use SQL storage (default: False).")
+    parser.add_argument("--sql", action="store_true", help="Store embeddings in a SQLite backend (streamed at train time) instead of in-RAM .pth.")
     parser.add_argument("--read_scaler", type=int, default=100, help="Read scaler for SQL storage.")
 
     # ----------------- Multi-Column Sequences ----------------- #
@@ -151,19 +152,45 @@ def parse_arguments():
     #parser.add_argument("--lr_scheduler", type=str, default='cosine', help='Learning rate scheduler.')
     #parser.add_argument("--optimizer", type=str, default='adamw', help='Optimizer.')
     parser.add_argument("--weight_decay", type=float, default=0.00, help="Weight decay.")
-    parser.add_argument("--patience", type=int, default=1, help="Patience for early stopping.")
+    parser.add_argument("--patience", type=int, default=1, help="Patience for early stopping (probe phase, and base phase unless --base_patience is set).")
+    parser.add_argument("--base_num_epochs", type=int, default=None,
+                        help="Epoch count for the base-model phase of hybrid / full-finetuning training. If omitted, falls back to --num_epochs.")
+    parser.add_argument("--base_patience", type=int, default=None,
+                        help="Early-stopping patience for the base-model phase of hybrid / full-finetuning training. If omitted, falls back to --patience.")
+    parser.add_argument("--base_lr", type=float, default=None,
+                        help="Learning rate for the base-model phase of hybrid / full-finetuning training (useful when LoRA/full-FT wants a different LR than the probe). If omitted, falls back to --lr.")
     parser.add_argument("--seed", type=int, default=None, help="Seed for reproducibility (if omitted, current time is used).")
-    parser.add_argument("--deterministic", action="store_true", default=False,
-                        help="Enable deterministic behavior for reproducibility (can slightly slow down training).")
-    parser.add_argument("--full_finetuning", action="store_true", default=False, help="Full finetuning (default: False).")
-    parser.add_argument("--hybrid_probe", action="store_true", default=False, help="Hybrid probe (default: False).")
+    parser.add_argument("--deterministic", action="store_true",
+                        help="Enable deterministic behavior for reproducibility (slightly slower training).")
+    parser.add_argument("--full_finetuning", action="store_true", help="Fully fine-tune the base model end-to-end.")
+    parser.add_argument("--hybrid_probe", action="store_true", help="Train probe first, then fine-tune base model + probe jointly.")
     parser.add_argument("--num_runs", type=int, default=1, help="Number of training runs with different seeds. Results will show mean±std across runs.")
-    parser.add_argument("--no_compile", action="store_true", default=False, help="Disable torch.compile on probes during training (compiled by default).")
+    parser.add_argument("--no_compile", action="store_true", help="Disable torch.compile on probes during training (compiled by default).")
+
+    # ----------------- Balanced Regression Metrics (EpHod-style) ----------------- #
+    parser.add_argument("--balanced_regression_metrics", action="store_true",
+                        help="Enable EpHod-style balanced regression metrics on valid/test (enabled by default).")
+    parser.add_argument("--no_balanced_regression_metrics", dest="balanced_regression_metrics", action="store_false",
+                        help="Disable EpHod-style balanced regression metrics.")
+    parser.set_defaults(balanced_regression_metrics=True)
+    parser.add_argument("--balanced_weight_method", type=str, default='bin_inv',
+                        choices=['none', 'bin_inv', 'bin_inv_sqrt', 'LDS_inv', 'LDS_inv_sqrt', 'LDS_extreme'],
+                        help="Weighting scheme for balanced regression metrics.")
+    parser.add_argument("--balanced_bin_borders", type=float, nargs='+', default=None,
+                        help="Explicit bin borders for balanced metrics (e.g., 5 9 for pH). Default: 1/3 and 2/3 quantiles of training labels.")
+    parser.add_argument("--balanced_n_resamples", type=int, default=100,
+                        help="Number of resamples for balanced Pearson/Spearman (default: 100).")
+    parser.add_argument("--balanced_lds_bins", type=int, default=100,
+                        help="Number of bins for LDS density estimation.")
+    parser.add_argument("--balanced_lds_ks", type=int, default=5,
+                        help="Kernel size for LDS Gaussian smoothing.")
+    parser.add_argument("--balanced_lds_sigma", type=float, default=2.0,
+                        help="Sigma for LDS Gaussian smoothing.")
 
     # ----------------- ProteinGym Arguments ----------------- #
     parser.add_argument("--dms_ids", nargs="+", default=["all"],
                         help="ProteinGym DMS assay IDs to evaluate (space-separated), or 'all' to run all assays.")
-    parser.add_argument("--proteingym", action="store_true", default=False, help="ProteinGym (default: False).")
+    parser.add_argument("--proteingym", action="store_true", help="Run a ProteinGym zero-shot experiment.")
     parser.add_argument("--mode", type=str, default='benchmark',
                         help="ProteinGym zero-shot mode: 'benchmark', 'indels', 'multiples', 'singles'")
     parser.add_argument("--scoring_method", choices=["masked_marginal", "mutant_marginal", "wildtype_marginal", "pll", "global_log_prob"], default="masked_marginal",
@@ -172,13 +199,13 @@ def parse_arguments():
                         help="Select how to slice the sequence for ProteinGym zero-shot.")
     parser.add_argument("--pg_batch_size", type=int, default=32,
                         help="Batch size for ProteinGym zero-shot scoring (default: 32).")
-    parser.add_argument("--compare_scoring_methods", action="store_true", default=False,
-                        help="Compare different scoring methods across models and DMS assays (default: False).")
-    parser.add_argument("--score_only", action="store_true", default=False,
-                        help="Only run the ProteinGym benchmarking script on existing CSV files, skip zero-shot scoring (default: False).")
+    parser.add_argument("--compare_scoring_methods", action="store_true",
+                        help="Compare different scoring methods across models and DMS assays.")
+    parser.add_argument("--score_only", action="store_true",
+                        help="Run only the ProteinGym benchmarking script on existing CSV files; skip zero-shot scoring.")
 
     # ----------------- W&B Arguments ----------------- #
-    parser.add_argument("--use_wandb_hyperopt", action="store_true", default=False, help="Use Weights & Biases hyperparameter optimization.")
+    parser.add_argument("--use_wandb_hyperopt", action="store_true", help="Run a Weights & Biases hyperparameter sweep instead of a single training run.")
     parser.add_argument("--wandb_project", type=str, default="Protify", help="W&B project name for sweeps.")
     parser.add_argument("--wandb_entity", type=str, default=None, help="W&B entity (team/user) for sweeps.")
     parser.add_argument("--sweep_config_path", type=str, default="yamls/sweep.yaml", help="Path to W&B sweep config YAML.")
@@ -187,7 +214,29 @@ def parse_arguments():
     parser.add_argument("--sweep_metric_cls",type=str,default="eval_loss", help="Classification metric to optimize during sweep (e.g., eval_f1, eval_accuracy, eval_mcc)")
     parser.add_argument("--sweep_metric_reg",type=str,default="eval_loss", help="Regression metric to optimize during sweep (e.g., eval_r_squared, eval_spearman_rho, eval_pearson_rho)")
     parser.add_argument("--sweep_goal", type=str, default='minimize', choices=['maximize', 'minimize'], help="Goal for the sweep metric (maximize/minimize)")
+    parser.add_argument("--sweep_name", type=str, default=None, help="Display name for the W&B sweep. Overrides 'name' in the sweep YAML.")
     args = parser.parse_args()
+
+    if args.n_heads is not None:
+        import warnings
+        warnings.warn(
+            "--n_heads is deprecated and will be removed in a future release. "
+            "Use --head_size instead (n_heads = hidden_size // head_size).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        assert args.hidden_size % args.n_heads == 0, (
+            f"--hidden_size {args.hidden_size} not divisible by deprecated --n_heads {args.n_heads}"
+        )
+        derived_head_size = args.hidden_size // args.n_heads
+        explicit_head_size = "--head_size" in raw_argv
+        if explicit_head_size:
+            assert derived_head_size == args.head_size, (
+                f"--head_size {args.head_size} conflicts with deprecated --n_heads {args.n_heads} "
+                f"(derived head_size={derived_head_size})"
+            )
+        args.head_size = derived_head_size
+        args.n_heads = None
 
     # Validate model_names vs model_paths/model_types mutual exclusivity
     if args.model_paths is not None:
@@ -798,7 +847,10 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
                     probe_args.input_size = input_size * 2
                 else:
                     probe_args.input_size = input_size
-            
+                # PPI concatenates two proteins along the sequence dim, so matrix-mode
+                # PPI sequences can reach up to 2 * max_length.
+                probe_args.max_seq_len = self._max_length * 2 if (ppi and self._full) else self._max_length
+
                 self.probe_args.num_labels = num_labels
                 self.probe_args.task_type = label_type
                 ### TODO we currently need both, settings should probably be consolidated
@@ -867,7 +919,10 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
                     probe_args.input_size = input_size * 2
                 else:
                     probe_args.input_size = input_size
-            
+                # PPI concatenates two proteins along the sequence dim, so matrix-mode
+                # PPI sequences can reach up to 2 * max_length.
+                probe_args.max_seq_len = self._max_length * 2 if (ppi and self._full) else self._max_length
+
                 self.probe_args.num_labels = num_labels
                 self.probe_args.task_type = label_type
                 ### TODO we currently need both, settings should probably be consolidated

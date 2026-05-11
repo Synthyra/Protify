@@ -55,7 +55,7 @@ pre_ln: !!bool true
 classifier_size: !!int 4096
 transformer_dropout: !!float 0.1
 classifier_dropout: !!float 0.2
-n_heads: !!int 4
+head_size: !!int 2048  # n_heads = hidden_size // head_size; 8192/2048=4 to match the prior default. `n_heads` is deprecated; use `head_size` instead.
 rotary: !!bool true
 attention_backend: flex
 output_s_max: !!bool false
@@ -104,3 +104,12 @@ patience: !!int 1
 full_finetuning: !!bool false
 hybrid_probe: !!bool false
 num_runs: !!int 1
+
+# Balanced regression metrics (EpHod-style; ignored for non-regression tasks)
+balanced_regression_metrics: !!bool true
+balanced_weight_method: bin_inv  # none | bin_inv | bin_inv_sqrt | LDS_inv | LDS_inv_sqrt | LDS_extreme
+balanced_bin_borders: null  # e.g. [5, 9] for pH; null -> 1/3 and 2/3 quantiles of train labels
+balanced_n_resamples: !!int 100
+balanced_lds_bins: !!int 100
+balanced_lds_ks: !!int 5
+balanced_lds_sigma: !!float 2.0

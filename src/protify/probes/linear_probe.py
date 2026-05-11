@@ -68,7 +68,12 @@ class LinearProbe(PreTrainedModel):
         layers.append(nn.Linear(proj_dim, config.num_labels, bias=use_bias))
         self.layers = nn.Sequential(*layers)
 
-    def forward(self, embeddings: torch.Tensor, labels: Optional[torch.Tensor] = None) -> SequenceClassifierOutput:
+    def forward(
+        self,
+        embeddings: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+    ) -> SequenceClassifierOutput:
         # Convert embeddings to match model's dtype to avoid dtype mismatch errors
         # This handles cases where embeddings are fp32 but model is fp16 (or vice versa)
         embeddings = embeddings.to(next(self.layers.parameters()).dtype)

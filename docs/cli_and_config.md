@@ -96,7 +96,8 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--classifier_size` | int | 4096 | Classifier feed-forward dimension. |
 | `--transformer_dropout` | float | 0.1 | Transformer layer dropout. |
 | `--classifier_dropout` | float | 0.2 | Classifier dropout. |
-| `--n_heads` | int | 4 | Number of attention heads. |
+| `--head_size` | int | 128 | Attention head dimension. `n_heads` is derived as `hidden_size // head_size` and `hidden_size % head_size == 0` is asserted. |
+| `--n_heads` | int | None | DEPRECATED. Use `--head_size`. If supplied, emits a `DeprecationWarning` and `head_size` is derived as `hidden_size // n_heads`. Conflicts with an explicit `--head_size` raise an assertion. |
 | `--rotary` | flag | True | Use rotary embeddings (store_false to disable). |
 | `--attention_backend` | choice | flex | kernels, flex, sdpa. |
 | `--output_s_max` | flag | False | Return s_max from attention layers. |
@@ -148,14 +149,31 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--base_batch_size` | int | 4 | Base model batch size. |
 | `--probe_grad_accum` | int | 1 | Gradient accumulation steps (probe). |
 | `--base_grad_accum` | int | 8 | Gradient accumulation steps (base). |
-| `--lr` | float | 1e-4 | Learning rate. |
+| `--lr` | float | 1e-4 | Learning rate (shared by probe and base phases unless `--base_lr` is set). |
 | `--weight_decay` | float | 0.00 | Weight decay. |
-| `--patience` | int | 1 | Early-stopping patience. |
+| `--patience` | int | 1 | Early-stopping patience (probe phase, and base phase unless `--base_patience` is set). |
+| `--base_num_epochs` | int | None | Epoch count for the base-model phase of hybrid / full-finetuning training. If omitted, falls back to `--num_epochs`. |
+| `--base_patience` | int | None | Early-stopping patience for the base-model phase. If omitted, falls back to `--patience`. |
+| `--base_lr` | float | None | Learning rate for the base-model phase (useful when LoRA / full-FT wants a different LR than the probe). If omitted, falls back to `--lr`. |
 | `--seed` | int | None | Random seed (None: time-based). |
 | `--deterministic` | flag | False | Deterministic mode. |
 | `--full_finetuning` | flag | False | Full model finetuning. |
 | `--hybrid_probe` | flag | False | Hybrid probe then finetune. |
 | `--num_runs` | int | 1 | Number of seeds; report mean and std. |
+
+### Balanced regression metrics (EpHod-style)
+
+Applied only for regression tasks. See [Probes and Training > Balanced regression metrics](probes_and_training.md#balanced-regression-metrics) for details.
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--balanced_regression_metrics` / `--no_balanced_regression_metrics` | flag | True | Toggle computation. |
+| `--balanced_weight_method` | choice | `bin_inv` | `none`, `bin_inv`, `bin_inv_sqrt`, `LDS_inv`, `LDS_inv_sqrt`, `LDS_extreme`. |
+| `--balanced_bin_borders` | list[float] | None | Explicit bin borders (e.g. `5 9` for pH). None uses training-label tertiles. |
+| `--balanced_n_resamples` | int | 100 | Weight-bootstrap draws for resampled Pearson/Spearman. |
+| `--balanced_lds_bins` | int | 100 | LDS histogram bin count. |
+| `--balanced_lds_ks` | int | 5 | LDS Gaussian kernel size. |
+| `--balanced_lds_sigma` | float | 2.0 | LDS Gaussian sigma. |
 
 ### ProteinGym
 
