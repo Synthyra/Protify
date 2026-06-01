@@ -154,7 +154,7 @@ class EmbeddingArguments:
             max_length: int = 2048,
             multi_gpu: bool = False,
             autocast: bool = False,
-            embedding_scaler: str = 'standard',
+            embedding_scaler: bool = True,
             **kwargs
     ):
         self.batch_size = embedding_batch_size
@@ -172,7 +172,7 @@ class EmbeddingArguments:
         self.max_length = max_length
         self.multi_gpu = multi_gpu
         self.autocast = autocast
-        assert embedding_scaler in ['none', 'standard'], f"Invalid embedding_scaler: {embedding_scaler}"
+        assert isinstance(embedding_scaler, bool), f"Invalid embedding_scaler: {embedding_scaler}"
         self.embedding_scaler = embedding_scaler
 
 

@@ -622,9 +622,9 @@ Protify is an open source platform designed to simplify and democratize workflow
             use_multi,
             full: bool,
         ) -> Optional[EmbeddingStandardizer]:
-        scaler_mode = self.embedding_args.embedding_scaler
-        assert scaler_mode in ['none', 'standard'], f"Invalid embedding_scaler: {scaler_mode}"
-        if full or scaler_mode == 'none':
+        embedding_scaler = self.embedding_args.embedding_scaler
+        assert isinstance(embedding_scaler, bool), f"Invalid embedding_scaler: {embedding_scaler}"
+        if full or not embedding_scaler:
             return None
         print_message("Fitting StandardScaler on training embeddings")
         embeddings = self._iter_vector_embeddings_for_standardizer(

@@ -1127,9 +1127,9 @@ class DataMixin:
                 list(test_set['seqs']),
             )
 
-        scaler_mode = self.embedding_args.embedding_scaler
-        assert scaler_mode in ['none', 'standard'], f"Invalid embedding_scaler: {scaler_mode}"
-        if not self._full and scaler_mode == 'standard':
+        embedding_scaler = self.embedding_args.embedding_scaler
+        assert isinstance(embedding_scaler, bool), f"Invalid embedding_scaler: {embedding_scaler}"
+        if not self._full and embedding_scaler:
             print_message('Fitting StandardScaler on scikit training embeddings')
             embedding_standardizer = EmbeddingStandardizer.fit_numpy(X_train)
             X_train = embedding_standardizer.transform_numpy(X_train)
