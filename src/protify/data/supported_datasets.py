@@ -1,3 +1,4 @@
+from typing import Dict
 
 supported_datasets = {
     'EC': 'GleghornLab/EC_reg',
@@ -74,6 +75,33 @@ supported_datasets = {
 internal_datasets = {
     'plastic': 'GleghornLab/plastic_degradation_benchmark',
 }
+
+dataset_aliases: Dict[str, str] = {
+    'SL13': 'Subcellular',
+    'SS3': 'SecondaryStructure-3',
+    'SS8': 'SecondaryStructure-8',
+    'optimal-temp': 'optimal-temperature',
+    'opt-temp': 'optimal-temperature',
+    'temp-stability': 'temperature-stability',
+    'mat-production': 'material-production',
+    'fitness-pred': 'fitness-prediction',
+    'stability-pred': 'stability-prediction',
+    'fluorescence': 'fluorescence-prediction',
+}
+
+
+def resolve_dataset_name(dataset_name: str) -> str:
+    if dataset_name in supported_datasets:
+        return dataset_name
+    if dataset_name in dataset_aliases:
+        return dataset_aliases[dataset_name]
+    return dataset_name
+
+
+def get_dataset_source(dataset_name: str) -> str:
+    canonical_name = resolve_dataset_name(dataset_name)
+    return supported_datasets[canonical_name]
+
 
 # TODO update
 possible_with_vector_reps = [

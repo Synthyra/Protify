@@ -21,7 +21,13 @@ except ImportError:
     from ..embedder import get_embedding_filename
     from .dataset_classes import EmbeddingStandardizer
     from ..metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
-from .supported_datasets import supported_datasets, standard_data_benchmark, vector_benchmark
+from .supported_datasets import (
+    get_dataset_source,
+    resolve_dataset_name,
+    standard_data_benchmark,
+    supported_datasets,
+    vector_benchmark,
+)
 from .utils import (
     AA_SET,
     CODON_SET,
@@ -84,9 +90,9 @@ class DataArguments:
 
         if len(data_names) > 0:
             if data_names[0] == 'standard_benchmark':
-                self.data_paths = [supported_datasets[data_name] for data_name in standard_data_benchmark]
+                self.data_paths = [get_dataset_source(data_name) for data_name in standard_data_benchmark]
             elif data_names[0] == 'vector_benchmark':
-                self.data_paths = [supported_datasets[data_name] for data_name in vector_benchmark]
+                self.data_paths = [get_dataset_source(data_name) for data_name in vector_benchmark]
             else:
                 self.data_paths = []
                 for data_name in data_names:
@@ -94,8 +100,9 @@ class DataArguments:
                         # For special handling in the main workflow
                         self.protein_gym = True
                         continue
-                    if data_name in supported_datasets:
-                        self.data_paths.append(supported_datasets[data_name])
+                    resolved_name = resolve_dataset_name(data_name)
+                    if resolved_name in supported_datasets:
+                        self.data_paths.append(get_dataset_source(resolved_name))
                     else:
                         print(f'{data_name} not found in supported datasets')
                         print('We will attempt to load it from huggingface anyways, but this may not work')
