@@ -5,14 +5,56 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from collections import OrderedDict
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 from torch.utils.data import Dataset as TorchDataset
 from tqdm.auto import tqdm
+from sklearn.preprocessing import StandardScaler
 
 try:
     from utils import print_message, embedding_blob_to_tensor
 except ImportError:
     from ..utils import print_message, embedding_blob_to_tensor
-from typing import Dict, List, Optional, Tuple, Union
+
+
+class EmbeddingStandardizer:
+    def __init__(self, mean: np.ndarray, scale: np.ndarray):
+        self.mean = torch.from_numpy(mean.astype(np.float32))
+        self.scale = torch.from_numpy(scale.astype(np.float32))
+
+    @classmethod
+    def fit_tensors(cls, embeddings: Iterable[torch.Tensor]) -> "EmbeddingStandardizer":
+        scaler = StandardScaler()
+        n_seen = 0
+        for embedding in embeddings:
+            features = embedding.reshape(1, -1).float().numpy()
+            scaler.partial_fit(features)
+            n_seen += features.shape[0]
+        assert n_seen > 0, "Cannot fit embedding standardizer without training embeddings."
+        return cls(scaler.mean_, scaler.scale_)
+
+    @classmethod
+    def fit_numpy(cls, features: np.ndarray) -> "EmbeddingStandardizer":
+        assert features.ndim == 2, f"Expected 2D features, got shape {features.shape}"
+        scaler = StandardScaler()
+        scaler.fit(features.astype(np.float32))
+        return cls(scaler.mean_, scaler.scale_)
+
+    def transform_tensor(self, embedding: torch.Tensor) -> torch.Tensor:
+        shape = embedding.shape
+        features = embedding.reshape(1, -1).float()
+        assert features.shape[1] == self.mean.shape[0], (
+            f"Embedding dim {features.shape[1]} does not match scaler dim {self.mean.shape[0]}"
+        )
+        return ((features - self.mean) / self.scale).reshape(shape)
+
+    def transform_numpy(self, features: np.ndarray) -> np.ndarray:
+        assert features.ndim == 2, f"Expected 2D features, got shape {features.shape}"
+        assert features.shape[1] == self.mean.shape[0], (
+            f"Feature dim {features.shape[1]} does not match scaler dim {self.mean.shape[0]}"
+        )
+        mean = self.mean.numpy()
+        scale = self.scale.numpy()
+        return ((features.astype(np.float32) - mean) / scale).astype(np.float32)
 
 
 class PairEmbedsLabelsDatasetFromDisk(TorchDataset):
@@ -30,6 +72,7 @@ class PairEmbedsLabelsDatasetFromDisk(TorchDataset):
             task_type='regression',
             train=True,
             random_pair_flipping=False,
+            embedding_standardizer: Optional[EmbeddingStandardizer] = None,
             **kwargs
         ):
         self.seqs_a, self.seqs_b, self.labels = list(hf_dataset[col_a]), list(hf_dataset[col_b]), list(hf_dataset[label_col])
@@ -40,6 +83,7 @@ class PairEmbedsLabelsDatasetFromDisk(TorchDataset):
         self.task_type = task_type
         self.train = train
         self.random_pair_flipping = random_pair_flipping
+        self.embedding_standardizer = embedding_standardizer
         self._cache_max = max(read_scaler * batch_size, 1)
         self._emb_cache: "OrderedDict[str, torch.Tensor]" = OrderedDict()
         self._conn = sqlite3.connect(self.db_file, timeout=30)
@@ -81,6 +125,13 @@ class PairEmbedsLabelsDatasetFromDisk(TorchDataset):
         if self.train and self.random_pair_flipping and random.random() < 0.5:
             emb_a, emb_b = emb_b, emb_a
 
+        if not self.full and self.embedding_standardizer is not None:
+            pair_emb = torch.cat([emb_a.reshape(1, -1), emb_b.reshape(1, -1)], dim=-1)
+            pair_emb = self.embedding_standardizer.transform_tensor(pair_emb)
+            split_idx = pair_emb.shape[-1] // 2
+            emb_a = pair_emb[:, :split_idx]
+            emb_b = pair_emb[:, split_idx:]
+
         if self.task_type in ['multilabel', 'regression', 'sigmoid_regression']:
             label = torch.tensor(label, dtype=torch.float)
         else:
@@ -102,6 +153,7 @@ class PairEmbedsLabelsDataset(TorchDataset):
             task_type='regression',
             train=True,
             random_pair_flipping=False,
+            embedding_standardizer: Optional[EmbeddingStandardizer] = None,
             **kwargs
         ):
         self.seqs_a = list(hf_dataset[col_a])
@@ -112,6 +164,7 @@ class PairEmbedsLabelsDataset(TorchDataset):
         self.full = full
         self.train = train
         self.random_pair_flipping = random_pair_flipping
+        self.embedding_standardizer = embedding_standardizer
 
         # Combine seqs_a and seqs_b to find all unique sequences needed
         needed_seqs = set(list(hf_dataset[col_a]) + list(hf_dataset[col_b]))
@@ -134,6 +187,13 @@ class PairEmbedsLabelsDataset(TorchDataset):
         if self.train and self.random_pair_flipping and random.random() < 0.5:
             emb_a, emb_b = emb_b, emb_a
 
+        if not self.full and self.embedding_standardizer is not None:
+            pair_emb = torch.cat([emb_a.reshape(1, -1), emb_b.reshape(1, -1)], dim=-1)
+            pair_emb = self.embedding_standardizer.transform_tensor(pair_emb)
+            split_idx = pair_emb.shape[-1] // 2
+            emb_a = pair_emb[:, :split_idx]
+            emb_b = pair_emb[:, split_idx:]
+
         # Prepare the label
         if self.task_type in ['multilabel', 'regression', 'sigmoid_regression']:
             label = torch.tensor(self.labels[idx], dtype=torch.float)
@@ -155,6 +215,7 @@ class EmbedsLabelsDatasetFromDisk(TorchDataset):
             read_scaler=100,
             input_size=768,
             task_type='singlelabel',
+            embedding_standardizer: Optional[EmbeddingStandardizer] = None,
             **kwargs
         ):
         self.seqs, self.labels = list(hf_dataset[col_name]), list(hf_dataset[label_col])
@@ -166,6 +227,7 @@ class EmbedsLabelsDatasetFromDisk(TorchDataset):
         self.input_size = input_size
         self.full = full
         self.task_type = task_type
+        self.embedding_standardizer = embedding_standardizer
         self._cache_max = max(read_scaler * batch_size, 1)
         self._emb_cache: "OrderedDict[str, torch.Tensor]" = OrderedDict()
         self._conn = sqlite3.connect(self.db_file, timeout=30)
@@ -208,6 +270,8 @@ class EmbedsLabelsDatasetFromDisk(TorchDataset):
         if self.full:
             padding_needed = self.max_length - emb.size(0)
             emb = F.pad(emb, (0, 0, 0, padding_needed), value=0)
+        elif self.embedding_standardizer is not None:
+            emb = self.embedding_standardizer.transform_tensor(emb)
         label = self.labels[idx]
         if self.task_type in ['multilabel', 'regression', 'sigmoid_regression']:
             label = torch.tensor(label, dtype=torch.float)
@@ -218,11 +282,22 @@ class EmbedsLabelsDatasetFromDisk(TorchDataset):
 
 
 class EmbedsLabelsDataset(TorchDataset):
-    def __init__(self, hf_dataset, emb_dict, col_name='seqs', label_col='labels', task_type='singlelabel', full=False, **kwargs):
+    def __init__(
+            self,
+            hf_dataset,
+            emb_dict,
+            col_name='seqs',
+            label_col='labels',
+            task_type='singlelabel',
+            full=False,
+            embedding_standardizer: Optional[EmbeddingStandardizer] = None,
+            **kwargs
+        ):
         self.embeddings = self.get_embs(emb_dict, list(hf_dataset[col_name]))
         self.full = full
         self.labels = list(hf_dataset[label_col])
         self.task_type = task_type
+        self.embedding_standardizer = embedding_standardizer
         self.max_length = len(max(list(hf_dataset[col_name]), key=len))
         print_message(f'Max length: {self.max_length}')
 
@@ -245,6 +320,8 @@ class EmbedsLabelsDataset(TorchDataset):
         if self.full:
             padding_needed = self.max_length - emb.size(0)
             emb = F.pad(emb, (0, 0, 0, padding_needed), value=0)
+        elif self.embedding_standardizer is not None:
+            emb = self.embedding_standardizer.transform_tensor(emb)
         return emb.squeeze(0), label
     
 
@@ -311,6 +388,7 @@ class MultiEmbedsLabelsDatasetFromDisk(TorchDataset):
             input_size: int = 768,
             task_type: str = 'singlelabel',
             train: bool = True,
+            embedding_standardizer: Optional[EmbeddingStandardizer] = None,
             **kwargs,
         ):
         self.seq_cols = seq_cols
@@ -321,6 +399,7 @@ class MultiEmbedsLabelsDatasetFromDisk(TorchDataset):
         self.input_size = input_size // len(seq_cols) if not full else input_size # already scaled if multi-column
         self.task_type = task_type
         self.train = train
+        self.embedding_standardizer = embedding_standardizer
         self._cache_max = max(read_scaler * batch_size, 1)
         self._emb_cache: "OrderedDict[str, torch.Tensor]" = OrderedDict()
 
@@ -377,6 +456,8 @@ class MultiEmbedsLabelsDatasetFromDisk(TorchDataset):
                     emb = F.pad(emb, (0, 0, 0, pad_needed), value=0)
         else:
             emb = torch.cat([p.reshape(1, -1) for p in parts], dim=-1)
+            if self.embedding_standardizer is not None:
+                emb = self.embedding_standardizer.transform_tensor(emb)
 
         label = self.labels[idx]
         if self.task_type in ['multilabel', 'regression', 'sigmoid_regression']:
@@ -398,6 +479,7 @@ class MultiEmbedsLabelsDataset(TorchDataset):
             input_size: int = 768,
             task_type: str = 'singlelabel',
             train: bool = True,
+            embedding_standardizer: Optional[EmbeddingStandardizer] = None,
             **kwargs,
         ):
         self.seq_cols = seq_cols
@@ -406,6 +488,7 @@ class MultiEmbedsLabelsDataset(TorchDataset):
         self.input_size = input_size // len(seq_cols) if not full else input_size
         self.task_type = task_type
         self.train = train
+        self.embedding_standardizer = embedding_standardizer
 
         self.col_to_seqs = {col: list(hf_dataset[col]) for col in seq_cols}
 
@@ -433,6 +516,8 @@ class MultiEmbedsLabelsDataset(TorchDataset):
                         emb = F.pad(emb, (0, 0, 0, pad_needed), value=0)
             else:
                 emb = torch.cat([p.reshape(1, -1) for p in parts], dim=-1)
+                if self.embedding_standardizer is not None:
+                    emb = self.embedding_standardizer.transform_tensor(emb)
             self.embeddings.append(emb)
 
     def _combine_matrix(self, parts: List[torch.Tensor]) -> torch.Tensor:
@@ -456,4 +541,3 @@ class MultiEmbedsLabelsDataset(TorchDataset):
             label = torch.tensor(self.labels[idx], dtype=torch.long)
         emb = self.embeddings[idx].float()
         return emb.squeeze(0), label
-    

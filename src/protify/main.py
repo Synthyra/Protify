@@ -132,6 +132,8 @@ def parse_arguments():
     parser.add_argument("--matrix_embed", action="store_true", help="Store per-token (matrix) embeddings instead of pooled vector embeddings.")
     parser.add_argument("--embedding_pooling_types", nargs="+", default=["mean", "var"], help="Pooling types for embeddings.")
     parser.add_argument("--save_embeddings", action="store_true", help="Save computed embeddings to disk.")
+    parser.add_argument("--no_embedding_scaler", dest="embedding_scaler", action="store_false", default=True,
+                        help="Disable StandardScaler for pooled vector embeddings during probe/scikit training.")
     parser.add_argument("--embed_dtype", type=str, choices=["fp32", "fp16", "bf16", "float32", "float16", "bfloat16"], default=None, help="Data type for embeddings. If omitted, uses --model_dtype.")
     parser.add_argument("--sql", action="store_true", help="Store embeddings in a SQLite backend (streamed at train time) instead of in-RAM .pth.")
     parser.add_argument("--read_scaler", type=int, default=100, help="Read scaler for SQL storage.")
@@ -377,6 +379,10 @@ def parse_arguments():
             yaml_args.model_dtype = args.model_dtype
         if "embed_dtype" not in yaml_args.__dict__:
             yaml_args.embed_dtype = args.embed_dtype
+        if "--no_embedding_scaler" in raw_argv:
+            yaml_args.embedding_scaler = False
+        elif "embedding_scaler" not in yaml_args.__dict__:
+            yaml_args.embedding_scaler = args.embedding_scaler
         if "model_paths" not in yaml_args.__dict__:
             yaml_args.model_paths = args.model_paths
         if "model_types" not in yaml_args.__dict__:
