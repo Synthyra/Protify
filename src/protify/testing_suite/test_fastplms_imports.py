@@ -12,8 +12,23 @@ def _ensure_fastplms_on_path():
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "fastplms",
     )
-    if fastplms_root not in sys.path:
-        sys.path.insert(0, fastplms_root)
+    fastplms_package = os.path.join(fastplms_root, "fastplms")
+    if fastplms_root in sys.path:
+        sys.path.remove(fastplms_root)
+    sys.path.insert(0, fastplms_root)
+    if "fastplms" in sys.modules:
+        loaded_fastplms = sys.modules["fastplms"]
+        if "__path__" in loaded_fastplms.__dict__:
+            loaded_paths = [
+                os.path.abspath(path)
+                for path in loaded_fastplms.__path__
+            ]
+        else:
+            loaded_paths = []
+        if os.path.abspath(fastplms_package) not in loaded_paths:
+            for module_name in list(sys.modules):
+                if module_name == "fastplms" or module_name.startswith("fastplms."):
+                    del sys.modules[module_name]
     return fastplms_root
 
 

@@ -68,6 +68,7 @@ class RotaryEmbedding(nn.Module):
         self.interleaved = interleaved
         self.scaling_factor = scaling_factor
         self.max_seq_len = max_seq_len
+        self._seq_len_cached = max_seq_len
         inv_freq = 1.0 / (
             self.base
             ** (

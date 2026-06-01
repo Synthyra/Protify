@@ -13,11 +13,13 @@ try:
     from utils import print_message, embedding_blob_to_tensor
     from seed_utils import get_global_seed
     from embedder import get_embedding_filename
+    from data.dataset_classes import EmbeddingStandardizer
     from metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
 except ImportError:
     from ..utils import print_message, embedding_blob_to_tensor
     from ..seed_utils import get_global_seed
     from ..embedder import get_embedding_filename
+    from .dataset_classes import EmbeddingStandardizer
     from ..metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
 from .supported_datasets import supported_datasets, standard_data_benchmark, vector_benchmark
 from .utils import (
@@ -1124,6 +1126,15 @@ class DataMixin:
                 list(valid_set['seqs']),
                 list(test_set['seqs']),
             )
+
+        scaler_mode = self.embedding_args.embedding_scaler
+        assert scaler_mode in ['none', 'standard'], f"Invalid embedding_scaler: {scaler_mode}"
+        if not self._full and scaler_mode == 'standard':
+            print_message('Fitting StandardScaler on scikit training embeddings')
+            embedding_standardizer = EmbeddingStandardizer.fit_numpy(X_train)
+            X_train = embedding_standardizer.transform_numpy(X_train)
+            X_valid = embedding_standardizer.transform_numpy(X_valid)
+            X_test = embedding_standardizer.transform_numpy(X_test)
 
         y_train = self._labels_to_numpy(list(train_set['labels']))
         y_valid = self._labels_to_numpy(list(valid_set['labels']))
