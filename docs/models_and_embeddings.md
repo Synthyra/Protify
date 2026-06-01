@@ -15,7 +15,7 @@ Protify supports two ways to specify models: **preset names** (`model_names`, e.
 1. **BaseModelArguments** is built from config. Either `model_names` is set (preset mode) or `model_paths` and `model_types` are set (path mode). They are mutually exclusive.
 2. **model_entries()** yields `(display_name, dispatch_type, model_path)` for each model. Preset mode: `dispatch_type` is the preset name, `model_path` is None. Path mode: `dispatch_type` is the type keyword (e.g. esm2, custom), `model_path` is the path.
 3. **Embedder** is called per model. For each model it may: download precomputed embeddings (if `download_embeddings`), read existing embeddings from disk (SQL or PTH), or compute new embeddings via `get_base_model()` and forward passes, then optionally save them.
-4. **get_embedding_filename()** defines the filename (and thus cache key) from model name, `matrix_embed`, and pooling types.
+4. **get_embedding_filename()** defines the filename (and thus cache key) from model name, `matrix_embed`, pooling types, and non-default hidden-state index.
 
 ---
 
@@ -61,6 +61,7 @@ Defined in [embedder.py](../src/protify/embedder.py). Constructor maps long name
 | `download_dir` | str | Synthyra/vector_embeddings | HuggingFace dataset/repo for precomputed embeddings. |
 | `matrix_embed` | bool | False | If True, keep per-residue matrices; if False, pool to vectors. |
 | `embedding_pooling_types` | List[str] | ['mean'] | Pooling for vectors (e.g. mean, var, parti). |
+| `embedding_hidden_state_index` | int | -1 | Hidden-state tuple index to pool from. `-1` preserves the final hidden-state behavior and old cache names. |
 | `save_embeddings` | bool | False | Whether to write computed embeddings to disk. |
 | `embed_dtype` | dtype | torch.float32 | Dtype for stored embeddings. |
 | `model_dtype` | dtype | None | Dtype for base model (None uses default). |
@@ -80,7 +81,7 @@ Defined in [embedder.py](../src/protify/embedder.py). Constructor maps long name
 1. **__call__(model_name, model_type=None, model_path=None)**  
    - If `download_embeddings`: `_download_embeddings(model_name)` (download, unzip, optional merge, save under `embedding_save_dir`).
 2. **_read_embeddings_from_disk(model_name)**  
-   - Builds path via `get_embedding_filename(model_name, matrix_embed, pooling_types, extension='pth' or 'db')`.  
+   - Builds path via `get_embedding_filename(model_name, matrix_embed, pooling_types, extension='pth' or 'db', hidden_state_index=...)`.
    - **SQL:** Opens/creates `.db`, table `embeddings (sequence, embedding)`; returns `(to_embed, save_path, {})`.  
    - **PTH:** If file exists, loads dict `{seq -> tensor}`; returns `(to_embed, save_path, embeddings_dict)`.
 3. If there are sequences left to embed (`len(to_embed) > 0`): get base model and tokenizer via `get_base_model(dispatch_name, ...)`, then **_embed_sequences(...)**.
@@ -91,12 +92,12 @@ Defined in [embedder.py](../src/protify/embedder.py). Constructor maps long name
 ## get_embedding_filename
 
 ```text
-get_embedding_filename(model_name, matrix_embed, pooling_types, extension='pth')
+get_embedding_filename(model_name, matrix_embed, pooling_types, extension='pth', hidden_state_index=-1)
 ```
 
-Returns a filename: `{model_name}_{matrix_embed}[_{pooling_types}].{extension}`. For vector embeddings, pooling types are sorted and joined with underscore (e.g. `mean_var`). Extension is `pth` or `db` for SQL.
+Returns a filename: `{model_name}_{matrix_embed}[_hs{hidden_state_index}][_{pooling_types}].{extension}`. For vector embeddings, pooling types are sorted and joined with underscore (e.g. `mean_var`). Extension is `pth` or `db` for SQL.
 
-Example: `ESM2-8_False_mean_var.pth`.
+The default `hidden_state_index=-1` omits the hidden-state suffix, so existing caches keep their old names. Non-default indexes use distinct caches, e.g. `ESM2-8_False_hs6_mean_var.pth`.
 
 ---
 
@@ -128,6 +129,10 @@ Common values for `embedding_pooling_types` (and probe-side `probe_pooling_types
 
 Pooling is applied in [pooler.py](../src/protify/pooler.py) via the `Pooler` class when not using `matrix_embed`.
 
+### Hidden-state selection
+
+By default Protify pools the final hidden state. Set `embedding_hidden_state_index` to any valid model hidden-state tuple index to pool an intermediate layer instead. This option participates in cache naming and W&B sweeps, so changing the layer regenerates or reloads the matching embeddings.
+
 ---
 
 ## Examples
@@ -148,6 +153,12 @@ py -m src.protify.main --model_paths "org/my-model" --model_types custom --data_
 
 ```bash
 py -m src.protify.main --model_names ESM2-8 --data_names DeepLoc-2 --save_embeddings --embedding_pooling_types mean var
+```
+
+### Save an intermediate hidden state
+
+```bash
+py -m src.protify.main --model_names ESMC-300 --data_names DeepLoc-2 --save_embeddings --embedding_hidden_state_index 12
 ```
 
 ### Download precomputed embeddings

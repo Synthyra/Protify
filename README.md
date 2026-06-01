@@ -103,6 +103,7 @@ Protify is currently in beta. We're actively working to enhance features and doc
   | ESM2-3B | Largest ESM2 pLM with exceptional capability for protein structure and function prediction. | 3B | pLM |
   | ESMC-300 | pLM optimized for representation learning. | 300M | pLM |
   | ESMC-600 | Larger pLM for representations. | 600M | pLM |
+  | ESMC-6B | 6B ESM++/ESMC pLM for high-capacity representations. | 6.352B | pLM |
   | ProtBert | BERT-based pLM trained on protein sequences from UniRef. | 420M | pLM |
   | ProtBert-BFD | BERT-based pLM trained on BFD database with improved performance. | 420M | pLM |
   | ProtT5 | T5-based pLM capable of both encoding and generation tasks. | 3B | pLM |
@@ -218,7 +219,7 @@ For more details about supported models and datasets, including programmatic acc
 ### Current Key Features
 
 - **Multiple interfaces**: Run experiments via an intuitive GUI, CLI, or prepared YAML files
-- **Efficient embeddings**: Leverage fast and efficient embeddings from 45+ PLMs (ESM2, ESMC, E1, ProtBert, ProtT5, ANKH, GLM2, DPLM, DPLM2, DSM, AMPLIFY, CaLM, and more) via [FastPLMs](https://github.com/Synthyra/FastPLMs)
+- **Efficient embeddings**: Leverage fast and efficient embeddings from 46+ PLMs (ESM2, ESMC, E1, ProtBert, ProtT5, ANKH, GLM2, DPLM, DPLM2, DSM, AMPLIFY, CaLM, and more) via [FastPLMs](https://github.com/Synthyra/FastPLMs)
 - **Flexible model training**: Probe-only (frozen PLM), full fine-tuning, hybrid probing, and LoRA via PEFT
 - **Automated model selection**: Find optimal scikit-learn models for your data with LazyPredict, enhanced by automatic hyperparameter optimization
 - **Hyperparameter optimization**: Integrated Weights & Biases sweeps that conducts a hyperparameter search and trains the final version based on the best hyperparameters

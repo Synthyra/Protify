@@ -61,6 +61,12 @@ model_descriptions = {
         'type': 'Protein language model',
         'citation': 'N/A'
     },
+    'ESMC-6B': {
+        'description': 'Large ESM++ protein language model corresponding to ESMC 6B.',
+        'size': '6.352B parameters',
+        'type': 'Protein language model',
+        'citation': 'N/A'
+    },
     'ProtBert': {
         'description': 'BERT-based protein language model trained on protein sequences from UniRef.',
         'size': '420M parameters',

@@ -13,11 +13,13 @@ try:
     from utils import print_message, embedding_blob_to_tensor
     from seed_utils import get_global_seed
     from embedder import get_embedding_filename
+    from data.dataset_classes import EmbeddingStandardizer
     from metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
 except ImportError:
     from ..utils import print_message, embedding_blob_to_tensor
     from ..seed_utils import get_global_seed
     from ..embedder import get_embedding_filename
+    from .dataset_classes import EmbeddingStandardizer
     from ..metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
 from .supported_datasets import (
     get_dataset_source,
@@ -989,9 +991,10 @@ class DataMixin:
         train_array, valid_array, test_array = [], [], []
         # Get pooling types from embedding_args, default to ['mean'] if not available
         pooling_types = self.embedding_args.pooling_types
+        hidden_state_index = self.embedding_args.hidden_state_index
         if self._sql:
             import sqlite3
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             with sqlite3.connect(save_path) as conn:
                 c = conn.cursor()
@@ -1007,7 +1010,7 @@ class DataMixin:
                     embedding = self._select_from_sql(c, seq, cast_to_torch=False)
                     test_array.append(embedding)
         else:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             emb_dict = torch.load(save_path)
             for seq in train_seqs:
@@ -1051,8 +1054,9 @@ class DataMixin:
         save_dir = self.embedding_args.embedding_save_dir
         train_array, valid_array, test_array = [], [], []
         pooling_types = self.embedding_args.pooling_types
+        hidden_state_index = self.embedding_args.hidden_state_index
         if self._sql:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             with sqlite3.connect(save_path) as conn:
                 c = conn.cursor()
@@ -1074,7 +1078,7 @@ class DataMixin:
                     embedding_b = self._select_from_sql(c, seq_b, cast_to_torch=False)
                     test_array.append(np.concatenate([embedding_a, embedding_b], axis=-1))
         else:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             emb_dict = torch.load(save_path)
             for seq_a, seq_b in zip(train_seqs_a, train_seqs_b):
@@ -1131,6 +1135,15 @@ class DataMixin:
                 list(valid_set['seqs']),
                 list(test_set['seqs']),
             )
+
+        embedding_scaler = self.embedding_args.embedding_scaler
+        assert isinstance(embedding_scaler, bool), f"Invalid embedding_scaler: {embedding_scaler}"
+        if not self._full and embedding_scaler:
+            print_message('Fitting StandardScaler on scikit training embeddings')
+            embedding_standardizer = EmbeddingStandardizer.fit_numpy(X_train)
+            X_train = embedding_standardizer.transform_numpy(X_train)
+            X_valid = embedding_standardizer.transform_numpy(X_valid)
+            X_test = embedding_standardizer.transform_numpy(X_test)
 
         y_train = self._labels_to_numpy(list(train_set['labels']))
         y_valid = self._labels_to_numpy(list(valid_set['labels']))

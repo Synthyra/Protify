@@ -175,6 +175,7 @@ class ProteinGymScorer:
         'ESM2-3B': 1022,
         'ESMC-300': 2046,
         'ESMC-600': 2046,
+        'ESMC-6B': 2046,
         'ProtBert': 1022,
         'ProtBert-BFD': 1022,
         'GLM2-150': 4095,

@@ -131,8 +131,11 @@ def parse_arguments():
     parser.add_argument("--download_embeddings", action="store_true", help="Download pre-computed embeddings from the Hub instead of computing them locally.")
     parser.add_argument("--matrix_embed", action="store_true", help="Store per-token (matrix) embeddings instead of pooled vector embeddings.")
     parser.add_argument("--embedding_pooling_types", nargs="+", default=["mean", "var"], help="Pooling types for embeddings.")
+    parser.add_argument("--embedding_hidden_state_index", type=int, default=-1, help="Hidden-state tuple index to embed from. -1 uses the final hidden state.")
     parser.add_argument("--save_embeddings", action="store_true", help="Save computed embeddings to disk.")
     parser.add_argument("--embed_dtype", type=str, choices=["fp32", "fp16", "bf16", "float32", "float16", "bfloat16"], default=None, help="Data type for embeddings. If omitted, uses --model_dtype.")
+    parser.add_argument("--no_embedding_scaler", dest="embedding_scaler", action="store_false", default=True,
+                        help="Disable StandardScaler for pooled vector embeddings during probe/scikit training.")
     parser.add_argument("--sql", action="store_true", help="Store embeddings in a SQLite backend (streamed at train time) instead of in-RAM .pth.")
     parser.add_argument("--read_scaler", type=int, default=100, help="Read scaler for SQL storage.")
 
@@ -377,6 +380,17 @@ def parse_arguments():
             yaml_args.model_dtype = args.model_dtype
         if "embed_dtype" not in yaml_args.__dict__:
             yaml_args.embed_dtype = args.embed_dtype
+        explicit_hidden_state_index = any(
+            token == "--embedding_hidden_state_index"
+            or token.startswith("--embedding_hidden_state_index=")
+            for token in raw_argv
+        )
+        if explicit_hidden_state_index or "embedding_hidden_state_index" not in yaml_args.__dict__:
+            yaml_args.embedding_hidden_state_index = args.embedding_hidden_state_index
+        if "--no_embedding_scaler" in raw_argv:
+            yaml_args.embedding_scaler = False
+        elif "embedding_scaler" not in yaml_args.__dict__:
+            yaml_args.embedding_scaler = args.embedding_scaler
         if "model_paths" not in yaml_args.__dict__:
             yaml_args.model_paths = args.model_paths
         if "model_types" not in yaml_args.__dict__:
@@ -623,15 +637,17 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         
         # Get tokenizer and determine input dimensions
         tokenizer = get_tokenizer(model_name)
+        pooling_types = self.embedding_args.pooling_types
+        hidden_state_index = self.embedding_args.hidden_state_index
         
         if self._sql:
-            save_path = os.path.join(self.embedding_args.embedding_save_dir, 
-                                    f'{model_name}_{self._full}.db')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db', hidden_state_index)
+            save_path = os.path.join(self.embedding_args.embedding_save_dir, filename)
             input_dim = self.get_embedding_dim_sql(save_path, subtrain_seqs[0], tokenizer)
             emb_for_training = None
         else:
-            save_path = os.path.join(self.embedding_args.embedding_save_dir,
-                                    f'{model_name}_{self._full}.pth')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth', hidden_state_index)
+            save_path = os.path.join(self.embedding_args.embedding_save_dir, filename)
             emb_for_training = torch_load(save_path) if os.path.exists(save_path) else emb_dict
             input_dim = self.get_embedding_dim_pth(emb_for_training, subtrain_seqs[0], tokenizer)
         
@@ -822,15 +838,16 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
 
             # get embedding size
             pooling_types = self.embedding_args.pooling_types
+            hidden_state_index = self.embedding_args.hidden_state_index
             if self._sql:
                 # for sql, the embeddings will be gathered in real time during training
-                filename = get_embedding_filename(display_name, self._full, pooling_types, 'db')
+                filename = get_embedding_filename(display_name, self._full, pooling_types, 'db', hidden_state_index)
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, filename)
                 input_size = self.get_embedding_dim_sql(save_path, test_seq, tokenizer)
                 emb_dict = None
             else:
                 # for pth, the embeddings are loaded entirely into RAM and accessed during training
-                filename = get_embedding_filename(display_name, self._full, pooling_types, 'pth')
+                filename = get_embedding_filename(display_name, self._full, pooling_types, 'pth', hidden_state_index)
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, filename)
                 emb_dict = torch_load(save_path)
                 input_size = self.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)
@@ -892,15 +909,16 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
 
             # get embedding size
             pooling_types = self.embedding_args.pooling_types
+            hidden_state_index = self.embedding_args.hidden_state_index
             if self._sql:
                 # for sql, the embeddings will be gathered in real time during training
-                filename = get_embedding_filename(display_name, self._full, pooling_types, 'db')
+                filename = get_embedding_filename(display_name, self._full, pooling_types, 'db', hidden_state_index)
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, filename)
                 input_size = self.get_embedding_dim_sql(save_path, test_seq, tokenizer)
                 emb_dict = None
             else:
                 # for pth, the embeddings are loaded entirely into RAM and accessed during training
-                filename = get_embedding_filename(display_name, self._full, pooling_types, 'pth')
+                filename = get_embedding_filename(display_name, self._full, pooling_types, 'pth', hidden_state_index)
                 save_path = os.path.join(self.embedding_args.embedding_save_dir, filename)
                 emb_dict = torch_load(save_path)
                 input_size = self.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)

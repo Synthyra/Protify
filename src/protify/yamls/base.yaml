@@ -86,8 +86,10 @@ download_embeddings: !!bool false
 matrix_embed: !!bool false
 embedding_pooling_types:
   - mean
+embedding_hidden_state_index: !!int -1
 save_embeddings: !!bool false
 embed_dtype: !!str float32
+embedding_scaler: !!bool true  # StandardScaler for pooled vector embeddings during probe/scikit training; disable with --no_embedding_scaler
 sql: !!bool false
 read_scaler: !!int 100
 

@@ -18,6 +18,7 @@ MODEL_NAMES = {
     'ESM2-diffAV-150': r'$ESM2_{diffAV-150M}$',
     'ESMC-300': r'$ESMC_{300M}$',
     'ESMC-600': r'$ESMC_{600M}$',
+    'ESMC-6B': r'$ESMC_{6B}$',
     'E1-150': r'$E1_{150M}$',
     'E1-300': r'$E1_{300M}$',
     'E1-600': r'$E1_{600M}$',

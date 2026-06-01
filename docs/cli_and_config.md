@@ -135,6 +135,7 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--download_embeddings` | flag | False | Download precomputed embeddings. |
 | `--matrix_embed` | flag | False | Keep per-residue matrices (no pooling). |
 | `--embedding_pooling_types` | list | [mean, var] | Pooling for vector embeddings. |
+| `--embedding_hidden_state_index` | int | -1 | Hidden-state tuple index to pool from. `-1` uses the final hidden state and old cache names. |
 | `--save_embeddings` | flag | False | Save computed embeddings. |
 | `--embed_dtype` | choice | None | fp32/fp16/bf16 for embeddings (default: model_dtype). |
 | `--sql` | flag | False | Store embeddings in SQLite. |

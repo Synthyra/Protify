@@ -1,15 +1,14 @@
 """
 We use the FastPLM implementation of DPLM.
 """
-import sys
-import os
 import torch
 import torch.nn as nn
 from typing import List, Optional, Union, Dict
 
-_FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'fastplms')
-if _FASTPLMS not in sys.path:
-    sys.path.insert(0, _FASTPLMS)
+from .utils import ensure_fastplms_submodule_on_path, select_hidden_state
+
+
+ensure_fastplms_submodule_on_path()
 
 from fastplms.dplm.modeling_dplm import (
     DPLMForMaskedLM,
@@ -55,15 +54,26 @@ class DPLMForEmbedding(nn.Module):
             attention_mask: Optional[torch.Tensor] = None,
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = False,
+            hidden_state_index: int = -1,
             **kwargs,
     ) -> torch.Tensor:
+        output_hidden_states = output_hidden_states or hidden_state_index != -1
+        out = self.dplm(
+            input_ids,
+            attention_mask=attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+        hidden_state = select_hidden_state(
+            out.last_hidden_state,
+            out.hidden_states,
+            hidden_state_index,
+        )
         if output_attentions:
-            out = self.dplm(input_ids, attention_mask=attention_mask, output_attentions=output_attentions)
-            return out.last_hidden_state, out.attentions
-        out = self.dplm(input_ids, attention_mask=attention_mask)
+            return hidden_state, out.attentions
         if self.return_logits:
-            return out.last_hidden_state, out.logits
-        return out.last_hidden_state
+            return hidden_state, out.logits
+        return hidden_state
 
 
 def get_dplm_tokenizer(preset: str, model_path: str = None):

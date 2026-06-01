@@ -1,15 +1,14 @@
 """
 We use the FastPLM implementation of E1.
 """
-import sys
-import os
 import torch
 import torch.nn as nn
 from typing import Optional, Union, List, Dict, Tuple
 
-_FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'fastplms')
-if _FASTPLMS not in sys.path:
-    sys.path.insert(0, _FASTPLMS)
+from .utils import ensure_fastplms_submodule_on_path, select_hidden_state
+
+
+ensure_fastplms_submodule_on_path()
 
 from fastplms.e1.modeling_e1 import (
     E1Model,
@@ -49,13 +48,23 @@ class E1ForEmbedding(nn.Module):
             self,
             output_attentions: Optional[bool] = False,
             output_hidden_states: Optional[bool] = False,
+            hidden_state_index: int = -1,
             **kwargs,
     ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, ...]]]:
+        output_hidden_states = output_hidden_states or hidden_state_index != -1
+        out = self.e1(
+            **kwargs,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+        hidden_state = select_hidden_state(
+            out.last_hidden_state,
+            out.hidden_states,
+            hidden_state_index,
+        )
         if output_attentions:
-            out = self.e1(**kwargs, output_attentions=output_attentions)
-            return out.last_hidden_state, out.attentions
-        else:
-            return self.e1(**kwargs, output_hidden_states=False, output_attentions=False).last_hidden_state
+            return hidden_state, out.attentions
+        return hidden_state
 
 
 def get_e1_tokenizer(preset: str, model_path: str = None):
