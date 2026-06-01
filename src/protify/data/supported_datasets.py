@@ -1,3 +1,5 @@
+from typing import Dict
+
 supported_datasets = {
     'EC': 'GleghornLab/EC_reg',
     'GO-CC': 'GleghornLab/CC_reg',
@@ -5,48 +7,46 @@ supported_datasets = {
     'GO-MF': 'GleghornLab/MF_reg',
     'MB': 'GleghornLab/MB_reg',
     'DeepLoc-2': 'GleghornLab/DL2_reg',
-    'DeepLoc-10': 'GleghornLab/DL10_reg',  
-    'SL13': 'GleghornLab/SL_13',
+    'DeepLoc-10': 'GleghornLab/DL10_reg',
+    'Subcellular': 'GleghornLab/SL_13',
     'enzyme-kcat': 'GleghornLab/enzyme_kcat',
     'solubility': 'GleghornLab/solubility_prediction',
-    'temp-stability': 'GleghornLab/temperature_stability',
-    'optimal-temp': 'GleghornLab/optimal_temperature',
+    'localization': 'GleghornLab/localization_prediction',
+    'temperature-stability': 'GleghornLab/temperature_stability',
+    'peptide-HLA-MHC-affinity': 'GleghornLab/peptide_HLA_MHC_affinity_ppi',
+    'optimal-temperature': 'GleghornLab/optimal_temperature',
     'optimal-ph': 'GleghornLab/optimal_ph',
-    'mat-production': 'GleghornLab/material_production',
-    'fitness-pred': 'GleghornLab/fitness_prediction',
+    'optimal-ph-rigor': 'GleghornLab/optimal_ph_rigor',
+    'material-production': 'GleghornLab/material_production',
+    'fitness-prediction': 'GleghornLab/fitness_prediction',
     'number-of-folds': 'GleghornLab/fold_prediction',
     'cloning-clf': 'GleghornLab/cloning_clf',
-    'stability-pred': 'GleghornLab/stability_prediction',
-    'ec-active': 'lhallee/ec_active',
-    'ecoli_expression': 'GleghornLab/ecoli_expression',
-    'soluprot': 'GleghornLab/soluprot',
-    'KSMoFinder-clustered': 'GleghornLab/ksmo_clustered',
-    'KSMoFinder': 'GleghornLab/KSmo_fixed',
-    'shs148-ppi-bfs': 'GleghornLab/ppi_SHS148k_bfs_2025',
-    'shs27-ppi-bfs': 'GleghornLab/ppi_SHS27k_bfs_2025',
-    'string-ppi-bfs': 'GleghornLab/ppi_STRING_bfs_2025',
+    'stability-prediction': 'GleghornLab/stability_prediction',
+    'human-ppi-saprot': 'GleghornLab/HPPI',
+    'SecondaryStructure-3': 'GleghornLab/SS3',
+    'SecondaryStructure-8': 'GleghornLab/SS8',
+    'fluorescence-prediction': 'GleghornLab/fluorescence_prediction',
+    'plastic': 'GleghornLab/plastic_degradation_benchmark',
     'gold-ppi': 'Synthyra/bernett_gold_ppi',
-    'plm-interact': 'GleghornLab/plm_interact_human_train_cross_ppi',
-    'PPA-ppi': 'Synthyra/ppi_affinity',
-    'million_full': 'GleghornLab/millionfull_round_1_oct_2025',
-    'taxon_species': 'GleghornLab/taxonomy_species_0.4_clusters',
-    'diff_phylogeny': 'GleghornLab/diff_phylo',
-    'localization': 'GleghornLab/localization_prediction',
-    'peptide-HLA-MHC-affinity': 'GleghornLab/peptide_HLA_MHC_affinity_ppi',
-    'optimal-ph-rigor': 'GleghornLab/optimal_ph_rigor',
-    'SS3': 'GleghornLab/SS3',
-    'SS8': 'GleghornLab/SS8',
-    'foldseek-fold': 'lhallee/foldseek_dataset', # prostt5
-    'foldseek-inverse': 'lhallee/foldseek_dataset', # prostt5
-    'plddt': 'GleghornLab/af2_plddt',
-    'shs27-ppi-random': 'GleghornLab/ppi_SHS27k_random_2025',
-    'shs27-ppi-dfs': 'GleghornLab/ppi_SHS27k_dfs_2025',
+    'human-ppi-pinui': 'GleghornLab/HPPI_PiNUI',
+    'yeast-ppi-pinui': 'GleghornLab/YPPI_PiNUI',
     'shs27-ppi-raw': 'Synthyra/SHS27k',
-    'shs148-ppi-random': 'GleghornLab/ppi_SHS148k_random_2025',
-    'shs148-ppi-dfs': 'GleghornLab/ppi_SHS148k_dfs_2025',
     'shs148-ppi-raw': 'Synthyra/SHS148k',
+    'shs27-ppi-random': 'GleghornLab/ppi_SHS27k_random_2025',
+    'shs148-ppi-random': 'GleghornLab/ppi_SHS148k_random_2025',
+    'shs27-ppi-dfs': 'GleghornLab/ppi_SHS27k_dfs_2025',
+    'shs148-ppi-dfs': 'GleghornLab/ppi_SHS148k_dfs_2025',
+    'shs27-ppi-bfs': 'GleghornLab/ppi_SHS27k_bfs_2025',
+    'shs148-ppi-bfs': 'GleghornLab/ppi_SHS148k_bfs_2025',
     'string-ppi-random': 'GleghornLab/ppi_STRING_random_2025',
     'string-ppi-dfs': 'GleghornLab/ppi_STRING_dfs_2025',
+    'string-ppi-bfs': 'GleghornLab/ppi_STRING_bfs_2025',
+    'plm-interact': 'GleghornLab/plm_interact_human_train_cross_ppi',
+    'ppi-mutation-effect': 'GleghornLab/ppi_mutation_effect', # requires multi_column
+    'PPA-ppi': 'Synthyra/ppi_affinity',
+    'foldseek-fold': 'lhallee/foldseek_dataset', # prostt5
+    'foldseek-inverse': 'lhallee/foldseek_dataset', # prostt5
+    'ec-active': 'lhallee/ec_active',
     'proteingym_zs': 'proteingym_zs', # not a path, data loading for this is currently handled in benchmarks/proteingym/data_loader.py
     'proteingym_supervised': 'proteingym_supervised', # not a path, data loading for this is currently handled in benchmarks/proteingym/data_loader.py
     'taxon_domain': 'GleghornLab/taxonomy_domain_0.4_clusters',
@@ -56,12 +56,15 @@ supported_datasets = {
     'taxon_order': 'GleghornLab/taxonomy_order_0.4_clusters',
     'taxon_family': 'GleghornLab/taxonomy_family_0.4_clusters',
     'taxon_genus': 'GleghornLab/taxonomy_genus_0.4_clusters',
-    'human-ppi-saprot': 'GleghornLab/HPPI',
-    'human-ppi-pinui': 'GleghornLab/HPPI_PiNUI',
-    'yeast-ppi-pinui': 'GleghornLab/YPPI_PiNUI',
-    'ppi-mutation-effect': 'GleghornLab/ppi_mutation_effect', # requires multi_column
-    'fluorescence': 'GleghornLab/fluorescence_prediction',
+    'taxon_species': 'GleghornLab/taxonomy_species_0.4_clusters',
+    'diff_phylogeny': 'GleghornLab/diff_phylo',
+    'plddt': 'GleghornLab/af2_plddt',
     'realness': 'GleghornLab/realness_dataset',
+    'million_full': 'GleghornLab/millionfull_round_1_oct_2025',
+    'soluprot': 'GleghornLab/soluprot',
+    'ecoli_expression': 'GleghornLab/ecoli_expression',
+    'KSMoFinder-clustered': 'GleghornLab/ksmo_clustered',
+    'KSMoFinder': 'GleghornLab/KSmo_fixed',
     # bom-pooling paper (Hoang & Singh 2025) datasets
     'FLUO': 'GleghornLab/bom_fluorescence',
     'BLAC': 'GleghornLab/bom_blac',
@@ -69,6 +72,38 @@ supported_datasets = {
     'DPI': 'GleghornLab/bom_dpi',
 }
 
+internal_datasets = {
+    'plastic': 'GleghornLab/plastic_degradation_benchmark',
+}
+
+dataset_aliases: Dict[str, str] = {
+    'SL13': 'Subcellular',
+    'SS3': 'SecondaryStructure-3',
+    'SS8': 'SecondaryStructure-8',
+    'optimal-temp': 'optimal-temperature',
+    'opt-temp': 'optimal-temperature',
+    'temp-stability': 'temperature-stability',
+    'mat-production': 'material-production',
+    'fitness-pred': 'fitness-prediction',
+    'stability-pred': 'stability-prediction',
+    'fluorescence': 'fluorescence-prediction',
+}
+
+
+def resolve_dataset_name(dataset_name: str) -> str:
+    if dataset_name in supported_datasets:
+        return dataset_name
+    if dataset_name in dataset_aliases:
+        return dataset_aliases[dataset_name]
+    return dataset_name
+
+
+def get_dataset_source(dataset_name: str) -> str:
+    canonical_name = resolve_dataset_name(dataset_name)
+    return supported_datasets[canonical_name]
+
+
+# TODO update
 possible_with_vector_reps = [
     ### multi-label
     'EC',
@@ -76,44 +111,31 @@ possible_with_vector_reps = [
     'GO-CC',
     'GO-BP',
     'GO-MF',
-    'SL13',
+    'Subcellular',
+    # ppi
+    'shs27-ppi-random',
+    'shs27-ppi-dfs',
+    'shs27-ppi-bfs',
+    'shs148-ppi-random',
+    'shs148-ppi-dfs',
+    'shs148-ppi-bfs',
+    'string-ppi-random',
+    'string-ppi-dfs',
+    'string-ppi-bfs',
     ### classification
     'MB',
     'DeepLoc-2',
     'DeepLoc-10',
     'solubility',
-    'temp-stability',
-    'mat-production',
-    'fitness-pred',
+    'temperature-stability',
+    'material-production',
+    'fitness-prediction',
     'number-of-folds',
     'cloning-clf',
-    'stability-pred',
+    'stability-prediction',
     'ec-active',
     'localization',
-    ### regression
-    'enzyme-kcat',
-    'optimal-temp',
-    'optimal-ph',
-    'million_full',
-    ### ppi
-    'shs148-ppi-bfs',
-    'shs27-ppi-bfs',
-    'string-ppi-bfs',
-    'gold-ppi',
-    'plm-interact',
-    'PPA-ppi',
-    'shs27-ppi-raw',
-    'shs148-ppi-raw',
-    'shs27-ppi-random',
-    'shs27-ppi-dfs',
-    'shs148-ppi-random',
-    'shs148-ppi-dfs',
-    'string-ppi-random',
-    'string-ppi-dfs',
-    'human-ppi-saprot',
-    'human-ppi-pinui',
-    'yeast-ppi-pinui',
-    ### taxonomy
+    # taxonomy
     'taxon_domain',
     'taxon_kingdom',
     'taxon_phylum',
@@ -123,6 +145,22 @@ possible_with_vector_reps = [
     'taxon_genus',
     'taxon_species',
     'diff_phylogeny',
+    # ppi
+    'shs27-ppi-raw',
+    'shs148-ppi-raw',
+    'plm-interact',
+    'gold-ppi',
+    'string-ppi-bfs',
+    'human-ppi-saprot',
+    'human-ppi-pinui',
+    'yeast-ppi-pinui',
+    ### regression
+    'enzyme-kcat',
+    'optimal-temperature',
+    'optimal-ph',
+    'million_full',
+    # ppi
+    'PPA-ppi',
 ]
 
 # TODO update
@@ -136,9 +174,9 @@ standard_data_benchmark = [
     'DeepLoc-2',
     'DeepLoc-10',
     'enzyme-kcat',
-    'opt-temp',
+    'optimal-temperature',
     'optimal-ph',
-    'fitness-pred',
+    'fitness-prediction',
 ]
 
 
@@ -149,35 +187,37 @@ vector_benchmark = [
     'GO-CC', # SaProt
     'GO-BP', # SaProt
     'GO-MF', # SaProt
-    'SL13', # Custom - Tamar
+    'Subcellular', # Custom - Tamar
+    # ppi
+    'shs27-ppi-bfs', # MGPPI + SHS27k + SHS148k + STRING
+    'shs148-ppi-bfs', # MGPPI + SHS27k + SHS148k + STRING
+    'string-ppi-bfs', # MGPPI + SHS27k + SHS148k + STRING
     ### classification
     'MB', # SaProt
     'DeepLoc-2', # SaProt
     'DeepLoc-10', # SaProt
     'solubility', # Biomap
-    'temp-stability', # Biomap
-    'mat-production', # Biomap
-    'fitness-pred', # Biomap
+    'temperature-stability', # Biomap
+    'material-production', # Biomap
+    'fitness-prediction', # Biomap
     'number-of-folds', # Biomap
     'cloning-clf', # Biomap
-    'stability-pred', # Biomap
+    'stability-prediction', # Biomap
     'ec-active', # Custom - Logan
     'soluprot', # Custom - SoluProt
-    ### taxonomy
+    # taxonomy
     'taxon_species', # Accidental taxonomists
     'diff_phylogeny', # Accidental taxonomists
-    ### ppi
-    'shs27-ppi-bfs', # MGPPI + SHS27k + SHS148k + STRING
-    'shs148-ppi-bfs', # MGPPI + SHS27k + SHS148k + STRING
-    'string-ppi-bfs', # MGPPI + SHS27k + SHS148k + STRING
+    # ppi
     'plm-interact', # PLM-Interact
     'gold-ppi', # Bernett
-    'PPA-ppi', # Custom - Logan - Bindwell
-    # regression
+    ### regression
     'enzyme-kcat', # Custom - Logan - Biomap
-    'opt-temp', # Biomap
+    'optimal-temperature', # Biomap
     'optimal-ph', # Biomap
     'million_full', # Millionfull
+    # ppi
+    'PPA-ppi', # Custom - Logan - Bindwell
 ]
 
 
@@ -188,5 +228,5 @@ testing = [
     'enzyme-kcat', # regression
     'human-ppi', # ppi
     'plddt', # tokenwise regression
-    'SS3', # tokenwise classification
+    'SecondaryStructure-3', # tokenwise classification
 ]

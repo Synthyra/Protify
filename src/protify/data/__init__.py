@@ -1,8 +1,11 @@
 from .supported_datasets import (
-    supported_datasets,
+    dataset_aliases,
+    get_dataset_source,
     internal_datasets,
     possible_with_vector_reps,
+    resolve_dataset_name,
     standard_data_benchmark,
+    supported_datasets,
     testing,
 )
 

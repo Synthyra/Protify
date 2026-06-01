@@ -1,8 +1,11 @@
 from .supported_datasets import (
-    supported_datasets,
+    dataset_aliases,
+    get_dataset_source,
     internal_datasets,
     possible_with_vector_reps,
+    resolve_dataset_name,
     standard_data_benchmark,
+    supported_datasets,
     testing,
 )
 
@@ -60,15 +63,21 @@ def get_dataset_info(dataset_name: str):
     Returns:
         dict: Dataset information or None if not found
     """
+    canonical_name = resolve_dataset_name(dataset_name)
+
     try:
         from .dataset_descriptions import dataset_descriptions
-        if dataset_name in dataset_descriptions:
-            return dataset_descriptions[dataset_name]
+        if canonical_name in dataset_descriptions:
+            dataset_info = dict(dataset_descriptions[canonical_name])
+            if dataset_name in dataset_aliases:
+                dataset_info['name'] = canonical_name
+                dataset_info['alias'] = dataset_name
+            return dataset_info
     except ImportError:
         pass
         
-    if dataset_name in supported_datasets:
-        return {"name": dataset_name, "source": supported_datasets[dataset_name]}
+    if canonical_name in supported_datasets:
+        return {"name": canonical_name, "source": get_dataset_source(canonical_name)}
     
     return None
 
