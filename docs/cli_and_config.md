@@ -55,7 +55,6 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--download_dir` | str | Synthyra/vector_embeddings | Directory for downloaded embeddings. |
 | `--plots_dir` | str | plots | Directory for plots. |
 | `--replay_path` | str | None | Path to replay log file. |
-| `--pretrained_probe_path` | str | None | Path to pretrained probe (reserved). |
 
 ### Data
 
@@ -67,7 +66,7 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--padding` | choice | max_length | Padding strategy: `max_length` pads all sequences to `--max_length` (recommended for torch.compile + flex attention); `longest` pads to the longest sequence in each batch. |
 | `--trim` | flag | False | If set, drop sequences longer than max_length; else truncate. |
 | `--data_names` | list | [] | Dataset names (HuggingFace or preset e.g. standard_benchmark). |
-| `--data_dirs` | list | [] | Local directories with train.*/valid.*/test.*. |
+| `--data_dirs` | list | [] | Local split directories with train and valid/test aliases; accepts tabular files or labeled FASTA. |
 | `--aa_to_dna`, `--aa_to_rna`, `--dna_to_aa`, `--rna_to_aa`, `--codon_to_aa`, `--aa_to_codon` | flag | False | Sequence translation (only one may be True). |
 | `--random_pair_flipping` | flag | False | Random swap of paired inputs (e.g. PPI). |
 | `--multi_column` | list | None | Sequence column names for multi-input tasks. |
@@ -151,11 +150,14 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--probe_grad_accum` | int | 1 | Gradient accumulation steps (probe). |
 | `--base_grad_accum` | int | 8 | Gradient accumulation steps (base). |
 | `--lr` | float | 1e-4 | Learning rate (shared by probe and base phases unless `--base_lr` is set). |
+| `--probe_lr` | float | None | Learning rate for the probe phase. If omitted, falls back to `--lr`. |
+| `--base_lr` | float | None | Learning rate for the base-model phase. If omitted, falls back to `--lr`. |
+| `--lr_scheduler` | str | cosine | Hugging Face `TrainingArguments.lr_scheduler_type`. |
+| `--optimizer` | str | adamw_torch | Hugging Face `TrainingArguments.optim`. |
 | `--weight_decay` | float | 0.00 | Weight decay. |
 | `--patience` | int | 1 | Early-stopping patience (probe phase, and base phase unless `--base_patience` is set). |
 | `--base_num_epochs` | int | None | Epoch count for the base-model phase of hybrid / full-finetuning training. If omitted, falls back to `--num_epochs`. |
 | `--base_patience` | int | None | Early-stopping patience for the base-model phase. If omitted, falls back to `--patience`. |
-| `--base_lr` | float | None | Learning rate for the base-model phase (useful when LoRA / full-FT wants a different LR than the probe). If omitted, falls back to `--lr`. |
 | `--seed` | int | None | Random seed (None: time-based). |
 | `--deterministic` | flag | False | Deterministic mode. |
 | `--full_finetuning` | flag | False | Full model finetuning. |

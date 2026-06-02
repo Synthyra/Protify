@@ -360,11 +360,7 @@ class Tokenizer(PreTrainedTokenizer):
         self._id_to_token.update(self.added_tokens_decoder)
         self._token_to_id.update(self.added_tokens_encoder)
 
-        # TODO, all the tokens are added? But they are also part of the vocab... bit strange.
-        # none of them are special, but they all need special splitting.
-
-        # self.unique_no_split_tokens = self.all_tokens
-        # self._update_trie(self.unique_no_split_tokens)
+        # CaLM tokenization is character-level, so vocab tokens do not need trie-based splitting.
 
     def _tokenize(self, text: str, **kwargs):
         if self.do_upper_case:

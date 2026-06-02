@@ -18,7 +18,6 @@ embedding_save_dir: embeddings
 download_dir: Synthyra/mean_pooled_embeddings
 plots_dir: plots
 replay_path: null
-pretrained_probe_path: null
 
 
 # DataArguments:
@@ -101,8 +100,14 @@ base_batch_size: !!int 4
 probe_grad_accum: !!int 1
 base_grad_accum: !!int 8
 lr: !!float 1e-4
+probe_lr: null
+base_lr: null
+lr_scheduler: cosine
+optimizer: adamw_torch
 weight_decay: !!float 0.00
 patience: !!int 1
+base_num_epochs: null
+base_patience: null
 full_finetuning: !!bool false
 hybrid_probe: !!bool false
 num_runs: !!int 1

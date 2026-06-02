@@ -96,6 +96,18 @@ def test_lazy_classifier_models_populated():
         assert hasattr(clf.models[name], "predict")
 
 
+def test_lazy_classifier_passes_n_jobs_to_estimators():
+    X, y = _make_classification_data(n_samples=80, n_features=5)
+    X_train, X_test, y_train, y_test = _train_test_split(X, y, train_frac=0.8)
+    clf = LazyClassifier(
+        classifiers=[RandomForestClassifier],
+        verbose=0,
+        n_jobs=2,
+    )
+    clf.fit(X_train, X_test, y_train, y_test)
+    assert clf.models["RandomForestClassifier"].n_jobs == 2
+
+
 def test_lazy_classifier_predictions_true_returns_tuple():
     """LazyClassifier with predictions=True returns (scores, predictions_df)."""
     X, y = _make_classification_data(n_samples=80, n_features=5)
@@ -134,6 +146,18 @@ def test_lazy_regressor_models_populated():
     for name, _ in FAST_REGRESSORS:
         assert name in rg.models
         assert hasattr(rg.models[name], "predict")
+
+
+def test_lazy_regressor_passes_n_jobs_to_estimators():
+    X, y = _make_regression_data(n_samples=80, n_features=5)
+    X_train, X_test, y_train, y_test = _train_test_split(X, y, train_frac=0.8)
+    rg = LazyRegressor(
+        regressors=[RandomForestRegressor],
+        verbose=0,
+        n_jobs=2,
+    )
+    rg.fit(X_train, X_test, y_train, y_test)
+    assert rg.models["RandomForestRegressor"].n_jobs == 2
 
 
 def test_lazy_regressor_predictions_true_returns_tuple():
