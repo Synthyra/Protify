@@ -991,9 +991,10 @@ class DataMixin:
         train_array, valid_array, test_array = [], [], []
         # Get pooling types from embedding_args, default to ['mean'] if not available
         pooling_types = self.embedding_args.pooling_types
+        hidden_state_index = self.embedding_args.hidden_state_index
         if self._sql:
             import sqlite3
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             with sqlite3.connect(save_path) as conn:
                 c = conn.cursor()
@@ -1009,7 +1010,7 @@ class DataMixin:
                     embedding = self._select_from_sql(c, seq, cast_to_torch=False)
                     test_array.append(embedding)
         else:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             emb_dict = torch.load(save_path)
             for seq in train_seqs:
@@ -1053,8 +1054,9 @@ class DataMixin:
         save_dir = self.embedding_args.embedding_save_dir
         train_array, valid_array, test_array = [], [], []
         pooling_types = self.embedding_args.pooling_types
+        hidden_state_index = self.embedding_args.hidden_state_index
         if self._sql:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             with sqlite3.connect(save_path) as conn:
                 c = conn.cursor()
@@ -1076,7 +1078,7 @@ class DataMixin:
                     embedding_b = self._select_from_sql(c, seq_b, cast_to_torch=False)
                     test_array.append(np.concatenate([embedding_a, embedding_b], axis=-1))
         else:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             emb_dict = torch.load(save_path)
             for seq_a, seq_b in zip(train_seqs_a, train_seqs_b):

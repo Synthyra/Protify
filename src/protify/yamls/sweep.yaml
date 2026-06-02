@@ -48,6 +48,11 @@ parameters:
   embedding_pooling_types:
     values: ['mean', 'var', 'mean-var', 'cls']
 
+  # Hidden-state tuple index for embedding generation
+  # -1 preserves final-hidden-state behavior.
+  embedding_hidden_state_index:
+    values: [-1, 3, 6]
+
   # LoRA parameters (only swept when lora=true)
   lora_r:
     distribution: q_uniform
