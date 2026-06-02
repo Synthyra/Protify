@@ -5,6 +5,7 @@ from transformers import T5EncoderModel, AutoTokenizer, T5ForConditionalGenerati
 
 from .base_tokenizer import BaseSequenceTokenizer
 from .t5 import T5ForSequenceClassification, T5ForTokenClassification
+from .utils import select_hidden_state
 
 
 presets = {
@@ -40,13 +41,24 @@ class AnkhForEmbedding(nn.Module):
             attention_mask: Optional[torch.Tensor] = None,
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = False,
+            hidden_state_index: int = -1,
             **kwargs,
     ) -> torch.Tensor:
+        output_hidden_states = output_hidden_states or hidden_state_index != -1
+        out = self.plm(
+            input_ids,
+            attention_mask=attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+        hidden_state = select_hidden_state(
+            out.last_hidden_state,
+            out.hidden_states,
+            hidden_state_index,
+        )
         if output_attentions:
-            out = self.plm(input_ids, attention_mask=attention_mask, output_attentions=output_attentions)
-            return out.last_hidden_state, out.attentions
-        else:
-            return self.plm(input_ids, attention_mask=attention_mask).last_hidden_state
+            return hidden_state, out.attentions
+        return hidden_state
 
 
 class AnkhForProteinGym(nn.Module):

@@ -14,6 +14,7 @@ all_presets_with_paths = {
     # ESMC models (from esmc.py)
     'ESMC-300': 'Synthyra/ESMplusplus_small',
     'ESMC-600': 'Synthyra/ESMplusplus_large',
+    'ESMC-6B': 'Synthyra/ESMplusplus_6B',
     # E1 models (from e1.py)
     'E1-150': 'Synthyra/Profluent-E1-150M',
     'E1-300': 'Synthyra/Profluent-E1-300M',
@@ -92,6 +93,7 @@ currently_supported_models = [
     'Random-ESM2-650',
     'ESMC-300',
     'ESMC-600',
+    'ESMC-6B',
     'E1-150',
     'E1-300',
     'E1-600',

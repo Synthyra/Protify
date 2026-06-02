@@ -10,6 +10,7 @@ from transformers import (
 )
 
 from .base_tokenizer import BaseSequenceTokenizer
+from .utils import select_hidden_state
 
 
 presets = {
@@ -49,19 +50,22 @@ class gLM2ForEmbedding(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = False,
+        hidden_state_index: int = -1,
         token_type_ids: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
+        output_hidden_states = output_hidden_states or hidden_state_index != -1
         assert not output_attentions or not output_hidden_states, (
             "output_attentions=True and output_hidden_states=True are not supported by gLM2ForEmbedding."
         )
 
         out = self.glm2(
             input_ids=input_ids,
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            output_hidden_states=output_hidden_states,
         )
         
-        return out.last_hidden_state
+        return select_hidden_state(out.last_hidden_state, out.hidden_states, hidden_state_index)
 
 class gLM2GAIAForEmbedding(nn.Module):
     def __init__(self, model_path: str, dtype: torch.dtype = None):
@@ -75,18 +79,21 @@ class gLM2GAIAForEmbedding(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = False,
+        hidden_state_index: int = -1,
         token_type_ids: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
+        output_hidden_states = output_hidden_states or hidden_state_index != -1
         assert not output_attentions or not output_hidden_states, (
             "output_attentions=True and output_hidden_states=True are not supported by gLM2ForEmbedding."
         )
 
         out = self.glm2(
             input_ids=input_ids,
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            output_hidden_states=output_hidden_states,
         )
-        return out.last_hidden_state
+        return select_hidden_state(out.last_hidden_state, out.hidden_states, hidden_state_index)
 
 
 def get_glm2_tokenizer(preset: str, model_path: str = None):

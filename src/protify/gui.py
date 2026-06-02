@@ -427,23 +427,29 @@ class GUI(MainProcess):
         
         ttk.Label(self.embed_tab, text="Options: mean, max, min, norm, prod, median, std, var, cls, parti").grid(row=6, column=0, columnspan=2, padx=10, pady=2, sticky="w")
 
+        ttk.Label(self.embed_tab, text="Hidden State Index:").grid(row=7, column=0, padx=10, pady=5, sticky="w")
+        self.settings_vars["embedding_hidden_state_index"] = tk.IntVar(value=-1)
+        spin_hidden_state = ttk.Spinbox(self.embed_tab, from_=-1, to=100, textvariable=self.settings_vars["embedding_hidden_state_index"])
+        spin_hidden_state.grid(row=7, column=1, padx=10, pady=5)
+        self.add_help_button(self.embed_tab, 7, 2, "-1 uses the final hidden state. Non-negative values select a hidden-state tuple index.")
+
         # embed_dtype
-        ttk.Label(self.embed_tab, text="Embedding DType:").grid(row=7, column=0, padx=10, pady=5, sticky="w")
+        ttk.Label(self.embed_tab, text="Embedding DType:").grid(row=8, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["embed_dtype"] = tk.StringVar(value="float32")
         combo_dtype = ttk.Combobox(
             self.embed_tab,
             textvariable=self.settings_vars["embed_dtype"],
             values=["float32", "float16", "bfloat16", "float8_e4m3fn", "float8_e5m2"]
         )
-        combo_dtype.grid(row=7, column=1, padx=10, pady=5)
-        self.add_help_button(self.embed_tab, 7, 2, "Data type to use for storing embeddings (affects precision and size).")
+        combo_dtype.grid(row=8, column=1, padx=10, pady=5)
+        self.add_help_button(self.embed_tab, 8, 2, "Data type to use for storing embeddings (affects precision and size).")
 
         # sql
-        ttk.Label(self.embed_tab, text="Use SQL:").grid(row=8, column=0, padx=10, pady=5, sticky="w")
+        ttk.Label(self.embed_tab, text="Use SQL:").grid(row=9, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["sql"] = tk.BooleanVar(value=False)
         check_sql = ttk.Checkbutton(self.embed_tab, variable=self.settings_vars["sql"])
-        check_sql.grid(row=8, column=1, padx=10, pady=5, sticky="w")
-        self.add_help_button(self.embed_tab, 8, 2, "Whether to use SQL database for storing embeddings instead of files.")
+        check_sql.grid(row=9, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.embed_tab, 9, 2, "Whether to use SQL database for storing embeddings instead of files.")
 
         run_button = ttk.Button(self.embed_tab, text="Embed sequences to disk", command=self._get_embeddings)
         run_button.grid(row=99, column=0, columnspan=2, pady=(10, 10))
@@ -1192,6 +1198,7 @@ class GUI(MainProcess):
             "download_embeddings": self.settings_vars["download_embeddings"].get(),
             "matrix_embed": self.settings_vars["matrix_embed"].get(),
             "embedding_pooling_types": embedding_pooling,
+            "embedding_hidden_state_index": self.settings_vars["embedding_hidden_state_index"].get(),
             "save_embeddings": True,
             "embed_dtype": self.settings_vars["embed_dtype"].get(),
             "sql": self.settings_vars["sql"].get(),
@@ -1691,6 +1698,7 @@ class GUI(MainProcess):
         self.full_args.download_embeddings = self.settings_vars["download_embeddings"].get()
         self.full_args.matrix_embed = self.settings_vars["matrix_embed"].get()
         self.full_args.embedding_pooling_types = pooling_list
+        self.full_args.embedding_hidden_state_index = self.settings_vars["embedding_hidden_state_index"].get()
         self.full_args.save_embeddings = True
         self.full_args.embed_dtype = dtype_val
         self.full_args.sql = self.settings_vars["sql"].get()
@@ -1842,6 +1850,7 @@ class GUI(MainProcess):
             self.full_args.download_embeddings = self.settings_vars["download_embeddings"].get()
             self.full_args.matrix_embed = self.settings_vars["matrix_embed"].get()
             self.full_args.embedding_pooling_types = pooling_list
+            self.full_args.embedding_hidden_state_index = self.settings_vars["embedding_hidden_state_index"].get()
             self.full_args.save_embeddings = True
             self.full_args.embed_dtype = dtype_val
             self.full_args.sql = self.settings_vars["sql"].get()

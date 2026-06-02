@@ -48,6 +48,7 @@ try:
     from metrics_balanced import compute_balanced_regression_metrics
     from seed_utils import set_global_seed
     from probes.get_probe import get_probe
+    from embedder import get_embedding_filename
 except ImportError:
     from ..data.data_collators import (
         EmbedsLabelsCollator,
@@ -61,6 +62,7 @@ except ImportError:
     from ..metrics_balanced import compute_balanced_regression_metrics
     from ..seed_utils import set_global_seed
     from .get_probe import get_probe
+    from ..embedder import get_embedding_filename
 
 
 def _compute_eval_accumulation_steps(
@@ -661,7 +663,14 @@ Protify is an open source platform designed to simplify and democratize workflow
         
         print(f'task_type: {task_type}')
         full = self.embedding_args.matrix_embed
-        db_path = os.path.join(self.embedding_args.embedding_save_dir, f'{model_name}_{full}.db')
+        db_filename = get_embedding_filename(
+            model_name,
+            full,
+            self.embedding_args.pooling_types,
+            'db',
+            self.embedding_args.hidden_state_index,
+        )
+        db_path = os.path.join(self.embedding_args.embedding_save_dir, db_filename)
 
         use_multi = getattr(self.full_args, 'multi_column', None)
         if self.embedding_args.sql:

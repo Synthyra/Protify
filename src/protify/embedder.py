@@ -45,7 +45,13 @@ def build_collator(tokenizer: object, padding: str = 'max_length', max_length: i
     return _collate_fn
 
 
-def get_embedding_filename(model_name: str, matrix_embed: bool, pooling_types: List[str], extension: str = 'pth') -> str:
+def get_embedding_filename(
+        model_name: str,
+        matrix_embed: bool,
+        pooling_types: List[str],
+        extension: str = 'pth',
+        hidden_state_index: int = -1,
+) -> str:
     """
     Generate embedding filename with pooling types for vector embeddings.
     
@@ -54,11 +60,15 @@ def get_embedding_filename(model_name: str, matrix_embed: bool, pooling_types: L
         matrix_embed: Whether embeddings are matrices (True) or vectors (False)
         pooling_types: List of pooling types used (only relevant for vector embeddings)
         extension: File extension ('pth' or 'db')
+        hidden_state_index: Hidden-state tuple index used for embeddings. -1 uses the final hidden state.
     
     Returns:
-        Filename string in format: {model_name}_{matrix_embed}[_{pooling_types}].{extension}
+        Filename string in format: {model_name}_{matrix_embed}[_hs{hidden_state_index}][_{pooling_types}].{extension}
     """
+    assert isinstance(hidden_state_index, int), "hidden_state_index must be an integer."
     base_name = f'{model_name}_{matrix_embed}'
+    if hidden_state_index != -1:
+        base_name = f'{base_name}_hs{hidden_state_index}'
     if not matrix_embed and pooling_types:
         # For vector embeddings, include pooling types in filename
         pooling_str = '_'.join(sorted(pooling_types))  # Sort for consistency
@@ -152,6 +162,7 @@ class EmbeddingArguments:
             embedding_save_dir: str = 'embeddings',
             padding: str = 'max_length',
             max_length: int = 2048,
+            embedding_hidden_state_index: int = -1,
             multi_gpu: bool = False,
             autocast: bool = False,
             embedding_scaler: bool = True,
@@ -170,6 +181,7 @@ class EmbeddingArguments:
         self.embedding_save_dir = embedding_save_dir
         self.padding = padding
         self.max_length = max_length
+        self.hidden_state_index = embedding_hidden_state_index
         self.multi_gpu = multi_gpu
         self.autocast = autocast
         assert isinstance(embedding_scaler, bool), f"Invalid embedding_scaler: {embedding_scaler}"
@@ -193,6 +205,7 @@ class Embedder:
         self.embedding_save_dir = args.embedding_save_dir
         self.padding = args.padding
         self.max_length = args.max_length
+        self.hidden_state_index = args.hidden_state_index
         self.multi_gpu = args.multi_gpu
         self.autocast = args.autocast
 
@@ -204,7 +217,13 @@ class Embedder:
         # download from download_dir
         # unzip
         # move to embedding_save_dir
-        filename = get_embedding_filename(model_name, self.matrix_embed, self.pooling_types, 'pth')
+        filename = get_embedding_filename(
+            model_name,
+            self.matrix_embed,
+            self.pooling_types,
+            'pth',
+            self.hidden_state_index,
+        )
         try:
             local_path = hf_hub_download(
                 repo_id=self.download_dir,
@@ -261,7 +280,13 @@ class Embedder:
 
     def _read_embeddings_from_disk(self, model_name: str):
         if self.sql:
-            filename = get_embedding_filename(model_name, self.matrix_embed, self.pooling_types, 'db')
+            filename = get_embedding_filename(
+                model_name,
+                self.matrix_embed,
+                self.pooling_types,
+                'db',
+                self.hidden_state_index,
+            )
             save_path = os.path.join(self.embedding_save_dir, filename)
             if os.path.exists(save_path):
                 conn = sqlite3.connect(save_path, timeout=30)
@@ -278,7 +303,13 @@ class Embedder:
 
         else:
             embeddings_dict = {}
-            filename = get_embedding_filename(model_name, self.matrix_embed, self.pooling_types, 'pth')
+            filename = get_embedding_filename(
+                model_name,
+                self.matrix_embed,
+                self.pooling_types,
+                'pth',
+                self.hidden_state_index,
+            )
             save_path = os.path.join(self.embedding_save_dir, filename)
             if os.path.exists(save_path):
                 print_message(f"Loading embeddings from {save_path}")
@@ -367,20 +398,28 @@ class Embedder:
                 attention_mask = (batch['sequence_ids'] != -1).long().to(device)
             else:
                 attention_mask = torch.ones_like(batch['input_ids'], device=device)
+            hidden_kwargs = {}
+            if self.hidden_state_index != -1:
+                hidden_kwargs['output_hidden_states'] = True
+                hidden_kwargs['hidden_state_index'] = self.hidden_state_index
 
             with torch.autocast(device.type, dtype=self.embed_dtype, enabled=self.autocast):
                 if 'parti' in self.pooling_types and not already_pooled:
                     try:
-                        residue_embeddings, attentions = model(**batch, output_attentions=True)
+                        residue_embeddings, attentions = model(
+                            **batch,
+                            output_attentions=True,
+                            **hidden_kwargs,
+                        )
                         embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask, attentions=attentions).cpu()
                     except Exception as e:
                         print_message(f"Error in parti pooling: {e}\nDefaulting to mean pooling")
                         self.pooling_types = ['mean']
                         pooler = Pooler(self.pooling_types)
-                        residue_embeddings = model(**batch)
+                        residue_embeddings = model(**batch, **hidden_kwargs)
                         embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask).cpu()
                 else:
-                    residue_embeddings = model(**batch)
+                    residue_embeddings = model(**batch, **hidden_kwargs)
                     embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask).cpu()
 
             if self.sql:
@@ -496,9 +535,13 @@ class Embedder:
                         attention_mask = (batch_data['sequence_ids'] != -1).long().to(device)
                     else:
                         attention_mask = torch.ones_like(batch_data['input_ids'], device=device)
+                    hidden_kwargs = {}
+                    if self.hidden_state_index != -1:
+                        hidden_kwargs['output_hidden_states'] = True
+                        hidden_kwargs['hidden_state_index'] = self.hidden_state_index
 
                     with torch.autocast(device.type, dtype=self.embed_dtype, enabled=self.autocast):
-                        residue_embeddings = model_obj(**batch_data)
+                        residue_embeddings = model_obj(**batch_data, **hidden_kwargs)
                         embeddings = _get_embeddings(residue_embeddings, attention_mask=attention_mask).cpu()
 
                     if self.sql:
@@ -586,6 +629,7 @@ if __name__ == '__main__':
     parser.add_argument('--embedding_save_dir', type=str, default='embeddings')
     parser.add_argument('--download_dir', type=str, default='Synthyra/vector_embeddings')
     parser.add_argument('--embedding_pooling_types', nargs='+', default=['mean', 'var'], help='Pooling types for embeddings.')
+    parser.add_argument('--embedding_hidden_state_index', type=int, default=-1, help='Hidden-state tuple index for embeddings. -1 uses the final hidden state.')
     args = parser.parse_args()
 
     chosen_seed = set_global_seed()
@@ -623,12 +667,19 @@ if __name__ == '__main__':
             save_embeddings=True,
             embed_dtype=dtype,
             sql=False,
-            embedding_save_dir='embeddings'
+            embedding_save_dir='embeddings',
+            embedding_hidden_state_index=args.embedding_hidden_state_index,
         )
         embedder = Embedder(embedder_args, all_seqs)
 
         _ = embedder(model_name)
-        filename = get_embedding_filename(model_name, False, embedder_args.pooling_types, 'pth')
+        filename = get_embedding_filename(
+            model_name,
+            False,
+            embedder_args.pooling_types,
+            'pth',
+            embedder_args.hidden_state_index,
+        )
         save_path = os.path.join(args.embedding_save_dir, filename)
         
         compressed_path = f"{save_path}.gz"

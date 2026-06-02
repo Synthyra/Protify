@@ -68,7 +68,6 @@ class RotaryEmbedding(nn.Module):
         self.interleaved = interleaved
         self.scaling_factor = scaling_factor
         self.max_seq_len = max_seq_len
-        self._seq_len_cached = max_seq_len
         inv_freq = 1.0 / (
             self.base
             ** (
@@ -81,6 +80,7 @@ class RotaryEmbedding(nn.Module):
         freqs = torch.outer(positions, inv_freq)
         self.register_buffer("_cos_k", torch.cos(freqs), persistent=False)
         self.register_buffer("_sin_k", torch.sin(freqs), persistent=False)
+        self._seq_len_cached = max_seq_len
 
     def forward(self, query_states: torch.Tensor, key_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         seq_len = query_states.shape[1]

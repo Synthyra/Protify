@@ -46,6 +46,7 @@ class VisualizationArguments:
     download_embeddings: bool = False
     download_dir: str = "Synthyra/vector_embeddings"
     embedding_pooling_types: List[str] = field(default_factory=lambda: ["mean"])
+    embedding_hidden_state_index: int = -1
     save_embeddings: bool = False
     embed_dtype: str = "float32"  # Will be converted to torch dtype
     
@@ -82,8 +83,21 @@ class DimensionalityReducer(DataMixin):
         
         # Check if we need to embed (similar to Embedder._read_embeddings_from_disk)
         pooling_types = self.args.embedding_pooling_types
-        filename_pth = get_embedding_filename(self.args.model_name, self.args.matrix_embed, pooling_types, 'pth')
-        filename_db = get_embedding_filename(self.args.model_name, self.args.matrix_embed, pooling_types, 'db')
+        hidden_state_index = self.args.embedding_hidden_state_index
+        filename_pth = get_embedding_filename(
+            self.args.model_name,
+            self.args.matrix_embed,
+            pooling_types,
+            'pth',
+            hidden_state_index,
+        )
+        filename_db = get_embedding_filename(
+            self.args.model_name,
+            self.args.matrix_embed,
+            pooling_types,
+            'db',
+            hidden_state_index,
+        )
         save_path = os.path.join(self.args.embedding_save_dir, filename_pth)
         db_path = os.path.join(self.args.embedding_save_dir, filename_db)
         
@@ -130,7 +144,8 @@ class DimensionalityReducer(DataMixin):
                 save_embeddings=True,  # Always save embeddings when auto-embedding
                 embed_dtype=embed_dtype,
                 sql=self.args.sql,
-                embedding_save_dir=self.args.embedding_save_dir
+                embedding_save_dir=self.args.embedding_save_dir,
+                embedding_hidden_state_index=self.args.embedding_hidden_state_index,
             )
             # Initialize embedder with all sequences (it will only embed missing ones)
             embedder = Embedder(embedding_args, sequences)
@@ -148,9 +163,16 @@ class DimensionalityReducer(DataMixin):
         embeddings = []
         
         pooling_types = self.args.embedding_pooling_types
+        hidden_state_index = self.args.embedding_hidden_state_index
         if self._sql:
             import sqlite3
-            filename = get_embedding_filename(self.args.model_name, self.args.matrix_embed, pooling_types, 'db')
+            filename = get_embedding_filename(
+                self.args.model_name,
+                self.args.matrix_embed,
+                pooling_types,
+                'db',
+                hidden_state_index,
+            )
             save_path = os.path.join(self.args.embedding_save_dir, filename)
             with sqlite3.connect(save_path) as conn:
                 c = conn.cursor()
@@ -167,7 +189,13 @@ class DimensionalityReducer(DataMixin):
                             embedding = embedding.squeeze(0)
                     embeddings.append(embedding)
         else:
-            filename = get_embedding_filename(self.args.model_name, self.args.matrix_embed, pooling_types, 'pth')
+            filename = get_embedding_filename(
+                self.args.model_name,
+                self.args.matrix_embed,
+                pooling_types,
+                'pth',
+                hidden_state_index,
+            )
             save_path = os.path.join(self.args.embedding_save_dir, filename)
             emb_dict = torch_load(save_path)
             for seq in sequences:
@@ -352,6 +380,8 @@ def parse_arguments():
                        help="Directory to download embeddings from.")
     parser.add_argument("--embedding_pooling_types", nargs="+", default=["mean", "var"],
                        help="Pooling types for embeddings.")
+    parser.add_argument("--embedding_hidden_state_index", type=int, default=-1,
+                       help="Hidden-state tuple index to embed from. -1 uses the final hidden state.")
     parser.add_argument("--save_embeddings", action="store_true", default=False,
                        help="Save computed embeddings (auto-enabled when embedding).")
     parser.add_argument("--embed_dtype", type=str, default="float32", 
@@ -451,6 +481,7 @@ if __name__ == "__main__":
         download_embeddings=args.download_embeddings,
         download_dir=args.download_dir,
         embedding_pooling_types=args.embedding_pooling_types,
+        embedding_hidden_state_index=args.embedding_hidden_state_index,
         save_embeddings=args.save_embeddings,
         embed_dtype=args.embed_dtype,
         n_components=args.n_components,

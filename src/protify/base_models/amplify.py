@@ -16,6 +16,7 @@ from transformers import (
 from torch.nn.functional import scaled_dot_product_attention
 from transformers.modeling_outputs import MaskedLMOutput
 from .base_tokenizer import BaseSequenceTokenizer
+from .utils import select_hidden_state
 from .amplify_utils import (
     SwiGLU,
     RMSNorm,
@@ -316,8 +317,10 @@ class AmplifyForEmbedding(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = True,
+        hidden_state_index: int = -1,
         **kwargs,
     ) -> torch.Tensor:
+        output_hidden_states = output_hidden_states or hidden_state_index != -1
         # Convert attention_mask to additive format
         if attention_mask is not None:
             attention_mask = torch.where(attention_mask.bool(), 
@@ -329,10 +332,14 @@ class AmplifyForEmbedding(nn.Module):
             output_attentions=output_attentions if output_attentions is not None else False,
             output_hidden_states=output_hidden_states,
         )
+        hidden_state = select_hidden_state(
+            out.hidden_states[-1],
+            out.hidden_states,
+            hidden_state_index,
+        )
         if output_attentions:
-            return out.hidden_states[-1], out.attentions
-        else:
-            return out.hidden_states[-1]
+            return hidden_state, out.attentions
+        return hidden_state
 
 
 class AmplifyForMaskedLM(nn.Module):

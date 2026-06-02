@@ -1,15 +1,14 @@
 """
 We use the FastPLM implementation of ESMC.
 """
-import sys
-import os
 import torch
 import torch.nn as nn
 from typing import Optional, Union, List, Dict
 
-_FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'fastplms')
-if _FASTPLMS not in sys.path:
-    sys.path.insert(0, _FASTPLMS)
+from .utils import ensure_fastplms_submodule_on_path, select_hidden_state
+
+
+ensure_fastplms_submodule_on_path()
 
 from fastplms.esm_plusplus.modeling_esm_plusplus import (
     ESMplusplusModel,
@@ -24,6 +23,7 @@ from .esmc_utils import EsmSequenceTokenizer
 presets = {
     'ESMC-300': 'Synthyra/ESMplusplus_small',
     'ESMC-600': 'Synthyra/ESMplusplus_large',
+    'ESMC-6B': 'Synthyra/ESMplusplus_6B',
 }
 
 
@@ -54,13 +54,24 @@ class ESMplusplusForEmbedding(nn.Module):
             attention_mask: Optional[torch.Tensor] = None,
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = False,
+            hidden_state_index: int = -1,
             **kwargs,
     ) -> torch.Tensor:
+        output_hidden_states = output_hidden_states or hidden_state_index != -1
+        out = self.esm(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+        )
+        hidden_state = select_hidden_state(
+            out.last_hidden_state,
+            out.hidden_states,
+            hidden_state_index,
+        )
         if output_attentions:
-            out = self.esm(input_ids=input_ids, attention_mask=attention_mask, output_attentions=output_attentions)
-            return out.last_hidden_state, out.attentions
-        else:
-            return self.esm(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+            return hidden_state, out.attentions
+        return hidden_state
 
 
 def get_esmc_tokenizer(preset: str, model_path: str = None):
