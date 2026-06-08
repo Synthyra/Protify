@@ -716,12 +716,6 @@ Distributed under the Protify License. See `LICENSE.md` for more information.
 <!-- CONTACT -->
 ## Contact
 
-### Collaborations
-lhallee@udel.edu
-
-[Gleghorn Lab](https://www.gleghornlab.com/)
-
-### Business / Licensing 
 info@synthyra.com
 
 [Synthyra](https://synthyra.com)
