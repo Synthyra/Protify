@@ -699,47 +699,82 @@ class GUI(MainProcess):
         spin_lr.grid(row=7, column=1, padx=10, pady=5)
         self.add_help_button(self.trainer_tab, 7, 2, "Learning rate for optimizer. Controls step size during training.")
 
+        ttk.Label(self.trainer_tab, text="Probe Learning Rate:").grid(row=8, column=0, padx=10, pady=5, sticky="w")
+        self.settings_vars["probe_lr"] = tk.StringVar(value="")
+        entry_probe_lr = ttk.Entry(self.trainer_tab, textvariable=self.settings_vars["probe_lr"], width=20)
+        entry_probe_lr.grid(row=8, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.trainer_tab, 8, 2, "Optional probe-phase learning rate. Leave blank to use Learning Rate.")
+
+        ttk.Label(self.trainer_tab, text="Base Learning Rate:").grid(row=9, column=0, padx=10, pady=5, sticky="w")
+        self.settings_vars["base_lr"] = tk.StringVar(value="")
+        entry_base_lr = ttk.Entry(self.trainer_tab, textvariable=self.settings_vars["base_lr"], width=20)
+        entry_base_lr.grid(row=9, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.trainer_tab, 9, 2, "Optional base-model phase learning rate. Leave blank to use Learning Rate.")
+
+        ttk.Label(self.trainer_tab, text="LR Scheduler:").grid(row=10, column=0, padx=10, pady=5, sticky="w")
+        self.settings_vars["lr_scheduler"] = tk.StringVar(value="cosine")
+        combo_lr_scheduler = ttk.Combobox(
+            self.trainer_tab,
+            textvariable=self.settings_vars["lr_scheduler"],
+            values=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup", "inverse_sqrt", "reduce_lr_on_plateau"],
+            state="readonly",
+            width=20,
+        )
+        combo_lr_scheduler.grid(row=10, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.trainer_tab, 10, 2, "Learning-rate scheduler passed to Hugging Face TrainingArguments.")
+
+        ttk.Label(self.trainer_tab, text="Optimizer:").grid(row=11, column=0, padx=10, pady=5, sticky="w")
+        self.settings_vars["optimizer"] = tk.StringVar(value="adamw_torch")
+        combo_optimizer = ttk.Combobox(
+            self.trainer_tab,
+            textvariable=self.settings_vars["optimizer"],
+            values=["adamw_torch", "adamw_torch_fused", "adamw_hf", "adafactor", "sgd"],
+            width=20,
+        )
+        combo_optimizer.grid(row=11, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.trainer_tab, 11, 2, "Optimizer name passed to Hugging Face TrainingArguments.")
+
         # weight_decay
-        ttk.Label(self.trainer_tab, text="Weight Decay:").grid(row=8, column=0, padx=10, pady=5, sticky="w")
+        ttk.Label(self.trainer_tab, text="Weight Decay:").grid(row=12, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["weight_decay"] = tk.DoubleVar(value=0.00)
         spin_weight_decay = ttk.Spinbox(self.trainer_tab, from_=0.0, to=1.0, increment=0.01, textvariable=self.settings_vars["weight_decay"])
-        spin_weight_decay.grid(row=8, column=1, padx=10, pady=5)
-        self.add_help_button(self.trainer_tab, 8, 2, "L2 regularization factor to prevent overfitting (0.0-1.0).")
+        spin_weight_decay.grid(row=12, column=1, padx=10, pady=5)
+        self.add_help_button(self.trainer_tab, 12, 2, "L2 regularization factor to prevent overfitting (0.0-1.0).")
 
         # patience
-        ttk.Label(self.trainer_tab, text="Patience:").grid(row=9, column=0, padx=10, pady=5, sticky="w")
+        ttk.Label(self.trainer_tab, text="Patience:").grid(row=13, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["patience"] = tk.IntVar(value=1)
         spin_patience = ttk.Spinbox(self.trainer_tab, from_=1, to=100, textvariable=self.settings_vars["patience"])
-        spin_patience.grid(row=9, column=1, padx=10, pady=5, sticky="w")
-        self.add_help_button(self.trainer_tab, 9, 2, "Number of epochs with no improvement after which training will stop.")
+        spin_patience.grid(row=13, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.trainer_tab, 13, 2, "Number of epochs with no improvement after which training will stop.")
 
         # Random Seed
-        ttk.Label(self.trainer_tab, text="Random Seed:").grid(row=10, column=0, padx=10, pady=5, sticky="w")
+        ttk.Label(self.trainer_tab, text="Random Seed:").grid(row=14, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["seed"] = tk.IntVar(value=42)
         spin_seed = ttk.Spinbox(self.trainer_tab, from_=0, to=10000, textvariable=self.settings_vars["seed"])
-        spin_seed.grid(row=10, column=1, padx=10, pady=5, sticky="w")
-        self.add_help_button(self.trainer_tab, 10, 2, "Random seed for reproducibility of experiments.")
+        spin_seed.grid(row=14, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.trainer_tab, 14, 2, "Random seed for reproducibility of experiments.")
 
         # Read Scaler
-        ttk.Label(self.trainer_tab, text="Read Scaler:").grid(row=11, column=0, padx=10, pady=5, sticky="w")
+        ttk.Label(self.trainer_tab, text="Read Scaler:").grid(row=15, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["read_scaler"] = tk.IntVar(value=100)
         spin_read_scaler = ttk.Spinbox(self.trainer_tab, from_=1, to=1000, textvariable=self.settings_vars["read_scaler"])
-        spin_read_scaler.grid(row=11, column=1, padx=10, pady=5, sticky="w")
-        self.add_help_button(self.trainer_tab, 11, 2, "Read scaler for SQL storage (multiplier for batch size when reading from SQL database).")
+        spin_read_scaler.grid(row=15, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.trainer_tab, 15, 2, "Read scaler for SQL storage (multiplier for batch size when reading from SQL database).")
 
         # Deterministic
-        ttk.Label(self.trainer_tab, text="Deterministic:").grid(row=12, column=0, padx=10, pady=5, sticky="w")
+        ttk.Label(self.trainer_tab, text="Deterministic:").grid(row=16, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["deterministic"] = tk.BooleanVar(value=False)
         check_deterministic = ttk.Checkbutton(self.trainer_tab, variable=self.settings_vars["deterministic"])
-        check_deterministic.grid(row=12, column=1, padx=10, pady=5, sticky="w")
-        self.add_help_button(self.trainer_tab, 12, 2, "Enable deterministic behavior for reproducibility (will slow down training).")
+        check_deterministic.grid(row=16, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.trainer_tab, 16, 2, "Enable deterministic behavior for reproducibility (will slow down training).")
 
         # Number of Runs
-        ttk.Label(self.trainer_tab, text="Number of Runs:").grid(row=13, column=0, padx=10, pady=5, sticky="w")
+        ttk.Label(self.trainer_tab, text="Number of Runs:").grid(row=17, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["num_runs"] = tk.IntVar(value=1)
         spin_num_runs = ttk.Spinbox(self.trainer_tab, from_=1, to=100, textvariable=self.settings_vars["num_runs"])
-        spin_num_runs.grid(row=13, column=1, padx=10, pady=5, sticky="w")
-        self.add_help_button(self.trainer_tab, 13, 2, "Train multiple runs with different seeds and aggregate metrics.")
+        spin_num_runs.grid(row=17, column=1, padx=10, pady=5, sticky="w")
+        self.add_help_button(self.trainer_tab, 17, 2, "Train multiple runs with different seeds and aggregate metrics.")
 
         run_button = ttk.Button(self.trainer_tab, text="Run trainer", command=self._run_trainer)
         run_button.grid(row=99, column=0, columnspan=2, pady=(10, 10))
@@ -1172,7 +1207,6 @@ class GUI(MainProcess):
             "download_dir": self.settings_vars["download_dir"].get().strip() or "Synthyra/vector_embeddings",
             "plots_dir": self.settings_vars["plots_dir"].get().strip() or "plots",
             "replay_path": None,
-            "pretrained_probe_path": None,
             "data_names": selected_datasets,
             "data_dirs": data_dirs,
             "delimiter": self.settings_vars["delimiter"].get(),
@@ -1232,6 +1266,10 @@ class GUI(MainProcess):
             "probe_grad_accum": self.settings_vars["probe_grad_accum"].get(),
             "base_grad_accum": self.settings_vars["base_grad_accum"].get(),
             "lr": self.settings_vars["lr"].get(),
+            "probe_lr": float(self.settings_vars["probe_lr"].get().strip()) if self.settings_vars["probe_lr"].get().strip() else None,
+            "base_lr": float(self.settings_vars["base_lr"].get().strip()) if self.settings_vars["base_lr"].get().strip() else None,
+            "lr_scheduler": self.settings_vars["lr_scheduler"].get(),
+            "optimizer": self.settings_vars["optimizer"].get(),
             "weight_decay": self.settings_vars["weight_decay"].get(),
             "patience": self.settings_vars["patience"].get(),
             "seed": self.settings_vars["seed"].get(),
@@ -1572,6 +1610,12 @@ class GUI(MainProcess):
         self.full_args.probe_grad_accum = self.settings_vars["probe_grad_accum"].get()
         self.full_args.base_grad_accum = self.settings_vars["base_grad_accum"].get()
         self.full_args.lr = self.settings_vars["lr"].get()
+        probe_lr = self.settings_vars["probe_lr"].get().strip()
+        base_lr = self.settings_vars["base_lr"].get().strip()
+        self.full_args.probe_lr = float(probe_lr) if probe_lr else None
+        self.full_args.base_lr = float(base_lr) if base_lr else None
+        self.full_args.lr_scheduler = self.settings_vars["lr_scheduler"].get()
+        self.full_args.optimizer = self.settings_vars["optimizer"].get()
         self.full_args.weight_decay = self.settings_vars["weight_decay"].get()
         self.full_args.patience = self.settings_vars["patience"].get()
         self.full_args.seed = self.settings_vars["seed"].get()

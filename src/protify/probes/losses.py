@@ -119,7 +119,6 @@ class SoftBCEWithLogitsLoss(nn.Module):
 
         return loss
 
-
 class SoftBCELoss(nn.Module):
     __constants__ = [
         "weight",
@@ -208,8 +207,3 @@ class SoftBCELoss(nn.Module):
             loss = loss.sum()
 
         return loss
-
-
-### tests
-if __name__ == '__main__':
-    pass ### TODO

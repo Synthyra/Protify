@@ -52,7 +52,7 @@ def parse_arguments():
     parser.add_argument("--download_dir", default="Synthyra/vector_embeddings", help="Directory to download embeddings to.")
     parser.add_argument("--plots_dir", default="plots", help="Directory to save plots.")
     parser.add_argument("--replay_path", type=str, default=None, help="Path to the replay file.")
-    parser.add_argument("--pretrained_probe_path", type=str, default=None) # TODO not used right now
+    parser.add_argument("--pretrained_probe_path", type=str, default=None, help=argparse.SUPPRESS)
     
     # ----------------- DataArguments ----------------- #
     parser.add_argument("--delimiter", default=",", help="Delimiter for data.")
@@ -66,7 +66,7 @@ def parse_arguments():
     )
     parser.add_argument("--trim", action="store_true",
                         help="Truncate sequences longer than --max_length instead of dropping them from the dataset.")
-    parser.add_argument("--data_names", nargs="+", default=[], help="List of HF dataset names.") # TODO rename to data_names
+    parser.add_argument("--data_names", nargs="+", default=[], help="List of HF dataset names.")
     parser.add_argument("--data_dirs", nargs="+", default=[], help="List of local data directories.")
     parser.add_argument("--aa_to_dna", action="store_true", help="Translate amino-acid sequences to DNA codon sequences using common human synonymous codons.")
     parser.add_argument("--aa_to_rna", action="store_true", help="Translate amino-acid sequences to RNA codon sequences using common human synonymous codons.")
@@ -122,7 +122,7 @@ def parse_arguments():
     parser.add_argument("--scikit_model_name", type=str, default=None, help="Name of the scikit model to use.")
     parser.add_argument("--scikit_model_args", type=str, default=None, help="JSON string of hyperparameters to use (skips tuning). E.g. '{\"n_estimators\": 500, \"max_depth\": 7}'")
     parser.add_argument("--use_scikit", action="store_true", help="Use a scikit-learn model instead of a neural probe.")
-    parser.add_argument("--n_jobs", type=int, default=1, help="Number of processes to use in scikit.") # TODO integrate with GUI and main
+    parser.add_argument("--n_jobs", type=int, default=1, help="Number of processes to use in scikit.")
 
     # ----------------- EmbeddingArguments ----------------- #
     parser.add_argument("--embedding_batch_size", type=int, default=16, help="Batch size for embedding generation.")
@@ -149,13 +149,14 @@ def parse_arguments():
     parser.add_argument("--probe_grad_accum", type=int, default=1, help='Gradient accumulation steps for probe training.')
     parser.add_argument("--base_grad_accum", type=int, default=8, help='Gradient accumulation steps for base model training.')
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate.")
-    ### TODO integrate
-    #parser.add_argument("--probe_lr", type=float, default=1e-4, help="Learning rate for probe training.")
-    #parser.add_argument("--base_lr", type=float, default=1e-5, help="Learning rate for base model training.")
-    #parser.add_argument("--lr_scheduler", type=str, default='cosine', help='Learning rate scheduler.')
-    #parser.add_argument("--optimizer", type=str, default='adamw', help='Optimizer.')
+    parser.add_argument("--probe_lr", type=float, default=None,
+                        help="Learning rate for probe training. If omitted, falls back to --lr.")
+    parser.add_argument("--lr_scheduler", type=str, default='cosine',
+                        help="Learning rate scheduler passed to transformers.TrainingArguments.")
+    parser.add_argument("--optimizer", type=str, default='adamw_torch',
+                        help="Optimizer passed to transformers.TrainingArguments.")
     parser.add_argument("--weight_decay", type=float, default=0.00, help="Weight decay.")
-    parser.add_argument("--patience", type=int, default=1, help="Patience for early stopping (probe phase, and base phase unless --base_patience is set).")
+    parser.add_argument("--patience", type=int, default=3, help="Patience for early stopping (probe phase, and base phase unless --base_patience is set).")
     parser.add_argument("--base_num_epochs", type=int, default=None,
                         help="Epoch count for the base-model phase of hybrid / full-finetuning training. If omitted, falls back to --num_epochs.")
     parser.add_argument("--base_patience", type=int, default=None,
@@ -219,6 +220,9 @@ def parse_arguments():
     parser.add_argument("--sweep_goal", type=str, default='minimize', choices=['maximize', 'minimize'], help="Goal for the sweep metric (maximize/minimize)")
     parser.add_argument("--sweep_name", type=str, default=None, help="Display name for the W&B sweep. Overrides 'name' in the sweep YAML.")
     args = parser.parse_args()
+
+    if args.pretrained_probe_path is not None:
+        raise AssertionError("--pretrained_probe_path is no longer supported. Use --save_model outputs or packaged probe exports instead.")
 
     if args.n_heads is not None:
         import warnings
@@ -286,6 +290,14 @@ def parse_arguments():
             if key in yaml_args.__dict__:
                 return bool(yaml_args.__dict__[key])
             return False
+
+        def _merge_if_cli_explicit(key: str) -> None:
+            explicit = any(token == f"--{key}" or token.startswith(f"--{key}=") for token in raw_argv)
+            if explicit or key not in yaml_args.__dict__:
+                yaml_args.__dict__[key] = args.__dict__[key]
+
+        if "pretrained_probe_path" in yaml_args.__dict__ and yaml_args.pretrained_probe_path is not None:
+            raise AssertionError("pretrained_probe_path is no longer supported. Use save_model outputs or packaged probe exports instead.")
 
         if args.hf_token is not None:
             yaml_args.hf_token = args.hf_token
@@ -391,6 +403,15 @@ def parse_arguments():
             yaml_args.embedding_scaler = False
         elif "embedding_scaler" not in yaml_args.__dict__:
             yaml_args.embedding_scaler = args.embedding_scaler
+        for key in [
+            "probe_lr",
+            "base_lr",
+            "lr_scheduler",
+            "optimizer",
+            "base_num_epochs",
+            "base_patience",
+        ]:
+            _merge_if_cli_explicit(key)
         if "model_paths" not in yaml_args.__dict__:
             yaml_args.model_paths = args.model_paths
         if "model_types" not in yaml_args.__dict__:
@@ -509,12 +530,18 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         else:
             production_model = False
 
+        if "n_jobs" in self.full_args.__dict__:
+            n_jobs = self.full_args.n_jobs
+        else:
+            n_jobs = 1
+
         return ScikitArguments(
             n_iter=n_iter,
             cv=cv,
             random_state=random_state,
             model_name=model_name,
             production_model=production_model,
+            n_jobs=n_jobs,
         )
 
     @log_method_calls
@@ -870,11 +897,8 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
 
                 self.probe_args.num_labels = num_labels
                 self.probe_args.task_type = label_type
-                ### TODO we currently need both, settings should probably be consolidated
                 self.trainer_args.task_type = label_type
                 self.logger.info(f'Training probe for {data_name} with {display_name}')
-                ### TODO eventually add options for optimizers and schedulers
-                ### TODO here is probably where we can differentiate between the different training schemes
                 _ = self._run_hybrid_probe(
                     model_name=dispatch_type,
                     data_name=data_name,
@@ -888,7 +912,6 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
                     model_path=model_path,
                 )
                 torch.cuda.empty_cache()
-                ### TODO may link from probe here to running inference on input csv or HF datasets
 
     @log_method_calls
     def run_nn_probes(self):
@@ -943,11 +966,8 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
 
                 self.probe_args.num_labels = num_labels
                 self.probe_args.task_type = label_type
-                ### TODO we currently need both, settings should probably be consolidated
                 self.trainer_args.task_type = label_type
                 self.logger.info(f'Training probe for {data_name} with {display_name}')
-                ### TODO eventually add options for optimizers and schedulers
-                ### TODO here is probably where we can differentiate between the different training schemes
                 _ = self._run_nn_probe(
                     model_name=display_name,
                     data_name=data_name,
@@ -960,16 +980,11 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
                     source_model_name=display_name,
                 )
                 torch.cuda.empty_cache()
-                ### TODO may link from probe here to running inference on input csv or HF datasets
 
     @log_method_calls
     def run_scikit_scheme(self):    
         self.scikit_args = self._build_scikit_args()
         scikit_probe = ScikitProbe(self.scikit_args)
-        if "n_jobs" in self.full_args.__dict__:
-            scikit_probe.n_jobs = self.full_args.n_jobs
-        else:
-            scikit_probe.n_jobs = 1
         for display_name, dispatch_type, model_path in self.model_args.model_entries():
             for data_name, dataset in self.datasets.items():
                 ### find best scikit model and parameters via cross validation and lazy predict

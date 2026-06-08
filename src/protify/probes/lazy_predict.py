@@ -283,6 +283,7 @@ class LazyClassifier:
         custom_metric=None,
         predictions=False,
         random_state=None,
+        n_jobs=1,
         classifiers="all",
     ):
         self.verbose = verbose
@@ -291,6 +292,7 @@ class LazyClassifier:
         self.predictions = predictions
         self.models = {}
         self.random_state = random_state or get_global_seed()
+        self.n_jobs = n_jobs
         self.classifiers = classifiers
 
     def fit(self, X_train, X_test, y_train, y_test):
@@ -380,7 +382,7 @@ class LazyClassifier:
                     model_kwargs["random_state"] = self.random_state
                 # Enable parallelization for models that support it
                 if "n_jobs" in model().get_params().keys():
-                    model_kwargs["n_jobs"] = -1
+                    model_kwargs["n_jobs"] = self.n_jobs
                 # Enable verbose for boosting models to show iteration progress
                 if name in ("XGBClassifier", "LGBMClassifier"):
                     model_kwargs["verbose"] = 1
@@ -533,6 +535,7 @@ class LazyRegressor:
         custom_metric=None,
         predictions=False,
         random_state=None,
+        n_jobs=1,
         regressors="all",
     ):
         self.verbose = verbose
@@ -541,6 +544,7 @@ class LazyRegressor:
         self.predictions = predictions
         self.models = {}
         self.random_state = random_state or get_global_seed()
+        self.n_jobs = n_jobs
         self.regressors = regressors
 
     def fit(self, X_train, X_test, y_train, y_test):
@@ -630,7 +634,7 @@ class LazyRegressor:
                     model_kwargs["random_state"] = self.random_state
                 # Enable parallelization for models that support it
                 if "n_jobs" in model().get_params().keys():
-                    model_kwargs["n_jobs"] = -1
+                    model_kwargs["n_jobs"] = self.n_jobs
                 # Enable verbose for boosting models to show iteration progress
                 if name in ("XGBRegressor", "LGBMRegressor"):
                     model_kwargs["verbose"] = 1

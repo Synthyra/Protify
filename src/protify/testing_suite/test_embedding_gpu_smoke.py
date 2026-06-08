@@ -8,7 +8,7 @@ import torch
 PROTIFY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_ROOT = os.path.dirname(PROTIFY_ROOT)
 REPO_ROOT = os.path.dirname(SRC_ROOT)
-for path in (REPO_ROOT, SRC_ROOT, PROTIFY_ROOT):
+for path in (PROTIFY_ROOT, SRC_ROOT, REPO_ROOT):
     if path not in sys.path:
         sys.path.insert(0, path)
 

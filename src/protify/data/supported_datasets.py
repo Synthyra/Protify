@@ -103,7 +103,7 @@ def get_dataset_source(dataset_name: str) -> str:
     return supported_datasets[canonical_name]
 
 
-# TODO update
+# Curated datasets with available precomputed vector representations.
 possible_with_vector_reps = [
     ### multi-label
     'EC',
@@ -163,7 +163,7 @@ possible_with_vector_reps = [
     'PPA-ppi',
 ]
 
-# TODO update
+# Curated default benchmark used by data_names=['standard_benchmark'].
 standard_data_benchmark = [
     'ec-active',
     'EC',
@@ -219,6 +219,19 @@ vector_benchmark = [
     # ppi
     'PPA-ppi', # Custom - Logan - Bindwell
 ]
+
+
+for benchmark_name, benchmark_datasets in [
+    ('possible_with_vector_reps', possible_with_vector_reps),
+    ('standard_data_benchmark', standard_data_benchmark),
+    ('vector_benchmark', vector_benchmark),
+]:
+    missing = [
+        dataset_name
+        for dataset_name in benchmark_datasets
+        if resolve_dataset_name(dataset_name) not in supported_datasets
+    ]
+    assert len(missing) == 0, f'{benchmark_name} contains unsupported datasets: {missing}'
 
 
 testing = [

@@ -112,6 +112,9 @@ class TrainerArguments:
             probe_grad_accum: int = 1,
             base_grad_accum: int = 1,
             lr: float = 1e-4,
+            probe_lr: Optional[float] = None,
+            lr_scheduler: str = 'cosine',
+            optimizer: str = 'adamw_torch',
             weight_decay: float = 0.00,
             task_type: str = 'regression',
             patience: int = 3,
@@ -148,6 +151,9 @@ class TrainerArguments:
         self.probe_grad_accum = probe_grad_accum
         self.base_grad_accum = base_grad_accum
         self.lr = lr
+        self.probe_lr = probe_lr
+        self.lr_scheduler = lr_scheduler
+        self.optimizer = optimizer
         self.weight_decay = weight_decay
         self.task_type = task_type
         self.patience = patience
@@ -180,7 +186,10 @@ class TrainerArguments:
         batch_size = self.probe_batch_size if probe else self.base_batch_size
         grad_accum = self.probe_grad_accum if probe else self.base_grad_accum
         num_epochs = self.num_epochs if (probe or self.base_num_epochs is None) else self.base_num_epochs
-        lr = self.lr if (probe or self.base_lr is None) else self.base_lr
+        if probe:
+            lr = self.lr if self.probe_lr is None else self.probe_lr
+        else:
+            lr = self.lr if self.base_lr is None else self.base_lr
 
         if self.train_data_size > 250000:
             eval_steps = max(1, int(100000 / (batch_size * grad_accum)))
@@ -220,7 +229,8 @@ class TrainerArguments:
             per_device_eval_batch_size=batch_size,
             gradient_accumulation_steps=grad_accum,
             learning_rate=float(lr),
-            lr_scheduler_type='cosine',
+            lr_scheduler_type=self.lr_scheduler,
+            optim=self.optimizer,
             weight_decay=float(self.weight_decay),
             warmup_steps=warmup_steps,
             save_total_limit=3,
@@ -348,7 +358,6 @@ Protify is an open source platform designed to simplify and democratize workflow
             early_stopping_patience = self.trainer_args.patience
         else:
             early_stopping_patience = self.trainer_args.base_patience
-        ### TODO add options for optimizers and schedulers
         trainer = Trainer(
             model=model,
             args=hf_trainer_args,

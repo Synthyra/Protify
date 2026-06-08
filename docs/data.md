@@ -6,15 +6,15 @@ This page documents how Protify loads and prepares data: `DataArguments`, suppor
 
 ## Overview
 
-Data is specified either by **dataset names** (HuggingFace IDs or special presets like `standard_benchmark`) or by **local directories** containing `train.*`, `valid.*`, and `test.*` files. After loading, columns are normalized (e.g. to `seqs`/`labels` or `SeqA`/`SeqB`/`labels` for PPI), sequences are trimmed or truncated by `max_length`, and optional sequence translation is applied. The result is a dictionary of datasets keyed by name, each value being `(train_set, valid_set, test_set, num_labels, label_type, ppi)`.
+Data is specified either by **dataset names** (HuggingFace IDs or special presets like `standard_benchmark`) or by **local directories** containing split files. After loading, columns are normalized (e.g. to `seqs`/`labels` or `SeqA`/`SeqB`/`labels` for PPI), sequences are trimmed or truncated by `max_length`, and optional sequence translation is applied. The result is a dictionary of datasets keyed by name, each value being `(train_set, valid_set, test_set, num_labels, label_type, ppi)`.
 
 ---
 
 ## How it works
 
 1. **DataArguments** is built from config (`data_names`, `data_dirs`, `delimiter`, `max_length`, etc.). From `data_names`, the code resolves `data_paths` (HuggingFace dataset IDs) and sets `protein_gym` when the name is `protein_gym`.
-2. **DataMixin.get_data()** loads each path: for HuggingFace it uses `load_dataset(path)`; for `data_dirs` it globs `train.*`/`valid.*`/`test.*` and reads with pandas (CSV/Excel), then wraps in HuggingFace `Dataset`.
-3. **Splits:** Train is required; at least one of valid or test is required. If valid is missing, 10% of train is used; if test is missing, 10% of train is used.
+2. **DataMixin.get_data()** loads each path: for HuggingFace it uses `load_dataset(path)`; for `data_dirs` it globs split files and reads tabular files with pandas or labeled FASTA directly into HuggingFace `Dataset`.
+3. **Splits:** Train is required; at least one of valid or test is required. Valid aliases are `valid`, `validation`, `val`, and `dev`; test aliases are `test` and `testing`. If valid is missing, 10% of train is used; if test is missing, 10% of train is used.
 4. **process_datasets()** normalizes column names, drops missing sequence/label, removes zero-length sequences, applies trim or truncation, optionally runs one of the translation options, and infers `label_type` (e.g. singlelabel, multilabel, regression, tokenwise).
 5. For **embedding-based training**, datasets are later built from precomputed embeddings (SQLite or `.pth`) via `build_vector_numpy_dataset_from_embeddings` or the PPI/multi-column variants.
 
@@ -27,7 +27,7 @@ Defined in [data_mixin.py](../src/protify/data/data_mixin.py). All arguments tha
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `data_names` | List[str] | (required for HF) | Dataset names. Can be keys from `supported_datasets`, `standard_benchmark`, `vector_benchmark`, or literal HuggingFace IDs. |
-| `data_dirs` | Optional[List[str]] | [] | Local directories; each must contain `train.*`, `valid.*`, `test.*` (e.g. CSV, TSV, Excel). |
+| `data_dirs` | Optional[List[str]] | [] | Local directories; each must contain `train.*` and at least one valid/test split (CSV, TSV, Excel, or labeled FASTA). |
 | `delimiter` | str | ',' | Delimiter when loading from `data_dirs`. |
 | `col_names` | List[str] | ['seqs', 'labels'] | Column names (legacy; columns are often inferred from the data). |
 | `max_length` | int | 1024 | Maximum sequence length for trim/truncation. |
@@ -65,13 +65,13 @@ See [Resource listing](resource_listing.md) for programmatic access and combined
 
 ## data_dirs and file layout
 
-For each directory in `data_dirs`, `get_data()` looks for files matching:
+For each directory in `data_dirs`, `get_data()` looks for files whose stem matches:
 
-- `train.*` (e.g. train.csv, train.tsv)
-- `valid.*`
-- `test.*`
+- `train.*`
+- `valid.*`, `validation.*`, `val.*`, or `dev.*`
+- `test.*` or `testing.*`
 
-Files are read with pandas (`read_csv` or `read_excel` by extension) and converted to HuggingFace `Dataset`. Column names are inferred (e.g. sequence column as `seqs` or `Seq`/`sequence`, label as `labels` or `label`). PPI data is normalized to `SeqA`, `SeqB`, `labels`.
+Tabular files are read with pandas (`read_csv` or `read_excel` by extension) and converted to HuggingFace `Dataset`. FASTA files with extensions `.fa`, `.fasta`, `.faa`, `.fna`, `.ffn`, or `.frn` are supported for supervised single-sequence datasets when every header has explicit `label=` metadata, for example `>seq_001 label=1`. Column names are inferred (e.g. sequence column as `seqs` or `Seq`/`sequence`, label as `labels` or `label`). PPI data is normalized to `SeqA`, `SeqB`, `labels`.
 
 ---
 
@@ -130,7 +130,22 @@ data_names: [standard_benchmark]
 py -m src.protify.main --data_dirs path/to/my_data --delimiter "," --model_names ESM2-8 --data_names []
 ```
 
-Ensure `path/to/my_data` contains `train.csv`, `valid.csv`, `test.csv` (or .tsv/.xlsx).
+Ensure `path/to/my_data` contains `train.csv` and at least one valid/test split such as `validation.csv` or `testing.tsv`.
+
+### Local FASTA directory
+
+```text
+train.fasta
+validation.fasta
+test.fasta
+```
+
+Each record must include `label=` in the header:
+
+```text
+>seq_001 label=1
+MKTAYIAKQRQISFVKSHFSRQ
+```
 
 ### Translation (DNA to amino acid)
 

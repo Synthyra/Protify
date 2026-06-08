@@ -49,6 +49,7 @@ class ScikitArguments:
         scikit_model_args: Optional[str] = None,  # CLI arg - JSON string
         model_args: Optional[Dict[str, Any]] = None,
         production_model: bool = False,
+        n_jobs: int = 1,
         **kwargs,
     ):
         import json
@@ -69,8 +70,9 @@ class ScikitArguments:
                 raise ValueError(f"Failed to parse --scikit_model_args JSON: {e}")
         else:
             self.model_args = model_args if model_args is not None else {}
-        
+
         self.production_model = production_model
+        self.n_jobs = n_jobs
 
 
 class ModelResults:
@@ -102,7 +104,7 @@ class ScikitProbe:
     """
     def __init__(self, args: ScikitArguments):
         self.args = args
-        self.n_jobs = 1
+        self.n_jobs = args.n_jobs
     
     def _tune_hyperparameters(
         self,
@@ -162,7 +164,8 @@ class ScikitProbe:
         regressor = LazyRegressor(
             verbose=0,
             ignore_warnings=False,
-            custom_metric=regression_scorer()
+            custom_metric=regression_scorer(),
+            n_jobs=self.n_jobs,
         )
         initial_scores = regressor.fit(X_train, X_test, y_train, y_test)
         if isinstance(initial_scores, Tuple):
@@ -225,7 +228,8 @@ class ScikitProbe:
         classifier = LazyClassifier(
             verbose=0,
             ignore_warnings=False,
-            custom_metric=classification_scorer()
+            custom_metric=classification_scorer(),
+            n_jobs=self.n_jobs,
         )
         initial_scores = classifier.fit(X_train, X_test, y_train, y_test)
         if isinstance(initial_scores, Tuple):
