@@ -709,7 +709,7 @@ For bugs and general suggestions please use [GitHub issues](https://github.com/G
 <!-- LICENSE -->
 ## License
 
-Distributed under the Protify License. See `LICENSE.md` for more information.
+Distributed under the Apache 2.0 license. See `LICENSE.md` for more information.
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 

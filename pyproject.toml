@@ -5,7 +5,7 @@ description = "Low code molecular property prediction"
 authors = ["Synthyra <info@synthyra.com>"]
 keywords = ["plm, protein, transformer"]
 repository = "https://github.com/Synthyra/Protify"
-license = "Protify License"
+license = "Apache-2.0"
 readme = "README.md"
 include = [
     "LICENSE.md",
