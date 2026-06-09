@@ -90,6 +90,8 @@ Models in Protify are generally grouped into the following categories:
 1. **Protein Language Models**: Pre-trained models that have learned protein properties from large-scale sequence data (e.g., ESM2, ProtBert)
 2. **Baseline Controls**: Models with random weights for comparison (e.g., Random, Random-Transformer)
 
+`ESMC-6B` is available as a supported preset but is intentionally excluded from the standard model list to avoid accidental 6B benchmark runs.
+
 ## Dataset Group Types
 
 Datasets are categorized by their task types:

@@ -1,25 +1,36 @@
-import torch
-import numpy as np
-import random
+import ast
 import os
+import random
+import re
 import sqlite3
-from typing import List, Tuple, Dict, Optional
-from glob import glob
-from pandas import read_csv, read_excel
-from datasets import load_dataset, Dataset
 from dataclasses import dataclass
+from glob import glob
+from typing import List, Tuple, Dict, Optional
+
+import numpy as np
+import torch
+from datasets import load_dataset, Dataset
+from pandas import read_csv, read_excel
 
 try:
     from utils import print_message, embedding_blob_to_tensor
     from seed_utils import get_global_seed
     from embedder import get_embedding_filename
+    from data.dataset_classes import EmbeddingStandardizer
     from metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
 except ImportError:
     from ..utils import print_message, embedding_blob_to_tensor
     from ..seed_utils import get_global_seed
     from ..embedder import get_embedding_filename
+    from .dataset_classes import EmbeddingStandardizer
     from ..metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
-from .supported_datasets import supported_datasets, standard_data_benchmark, vector_benchmark
+from .supported_datasets import (
+    get_dataset_source,
+    resolve_dataset_name,
+    standard_data_benchmark,
+    supported_datasets,
+    vector_benchmark,
+)
 from .utils import (
     AA_SET,
     CODON_SET,
@@ -34,6 +45,13 @@ from .utils import (
     RNA_CODON_TO_AA,
 )
 
+
+FASTA_EXTENSIONS = {'.fa', '.fasta', '.faa', '.fna', '.ffn', '.frn'}
+SPLIT_ALIASES = {
+    'train': ('train',),
+    'valid': ('valid', 'validation', 'val', 'dev'),
+    'test': ('test', 'testing'),
+}
 
 
 
@@ -82,9 +100,9 @@ class DataArguments:
 
         if len(data_names) > 0:
             if data_names[0] == 'standard_benchmark':
-                self.data_paths = [supported_datasets[data_name] for data_name in standard_data_benchmark]
+                self.data_paths = [get_dataset_source(data_name) for data_name in standard_data_benchmark]
             elif data_names[0] == 'vector_benchmark':
-                self.data_paths = [supported_datasets[data_name] for data_name in vector_benchmark]
+                self.data_paths = [get_dataset_source(data_name) for data_name in vector_benchmark]
             else:
                 self.data_paths = []
                 for data_name in data_names:
@@ -92,8 +110,9 @@ class DataArguments:
                         # For special handling in the main workflow
                         self.protein_gym = True
                         continue
-                    if data_name in supported_datasets:
-                        self.data_paths.append(supported_datasets[data_name])
+                    resolved_name = resolve_dataset_name(data_name)
+                    if resolved_name in supported_datasets:
+                        self.data_paths.append(get_dataset_source(resolved_name))
                     else:
                         print(f'{data_name} not found in supported datasets')
                         print('We will attempt to load it from huggingface anyways, but this may not work')
@@ -231,6 +250,131 @@ class DataMixin:
         ex['SeqA'] = trunc_a
         ex['SeqB'] = trunc_b
         return ex
+
+    def _canonical_split_for_name(self, split_name: str) -> Optional[str]:
+        lowered = split_name.lower()
+        for canonical_split, aliases in SPLIT_ALIASES.items():
+            if lowered in aliases:
+                return canonical_split
+        return None
+
+    def _resolve_split_name(self, available_splits: List[str], canonical_split: str) -> Optional[str]:
+        lowercase_to_actual = {split.lower(): split for split in available_splits}
+        for alias in SPLIT_ALIASES[canonical_split]:
+            if alias in lowercase_to_actual:
+                return lowercase_to_actual[alias]
+        return None
+
+    def _select_train_valid_test_splits(self, dataset, data_name: str) -> Tuple[Dataset, Dataset, Dataset]:
+        available_splits = list(dataset.keys())
+        train_name = self._resolve_split_name(available_splits, 'train')
+        valid_name = self._resolve_split_name(available_splits, 'valid')
+        test_name = self._resolve_split_name(available_splits, 'test')
+
+        assert train_name is not None, f'{data_name} does not have a train set'
+        assert valid_name is not None or test_name is not None, (
+            f'{data_name} does not have a valid or test set, needs at least one'
+        )
+
+        seed = get_global_seed() if get_global_seed() is not None else 42
+        if valid_name is None:
+            train_set = dataset[train_name]
+            train_valid_set = train_set.train_test_split(test_size=0.1, seed=seed + 1)
+            print_message(f'{data_name} does not have a valid set, created a 10% validation set')
+            return train_valid_set['train'], train_valid_set['test'], dataset[test_name]
+        if test_name is None:
+            train_set = dataset[train_name]
+            train_test_set = train_set.train_test_split(test_size=0.1, seed=seed + 2)
+            print_message(f'{data_name} does not have a test set, created a 10% test set')
+            return train_test_set['train'], dataset[valid_name], train_test_set['test']
+
+        print_message(f'{data_name} has a valid and test set')
+        return dataset[train_name], dataset[valid_name], dataset[test_name]
+
+    def _is_fasta_path(self, file_path: str) -> bool:
+        suffix = os.path.splitext(file_path)[1].lower()
+        return suffix in FASTA_EXTENSIONS
+
+    def _coerce_fasta_label(self, label: str):
+        if re.fullmatch(r'-?\d+', label) is not None:
+            return int(label)
+        if re.fullmatch(r'-?((\d+\.\d*)|(\.\d+)|(\d+))([eE][+-]?\d+)?', label) is not None:
+            return float(label)
+        if label.startswith('[') and label.endswith(']'):
+            return ast.literal_eval(label)
+        return label
+
+    def _label_from_fasta_header(self, header: str):
+        match = re.search(r'(?:^|[\s|;,])label=([^\s|;,]+)', header)
+        assert match is not None, f'FASTA header is missing explicit label= metadata: {header}'
+        return self._coerce_fasta_label(match.group(1))
+
+    def _read_fasta_file(self, file_path: str) -> Dataset:
+        sequences, labels = [], []
+        header = None
+        seq_chunks = []
+
+        def _flush_record() -> None:
+            if header is None:
+                return
+            sequence = ''.join(seq_chunks)
+            assert len(sequence) > 0, f'FASTA record has no sequence: {header}'
+            sequences.append(sequence)
+            labels.append(self._label_from_fasta_header(header))
+
+        with open(file_path, 'r', encoding='utf-8') as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if len(line) == 0:
+                    continue
+                if line.startswith('>'):
+                    _flush_record()
+                    header = line[1:].strip()
+                    seq_chunks = []
+                else:
+                    assert header is not None, f'FASTA sequence line found before header in {file_path}'
+                    seq_chunks.append(line)
+            _flush_record()
+
+        assert len(sequences) > 0, f'No FASTA records found in {file_path}'
+        return Dataset.from_dict({'seqs': sequences, 'labels': labels})
+
+    def _read_local_split_file(self, file_path: str) -> Dataset:
+        suffix = os.path.splitext(file_path)[1].lower()
+        if self._is_fasta_path(file_path):
+            return self._read_fasta_file(file_path)
+        if suffix in {'.xlsx', '.xls'}:
+            frame = read_excel(file_path)
+        elif suffix == '.tsv':
+            frame = read_csv(file_path, delimiter='\t')
+        else:
+            frame = read_csv(file_path, delimiter=self._delimiter)
+        return Dataset.from_pandas(frame)
+
+    def _load_local_dataset_dir(self, data_dir: str):
+        split_files = {}
+        for file_path in glob(os.path.join(data_dir, '*')):
+            if not os.path.isfile(file_path):
+                continue
+            stem = os.path.splitext(os.path.basename(file_path))[0]
+            canonical_split = self._canonical_split_for_name(stem)
+            if canonical_split is None:
+                continue
+            assert canonical_split not in split_files, (
+                f'Multiple files matched {canonical_split} split in {data_dir}: '
+                f'{split_files[canonical_split]} and {file_path}'
+            )
+            split_files[canonical_split] = file_path
+
+        assert 'train' in split_files, f'{data_dir} does not contain a train split file'
+        assert 'valid' in split_files or 'test' in split_files, (
+            f'{data_dir} does not contain a valid/validation/val/dev or test/testing split file'
+        )
+        dataset = {
+            split_name: self._read_local_split_file(file_path)
+            for split_name, file_path in split_files.items()
+        }
+        return self._select_train_valid_test_splits(dataset, os.path.basename(os.path.normpath(data_dir)))
 
     def _active_translation_mode(self) -> Optional[str]:
         mode_to_flag = {
@@ -730,8 +874,7 @@ class DataMixin:
 
     def get_data(self):
         """
-        Supports .csv, .tsv, .txt
-        TODO fasta, fa, fna, etc.
+        Supports tabular local splits and labeled FASTA files.
         """
         datasets, data_names = [], []
         label_candidates = ['labels', 'label', 'Labels', 'Label']
@@ -743,35 +886,15 @@ class DataMixin:
             dataset = load_dataset(data_path)
             if 'inverse' in data_name.lower():
                 dataset = dataset.rename_columns({'seqs': 'labels', 'labels': 'seqs'})
-            ppi = 'SeqA' in dataset['train'].column_names
+            train_name = self._resolve_split_name(list(dataset.keys()), 'train')
+            assert train_name is not None, f'{data_name} does not have a train set'
+            ppi = 'SeqA' in dataset[train_name].column_names
             # Fallback PPI detection based on available columns
             if not ppi:
-                ppi = self._is_ppi_from_columns(dataset['train'].column_names)
+                ppi = self._is_ppi_from_columns(dataset[train_name].column_names)
             print_message(f'PPI (or dual sequence input dataset): {ppi}')
 
-            ### TODO, add better handling for valid, validation, test, testing, etc.
-            assert 'train' in dataset, f'{data_name} does not have a train set'
-            assert 'valid' in dataset or 'test' in dataset, f'{data_name} does not have a valid or test set, needs at least one'
-            
-            if 'valid' not in dataset:
-                seed = get_global_seed() if get_global_seed() is not None else 42
-                train_set = dataset['train']
-                train_valid_set = train_set.train_test_split(test_size=0.1, seed=seed + 1)
-                train_set = train_valid_set['train']
-                valid_set = train_valid_set['test']
-                test_set = dataset['test']
-                print_message(f'{data_name} does not have a valid set, created a 10% validation set')
-            elif 'test' not in dataset:
-                seed = get_global_seed() if get_global_seed() is not None else 42
-                train_set = dataset['train']
-                train_test_set = train_set.train_test_split(test_size=0.1, seed=seed + 2)
-                test_set = train_test_set['test']
-                train_set = train_test_set['train']
-                valid_set = dataset['valid']
-                print_message(f'{data_name} does not have a test set, created a 10% test set')
-            else:
-                train_set, valid_set, test_set = dataset['train'], dataset['valid'], dataset['test']
-                print_message(f'{data_name} has a valid and test set')
+            train_set, valid_set, test_set = self._select_train_valid_test_splits(dataset, data_name)
 
             print_message(f'Train set: {len(train_set)}, Valid set: {len(valid_set)}, Test set: {len(test_set)}')
             if ppi:
@@ -851,24 +974,10 @@ class DataMixin:
 
         for data_dir in self.data_args.data_dirs:
             # local_data/taxon
-            data_name = data_dir.split ('/')[-1]
+            data_name = os.path.basename(os.path.normpath(data_dir))
             # Determine PPI by directory hint or columns
             ppi = 'ppi' in data_dir.lower()
-            train_path = glob(os.path.join(data_dir, 'train.*'))[0]
-            valid_path = glob(os.path.join(data_dir, 'valid.*'))[0]
-            test_path = glob(os.path.join(data_dir, 'test.*'))[0]
-            if '.xlsx' in train_path:
-                train_set = read_excel(train_path)
-                valid_set = read_excel(valid_path)
-                test_set = read_excel(test_path)
-            else:
-                train_set = read_csv(train_path, delimiter=self._delimiter)
-                valid_set = read_csv(valid_path, delimiter=self._delimiter)
-                test_set = read_csv(test_path, delimiter=self._delimiter)
-
-            train_set = Dataset.from_pandas(train_set)
-            valid_set = Dataset.from_pandas(valid_set)
-            test_set = Dataset.from_pandas(test_set)
+            train_set, valid_set, test_set = self._load_local_dataset_dir(data_dir)
 
             # If not indicated by directory, infer from columns
             if not ppi:
@@ -982,9 +1091,10 @@ class DataMixin:
         train_array, valid_array, test_array = [], [], []
         # Get pooling types from embedding_args, default to ['mean'] if not available
         pooling_types = self.embedding_args.pooling_types
+        hidden_state_index = self.embedding_args.hidden_state_index
         if self._sql:
             import sqlite3
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             with sqlite3.connect(save_path) as conn:
                 c = conn.cursor()
@@ -1000,7 +1110,7 @@ class DataMixin:
                     embedding = self._select_from_sql(c, seq, cast_to_torch=False)
                     test_array.append(embedding)
         else:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             emb_dict = torch.load(save_path)
             for seq in train_seqs:
@@ -1044,8 +1154,9 @@ class DataMixin:
         save_dir = self.embedding_args.embedding_save_dir
         train_array, valid_array, test_array = [], [], []
         pooling_types = self.embedding_args.pooling_types
+        hidden_state_index = self.embedding_args.hidden_state_index
         if self._sql:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             with sqlite3.connect(save_path) as conn:
                 c = conn.cursor()
@@ -1067,7 +1178,7 @@ class DataMixin:
                     embedding_b = self._select_from_sql(c, seq_b, cast_to_torch=False)
                     test_array.append(np.concatenate([embedding_a, embedding_b], axis=-1))
         else:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth')
+            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth', hidden_state_index)
             save_path = os.path.join(save_dir, filename)
             emb_dict = torch.load(save_path)
             for seq_a, seq_b in zip(train_seqs_a, train_seqs_b):
@@ -1124,6 +1235,15 @@ class DataMixin:
                 list(valid_set['seqs']),
                 list(test_set['seqs']),
             )
+
+        embedding_scaler = self.embedding_args.embedding_scaler
+        assert isinstance(embedding_scaler, bool), f"Invalid embedding_scaler: {embedding_scaler}"
+        if not self._full and embedding_scaler:
+            print_message('Fitting StandardScaler on scikit training embeddings')
+            embedding_standardizer = EmbeddingStandardizer.fit_numpy(X_train)
+            X_train = embedding_standardizer.transform_numpy(X_train)
+            X_valid = embedding_standardizer.transform_numpy(X_valid)
+            X_test = embedding_standardizer.transform_numpy(X_test)
 
         y_train = self._labels_to_numpy(list(train_set['labels']))
         y_valid = self._labels_to_numpy(list(valid_set['labels']))

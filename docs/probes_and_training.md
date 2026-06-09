@@ -98,12 +98,15 @@ Defined in [trainers.py](../src/protify/probes/trainers.py).
 | `probe_grad_accum` | int | 1 | Gradient accumulation (probe). |
 | `base_grad_accum` | int | 1 | Gradient accumulation (base). |
 | `lr` | float | 1e-4 | Learning rate (shared by probe and base phases unless `base_lr` is set). |
+| `probe_lr` | Optional[float] | None | Probe-phase learning rate. `None` falls back to `lr`. |
+| `base_lr` | Optional[float] | None | Base-model phase learning rate. `None` falls back to `lr`. |
+| `lr_scheduler` | str | cosine | Hugging Face `TrainingArguments.lr_scheduler_type`. |
+| `optimizer` | str | adamw_torch | Hugging Face `TrainingArguments.optim`. |
 | `weight_decay` | float | 0.00 | Weight decay. |
 | `task_type` | str | regression | regression or classification. |
 | `patience` | int | 3 | Early-stopping patience (probe phase, and base phase unless `base_patience` is set). |
 | `base_num_epochs` | Optional[int] | None | Epoch count for the base-model phase of hybrid / full-finetuning training. `None` falls back to `num_epochs`. |
 | `base_patience` | Optional[int] | None | Early-stopping patience for the base-model phase. `None` falls back to `patience`. |
-| `base_lr` | Optional[float] | None | Learning rate for the base-model phase. `None` falls back to `lr`. |
 | `read_scaler` | int | 100 | For dataset read scaling (e.g. SQL). |
 | `save_model` | bool | False | Save/push model (e.g. to Hub). |
 | `push_raw_probe` | bool | False | With save_model, push raw probe class to Hub (load with Class.from_pretrained(repo_id)) instead of packaged AutoModel. |
@@ -237,18 +240,18 @@ py -m src.protify.main --model_names ESM2-8 --data_names DeepLoc-2 --full_finetu
 py -m src.protify.main --model_names ESM2-8 --data_names DeepLoc-2 --hybrid_probe
 ```
 
-The hybrid flow runs in two phases with the same `--num_epochs`, `--patience`, and `--lr` by default: first a probe-only phase on frozen PLM embeddings, then a joint phase that unfreezes the base model (optionally LoRA-wrapped via `--lora`). Use `--base_num_epochs`, `--base_patience`, and `--base_lr` to decouple the phases - for example, training the probe for many epochs and then doing a short LoRA pass at a higher LR:
+The hybrid flow runs in two phases with the same `--num_epochs`, `--patience`, and `--lr` by default: first a probe-only phase on frozen PLM embeddings, then a joint phase that unfreezes the base model (optionally LoRA-wrapped via `--lora`). Use `--probe_lr`, `--base_num_epochs`, `--base_patience`, and `--base_lr` to decouple the phases - for example, training the probe for many epochs and then doing a short LoRA pass at a higher LR:
 
 ```bash
 py -m src.protify.main \
     --model_names DPLM2-3B --data_names optimal-ph \
     --matrix_embed --sql --probe_type transformer \
     --hybrid_probe --lora \
-    --num_epochs 15 --patience 3 --lr 2e-5 \
+    --num_epochs 15 --patience 3 --probe_lr 2e-5 \
     --base_num_epochs 1 --base_patience 1 --base_lr 2e-4
 ```
 
-When any `--base_*` flag is omitted, that phase falls back to the probe-phase value, preserving the original single-setting behavior.
+When phase-specific flags are omitted, both phases fall back to `--lr`, `--num_epochs`, and `--patience`, preserving the original single-setting behavior.
 
 ### Scikit path
 

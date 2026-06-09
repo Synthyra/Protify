@@ -5,7 +5,7 @@ import json
 import csv
 from typing import Dict, Any, List, Tuple
 from utils import torch_load, print_message
-from embedder import get_embedding_filename
+from embedder import Embedder, get_embedding_filename
 from base_models.get_base_models import get_tokenizer
 
 
@@ -49,6 +49,7 @@ class HyperoptModule:
         
         self.base_probe_args = copy.deepcopy(self.mp.probe_args.__dict__)
         self.base_trainer_args = copy.deepcopy(self.mp.trainer_args.__dict__)
+        self.base_embedding_args = copy.deepcopy(self.mp.embedding_args.__dict__)
         
         self.probe_keys = {
             'hidden_size','dropout','n_layers','pre_ln','classifier_size',
@@ -65,18 +66,19 @@ class HyperoptModule:
             'random_pair_flipping',
         }
         self.embedding_keys = {
-            'embedding_pooling_types'
+            'embedding_pooling_types', 'embedding_hidden_state_index'
         }
         self.int_keys = {
             'hidden_size', 'n_layers', 'classifier_size', 'head_size',
             'lora_r', 'lora_alpha', 'num_epochs', 'probe_batch_size',
             'base_batch_size', 'probe_grad_accum', 'base_grad_accum',
-            'patience', 'seed'
+            'patience', 'seed', 'embedding_hidden_state_index'
         }
 
     def apply_config(self, cfg: Dict[str, Any]):
         self.mp.probe_args.__dict__.update(copy.deepcopy(self.base_probe_args))
         self.mp.trainer_args.__dict__.update(copy.deepcopy(self.base_trainer_args))
+        self.mp.embedding_args.__dict__.update(copy.deepcopy(self.base_embedding_args))
 
         if 'n_heads' in cfg and 'head_size' not in cfg:
             import warnings
@@ -121,6 +123,49 @@ class HyperoptModule:
             if k in self.embedding_keys:
                 if k == 'embedding_pooling_types':
                     self.mp.embedding_args.pooling_types = v
+                if k == 'embedding_hidden_state_index':
+                    self.mp.embedding_args.hidden_state_index = v
+
+    def reload_embeddings(self, ppi: bool) -> None:
+        tokenizer = get_tokenizer(self.model_name)
+        test_seq = self.mp.all_seqs[0]
+        hidden_state_index = self.mp.embedding_args.hidden_state_index
+        if self.mp._sql:
+            filename = get_embedding_filename(
+                self.model_name,
+                self.mp._full,
+                self.mp.embedding_args.pooling_types,
+                'db',
+                hidden_state_index,
+            )
+            save_path = os.path.join(self.mp.embedding_args.embedding_save_dir, filename)
+            if not os.path.exists(save_path):
+                embedder = Embedder(self.mp.embedding_args, self.mp.all_seqs)
+                embedder(self.model_name)
+            input_dim = self.mp.get_embedding_dim_sql(save_path, test_seq, tokenizer)
+            self.emb_dict = None
+        else:
+            filename = get_embedding_filename(
+                self.model_name,
+                self.mp._full,
+                self.mp.embedding_args.pooling_types,
+                'pth',
+                hidden_state_index,
+            )
+            save_path = os.path.join(self.mp.embedding_args.embedding_save_dir, filename)
+            if not os.path.exists(save_path):
+                previous_save_embeddings = self.mp.embedding_args.save_embeddings
+                self.mp.embedding_args.save_embeddings = True
+                embedder = Embedder(self.mp.embedding_args, self.mp.all_seqs)
+                try:
+                    embedder(self.model_name)
+                finally:
+                    self.mp.embedding_args.save_embeddings = previous_save_embeddings
+            self.emb_dict = torch_load(save_path)
+            input_dim = self.mp.get_embedding_dim_pth(self.emb_dict, test_seq, tokenizer)
+
+        self.mp.probe_args.input_size = input_dim * 2 if (ppi and not self.mp._full) else input_dim
+        self.mp.probe_args.max_seq_len = self.mp._max_length * 2 if (ppi and self.mp._full) else self.mp._max_length
 
     def train_model(self, sweep_mode=True):
         train_set, valid_set, test_set, _, _, ppi = self.dataset
@@ -186,27 +231,13 @@ class HyperoptModule:
         applied_config = {k: v for k, v in full_config.items() if k in self.swept_param_keys}
         self.mp.trainer_args.make_plots = False
         
-        # Reload embeddings if pooling type changed
-        if 'embedding_pooling_types' in full_config and not self.mp.full_args.full_finetuning:
+        embedding_config_changed = (
+            'embedding_pooling_types' in full_config
+            or 'embedding_hidden_state_index' in full_config
+        )
+        if embedding_config_changed and not self.mp.full_args.full_finetuning:
             _, _, _, _, _, ppi = self.dataset
-            tokenizer = get_tokenizer(self.model_name)
-            test_seq = self.mp.all_seqs[0]
-            
-            if self.mp._sql:
-                filename = get_embedding_filename(self.model_name, self.mp._full, 
-                                                 self.mp.embedding_args.pooling_types, 'db')
-                save_path = os.path.join(self.mp.embedding_args.embedding_save_dir, filename)
-                input_dim = self.mp.get_embedding_dim_sql(save_path, test_seq, tokenizer)
-                self.emb_dict = None
-            else:
-                filename = get_embedding_filename(self.model_name, self.mp._full, 
-                                                 self.mp.embedding_args.pooling_types, 'pth')
-                save_path = os.path.join(self.mp.embedding_args.embedding_save_dir, filename)
-                self.emb_dict = torch_load(save_path)
-                input_dim = self.mp.get_embedding_dim_pth(self.emb_dict, test_seq, tokenizer)
-            
-            self.mp.probe_args.input_size = input_dim * 2 if (ppi and not self.mp._full) else input_dim
-            self.mp.probe_args.max_seq_len = self.mp._max_length * 2 if (ppi and self.mp._full) else self.mp._max_length
+            self.reload_embeddings(ppi)
 
         _, valid_metrics, test_metrics = self.train_model(sweep_mode=True)
         
@@ -258,10 +289,10 @@ class HyperoptModule:
         use_lora = getattr(mp.probe_args, 'lora', False)
         
         # Define which parameters are relevant for each probe type
-        linear_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'dropout', 'pre_ln', 'use_bias', 'probe_batch_size'}
+        linear_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'dropout', 'pre_ln', 'use_bias', 'probe_batch_size', 'embedding_hidden_state_index'}
         transformer_probe_params = {'lr', 'weight_decay', 'hidden_size', 'n_layers', 'transformer_dropout', 'pre_ln',
                                      'classifier_dropout', 'classifier_size', 'use_bias', 'probe_pooling_types', 'embedding_pooling_types', 'probe_batch_size',
-                                     'bom_k', 'head_size', 'probe_grad_accum', 'add_token_ids', 'random_pair_flipping'}
+                                     'embedding_hidden_state_index', 'bom_k', 'head_size', 'probe_grad_accum', 'add_token_ids', 'random_pair_flipping'}
         lora_params = {'lora_r', 'lora_alpha', 'lora_dropout'}
         
         # Determine which parameters to include
@@ -307,11 +338,23 @@ class HyperoptModule:
                     emb_dict = None
                     if not mp.full_args.full_finetuning:
                         if mp._sql:
-                            filename = get_embedding_filename(model_name, mp._full, mp.embedding_args.pooling_types, 'db')
+                            filename = get_embedding_filename(
+                                model_name,
+                                mp._full,
+                                mp.embedding_args.pooling_types,
+                                'db',
+                                mp.embedding_args.hidden_state_index,
+                            )
                             save_path = os.path.join(mp.embedding_args.embedding_save_dir, filename)
                             input_dim = mp.get_embedding_dim_sql(save_path, test_seq, tokenizer)
                         else:
-                            filename = get_embedding_filename(model_name, mp._full, mp.embedding_args.pooling_types, 'pth')
+                            filename = get_embedding_filename(
+                                model_name,
+                                mp._full,
+                                mp.embedding_args.pooling_types,
+                                'pth',
+                                mp.embedding_args.hidden_state_index,
+                            )
                             save_path = os.path.join(mp.embedding_args.embedding_save_dir, filename)
                             emb_dict = torch_load(save_path)
                             input_dim = mp.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)
@@ -335,11 +378,23 @@ class HyperoptModule:
                 emb_dict = None
                 if not mp.full_args.full_finetuning:
                     if mp._sql:
-                        filename = get_embedding_filename(model_name, mp._full, mp.embedding_args.pooling_types, 'db')
+                        filename = get_embedding_filename(
+                            model_name,
+                            mp._full,
+                            mp.embedding_args.pooling_types,
+                            'db',
+                            mp.embedding_args.hidden_state_index,
+                        )
                         save_path = os.path.join(mp.embedding_args.embedding_save_dir, filename)
                         input_dim = mp.get_embedding_dim_sql(save_path, test_seq, tokenizer)
                     else:
-                        filename = get_embedding_filename(model_name, mp._full, mp.embedding_args.pooling_types, 'pth')
+                        filename = get_embedding_filename(
+                            model_name,
+                            mp._full,
+                            mp.embedding_args.pooling_types,
+                            'pth',
+                            mp.embedding_args.hidden_state_index,
+                        )
                         save_path = os.path.join(mp.embedding_args.embedding_save_dir, filename)
                         emb_dict = torch_load(save_path)
                         input_dim = mp.get_embedding_dim_pth(emb_dict, test_seq, tokenizer)
@@ -412,6 +467,12 @@ class HyperoptModule:
                 mp.trainer_args.__dict__.update(copy.deepcopy(base_trainer))
                 hyperopt_module.apply_config(best_config)
                 mp.trainer_args.make_plots = True
+                best_embedding_config_changed = (
+                    'embedding_pooling_types' in best_config
+                    or 'embedding_hidden_state_index' in best_config
+                )
+                if best_embedding_config_changed and not mp.full_args.full_finetuning:
+                    hyperopt_module.reload_embeddings(ppi)
                 
                 final_config = {
                     **best_config,

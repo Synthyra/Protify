@@ -1,3 +1,4 @@
+from typing import Dict
 
 supported_datasets = {
     'EC': 'GleghornLab/EC_reg',
@@ -75,7 +76,34 @@ internal_datasets = {
     'plastic': 'GleghornLab/plastic_degradation_benchmark',
 }
 
-# TODO update
+dataset_aliases: Dict[str, str] = {
+    'SL13': 'Subcellular',
+    'SS3': 'SecondaryStructure-3',
+    'SS8': 'SecondaryStructure-8',
+    'optimal-temp': 'optimal-temperature',
+    'opt-temp': 'optimal-temperature',
+    'temp-stability': 'temperature-stability',
+    'mat-production': 'material-production',
+    'fitness-pred': 'fitness-prediction',
+    'stability-pred': 'stability-prediction',
+    'fluorescence': 'fluorescence-prediction',
+}
+
+
+def resolve_dataset_name(dataset_name: str) -> str:
+    if dataset_name in supported_datasets:
+        return dataset_name
+    if dataset_name in dataset_aliases:
+        return dataset_aliases[dataset_name]
+    return dataset_name
+
+
+def get_dataset_source(dataset_name: str) -> str:
+    canonical_name = resolve_dataset_name(dataset_name)
+    return supported_datasets[canonical_name]
+
+
+# Curated datasets with available precomputed vector representations.
 possible_with_vector_reps = [
     ### multi-label
     'EC',
@@ -135,7 +163,7 @@ possible_with_vector_reps = [
     'PPA-ppi',
 ]
 
-# TODO update
+# Curated default benchmark used by data_names=['standard_benchmark'].
 standard_data_benchmark = [
     'ec-active',
     'EC',
@@ -191,6 +219,19 @@ vector_benchmark = [
     # ppi
     'PPA-ppi', # Custom - Logan - Bindwell
 ]
+
+
+for benchmark_name, benchmark_datasets in [
+    ('possible_with_vector_reps', possible_with_vector_reps),
+    ('standard_data_benchmark', standard_data_benchmark),
+    ('vector_benchmark', vector_benchmark),
+]:
+    missing = [
+        dataset_name
+        for dataset_name in benchmark_datasets
+        if resolve_dataset_name(dataset_name) not in supported_datasets
+    ]
+    assert len(missing) == 0, f'{benchmark_name} contains unsupported datasets: {missing}'
 
 
 testing = [

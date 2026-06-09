@@ -12,12 +12,22 @@ def _ensure_fastplms_on_path():
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "fastplms",
     )
-    if fastplms_root not in sys.path:
-        sys.path.insert(0, fastplms_root)
+    if fastplms_root in sys.path:
+        sys.path.remove(fastplms_root)
+    sys.path.insert(0, fastplms_root)
+    if "fastplms" in sys.modules:
+        for module_name in list(sys.modules):
+            if module_name == "fastplms" or module_name.startswith("fastplms."):
+                del sys.modules[module_name]
     return fastplms_root
 
 
 FASTPLMS_ROOT = _ensure_fastplms_on_path()
+
+
+@pytest.fixture(autouse=True)
+def _reset_fastplms_import_path():
+    _ensure_fastplms_on_path()
 
 
 def test_fastplms_root_exists():

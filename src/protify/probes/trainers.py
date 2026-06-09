@@ -1,5 +1,6 @@
 import torch
 import os
+import sqlite3
 import numpy as np
 from copy import deepcopy
 from typing import Optional, Dict, List, Any, Union
@@ -18,6 +19,7 @@ try:
         PairStringLabelDataset,
         MultiEmbedsLabelsDatasetFromDisk,
         MultiEmbedsLabelsDataset,
+        EmbeddingStandardizer,
     )
 except ImportError:
     from .hybrid_probe import HybridProbe, HybridProbeConfig
@@ -31,6 +33,7 @@ except ImportError:
         PairStringLabelDataset,
         MultiEmbedsLabelsDatasetFromDisk,
         MultiEmbedsLabelsDataset,
+        EmbeddingStandardizer,
     )
 try:
     from data.data_collators import (
@@ -45,6 +48,7 @@ try:
     from metrics_balanced import compute_balanced_regression_metrics
     from seed_utils import set_global_seed
     from probes.get_probe import get_probe
+    from embedder import get_embedding_filename
 except ImportError:
     from ..data.data_collators import (
         EmbedsLabelsCollator,
@@ -58,6 +62,7 @@ except ImportError:
     from ..metrics_balanced import compute_balanced_regression_metrics
     from ..seed_utils import set_global_seed
     from .get_probe import get_probe
+    from ..embedder import get_embedding_filename
 
 
 def _compute_eval_accumulation_steps(
@@ -107,6 +112,9 @@ class TrainerArguments:
             probe_grad_accum: int = 1,
             base_grad_accum: int = 1,
             lr: float = 1e-4,
+            probe_lr: Optional[float] = None,
+            lr_scheduler: str = 'cosine',
+            optimizer: str = 'adamw_torch',
             weight_decay: float = 0.00,
             task_type: str = 'regression',
             patience: int = 3,
@@ -143,6 +151,9 @@ class TrainerArguments:
         self.probe_grad_accum = probe_grad_accum
         self.base_grad_accum = base_grad_accum
         self.lr = lr
+        self.probe_lr = probe_lr
+        self.lr_scheduler = lr_scheduler
+        self.optimizer = optimizer
         self.weight_decay = weight_decay
         self.task_type = task_type
         self.patience = patience
@@ -175,7 +186,10 @@ class TrainerArguments:
         batch_size = self.probe_batch_size if probe else self.base_batch_size
         grad_accum = self.probe_grad_accum if probe else self.base_grad_accum
         num_epochs = self.num_epochs if (probe or self.base_num_epochs is None) else self.base_num_epochs
-        lr = self.lr if (probe or self.base_lr is None) else self.base_lr
+        if probe:
+            lr = self.lr if self.probe_lr is None else self.probe_lr
+        else:
+            lr = self.lr if self.base_lr is None else self.base_lr
 
         if self.train_data_size > 250000:
             eval_steps = max(1, int(100000 / (batch_size * grad_accum)))
@@ -215,7 +229,8 @@ class TrainerArguments:
             per_device_eval_batch_size=batch_size,
             gradient_accumulation_steps=grad_accum,
             learning_rate=float(lr),
-            lr_scheduler_type='cosine',
+            lr_scheduler_type=self.lr_scheduler,
+            optim=self.optimizer,
             weight_decay=float(self.weight_decay),
             warmup_steps=warmup_steps,
             save_total_limit=3,
@@ -343,7 +358,6 @@ Protify is an open source platform designed to simplify and democratize workflow
             early_stopping_patience = self.trainer_args.patience
         else:
             early_stopping_patience = self.trainer_args.base_patience
-        ### TODO add options for optimizers and schedulers
         trainer = Trainer(
             model=model,
             args=hf_trainer_args,
@@ -563,6 +577,76 @@ Protify is an open source platform designed to simplify and democratize workflow
         
         return aggregated
 
+    def _iter_vector_embeddings_for_standardizer(
+            self,
+            train_dataset,
+            emb_dict,
+            db_path: str,
+            ppi: bool,
+            use_multi,
+        ):
+        if self.embedding_args.sql:
+            with sqlite3.connect(db_path) as conn:
+                cursor = conn.cursor()
+                if ppi:
+                    for seq_a, seq_b in zip(list(train_dataset['SeqA']), list(train_dataset['SeqB'])):
+                        emb_a = self._select_from_sql(cursor, seq_a, cast_to_torch=True)
+                        emb_b = self._select_from_sql(cursor, seq_b, cast_to_torch=True)
+                        yield torch.cat([emb_a.reshape(1, -1), emb_b.reshape(1, -1)], dim=-1)
+                        if self.full_args.random_pair_flipping:
+                            yield torch.cat([emb_b.reshape(1, -1), emb_a.reshape(1, -1)], dim=-1)
+                elif use_multi:
+                    seq_columns = [list(train_dataset[col]) for col in use_multi]
+                    for seqs in zip(*seq_columns):
+                        parts = [
+                            self._select_from_sql(cursor, seq, cast_to_torch=True).reshape(1, -1)
+                            for seq in seqs
+                        ]
+                        yield torch.cat(parts, dim=-1)
+                else:
+                    for seq in list(train_dataset['seqs']):
+                        yield self._select_from_sql(cursor, seq, cast_to_torch=True)
+        else:
+            assert emb_dict is not None, "emb_dict is required for in-memory embedding standardization."
+            if ppi:
+                for seq_a, seq_b in zip(list(train_dataset['SeqA']), list(train_dataset['SeqB'])):
+                    emb_a = emb_dict[seq_a]
+                    emb_b = emb_dict[seq_b]
+                    yield torch.cat([emb_a.reshape(1, -1), emb_b.reshape(1, -1)], dim=-1)
+                    if self.full_args.random_pair_flipping:
+                        yield torch.cat([emb_b.reshape(1, -1), emb_a.reshape(1, -1)], dim=-1)
+            elif use_multi:
+                seq_columns = [list(train_dataset[col]) for col in use_multi]
+                for seqs in zip(*seq_columns):
+                    parts = [emb_dict[seq].reshape(1, -1) for seq in seqs]
+                    yield torch.cat(parts, dim=-1)
+            else:
+                for seq in list(train_dataset['seqs']):
+                    yield emb_dict[seq]
+
+    def _fit_embedding_standardizer(
+            self,
+            train_dataset,
+            emb_dict,
+            db_path: str,
+            ppi: bool,
+            use_multi,
+            full: bool,
+        ) -> Optional[EmbeddingStandardizer]:
+        embedding_scaler = self.embedding_args.embedding_scaler
+        assert isinstance(embedding_scaler, bool), f"Invalid embedding_scaler: {embedding_scaler}"
+        if full or not embedding_scaler:
+            return None
+        print_message("Fitting StandardScaler on training embeddings")
+        embeddings = self._iter_vector_embeddings_for_standardizer(
+            train_dataset,
+            emb_dict,
+            db_path,
+            ppi,
+            use_multi,
+        )
+        return EmbeddingStandardizer.fit_tensors(embeddings)
+
     def trainer_probe(
             self,
             model,
@@ -588,7 +672,14 @@ Protify is an open source platform designed to simplify and democratize workflow
         
         print(f'task_type: {task_type}')
         full = self.embedding_args.matrix_embed
-        db_path = os.path.join(self.embedding_args.embedding_save_dir, f'{model_name}_{full}.db')
+        db_filename = get_embedding_filename(
+            model_name,
+            full,
+            self.embedding_args.pooling_types,
+            'db',
+            self.embedding_args.hidden_state_index,
+        )
+        db_path = os.path.join(self.embedding_args.embedding_save_dir, db_filename)
 
         use_multi = getattr(self.full_args, 'multi_column', None)
         if self.embedding_args.sql:
@@ -624,6 +715,14 @@ Protify is an open source platform designed to simplify and democratize workflow
         padding = getattr(self.full_args, 'padding', 'max_length')
         max_length = getattr(self.full_args, 'max_length', 2048)
         data_collator = CollatorClass(tokenizer=tokenizer, full=full, task_type=task_type, tokenwise=tokenwise, add_token_ids=add_token_ids, padding=padding, max_length=max_length)
+        embedding_standardizer = self._fit_embedding_standardizer(
+            train_dataset,
+            emb_dict,
+            db_path,
+            ppi,
+            use_multi,
+            full,
+        )
         common_kwargs = dict(
             hf_dataset=train_dataset,
             input_size=input_size,
@@ -635,6 +734,7 @@ Protify is an open source platform designed to simplify and democratize workflow
             full=full,
             train=True,
             random_pair_flipping=self.full_args.random_pair_flipping,
+            embedding_standardizer=embedding_standardizer,
         )
         if use_multi:
             train_ds = DatasetClass(seq_cols=use_multi, **deepcopy(common_kwargs))

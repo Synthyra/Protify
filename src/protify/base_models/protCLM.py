@@ -8,6 +8,7 @@ from transformers import (
     AutoModelForTokenClassification
 )
 from .base_tokenizer import BaseSequenceTokenizer
+from .utils import select_hidden_state
 
 
 presets = {
@@ -39,17 +40,20 @@ class ProtCLMForEmbedding(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        hidden_state_index: int = -1,
         **kwargs,
     ) -> torch.Tensor:  
+        output_hidden_states = bool(output_hidden_states) or hidden_state_index != -1
         assert not output_attentions or not output_hidden_states, (
             "output_attentions=True and output_hidden_states=True are not supported by ProtCLMForEmbedding."
         )
 
         out = self.plm(
             input_ids=input_ids, 
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            output_hidden_states=output_hidden_states,
             )
-        return out.last_hidden_state
+        return select_hidden_state(out.last_hidden_state, out.hidden_states, hidden_state_index)
 
 
 def get_protCLM_tokenizer(preset: str, model_path: str = None) -> BaseSequenceTokenizer:
