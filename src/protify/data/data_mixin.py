@@ -1060,23 +1060,19 @@ class DataMixin:
 
     def get_embedding_dim_sql(self, save_path: str, test_seq: str, tokenizer: object) -> int:
         import sqlite3
-        test_seq_len = len(tokenizer(test_seq, return_tensors='pt')['input_ids'][0])
 
         with sqlite3.connect(save_path) as conn:
             c = conn.cursor()
             c.execute("SELECT embedding FROM embeddings WHERE sequence = ?", (test_seq,))
-            test_embedding = c.fetchone()[0]
+            row = c.fetchone()
+            assert row is not None, f"Test sequence not found in embeddings database: {test_seq}"
+            test_embedding = row[0]
             test_embedding = embedding_blob_to_tensor(test_embedding, fallback_shape=(1, -1))
-        if self._full:
-            test_embedding = test_embedding.reshape(test_seq_len, -1)
         embedding_dim = test_embedding.shape[-1]
         return embedding_dim
 
     def get_embedding_dim_pth(self, emb_dict: Dict[str, torch.Tensor], test_seq: str, tokenizer: object) -> int:
-        test_seq_len = len(tokenizer(test_seq, return_tensors='pt')['input_ids'][0])
         test_embedding = emb_dict[test_seq]
-        if self._full:
-            test_embedding = test_embedding.reshape(test_seq_len, -1)
         embedding_dim = test_embedding.shape[-1]
         return embedding_dim
 
