@@ -19,6 +19,16 @@ except ImportError:
     from .utils import print_message
 
 
+PROBE_RESULT_IDENTITY_KEYS = (
+    "probe_type",
+    "hidden_size",
+    "dropout",
+    "n_layers",
+    "task_type",
+    "num_labels",
+)
+
+
 def log_method_calls(func: Callable) -> Callable:
     """Decorator to log each call of the decorated method."""
     @functools.wraps(func)
@@ -188,10 +198,26 @@ class MetricsLogger:
                     row.append(json.dumps(metrics))
                 writer.writerow(row)
 
+    def _with_probe_result_identity(self, metrics_dict: Dict[str, Any]) -> Dict[str, Any]:
+        enriched_metrics = dict(metrics_dict)
+        logger_args_dict = self.logger_args.__dict__
+        for key in PROBE_RESULT_IDENTITY_KEYS:
+            if key in enriched_metrics:
+                continue
+            if key in logger_args_dict:
+                enriched_metrics[key] = logger_args_dict[key]
+        return enriched_metrics
+
     def log_metrics(self, dataset: str, model: str, metrics_dict: Dict[str, Any], split_name: Optional[str] = None) -> None:
         try:
             training_time = metrics_dict.get('training_time_seconds')
-            preserve_keys = {'training_time_seconds', 'training_time_seconds_mean', 'training_time_seconds_std'}
+            preserve_keys = {
+                'training_time_seconds',
+                'training_time_seconds_mean',
+                'training_time_seconds_std',
+                'parallel_probe_seconds_per_run',
+                'parallel_probe_group_runtime_records',
+            }
             # Filter out other time-related keys, but preserve training_time_seconds variants
             filtered_dict = {k: v for k, v in metrics_dict.items() 
                            if not (('time' in k.lower() and k not in preserve_keys) or 
@@ -200,9 +226,9 @@ class MetricsLogger:
                 # Add it in the end
                 filtered_dict.pop('training_time_seconds', None)
                 filtered_dict['training_time_seconds'] = training_time
-            
-            metrics_dict = filtered_dict
-            
+
+            metrics_dict = self._with_probe_result_identity(filtered_dict)
+
             # Log the metrics
             if split_name is not None:
                 self.logger.info(f"Storing metrics for {dataset}/{model} ({split_name}): {metrics_dict}")

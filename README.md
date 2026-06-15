@@ -220,7 +220,8 @@ For more details about supported models and datasets, including programmatic acc
 
 - **Multiple interfaces**: Run experiments via an intuitive GUI, CLI, or prepared YAML files
 - **Efficient embeddings**: Leverage fast and efficient embeddings from 46+ PLMs (ESM2, ESMC, E1, ProtBert, ProtT5, ANKH, GLM2, DPLM, DPLM2, DSM, AMPLIFY, CaLM, and more) via [FastPLMs](https://github.com/Synthyra/FastPLMs)
-- **Flexible model training**: Probe-only (frozen PLM), full fine-tuning, hybrid probing, and LoRA via PEFT
+- **Flexible model training**: Probe-only (frozen PLM), full fine-tuning, hybrid probing, LoRA via PEFT, and vectorized multi-seed linear probes
+- **Parallel probe sweeps**: Train many seeded pooled linear probes in one vectorized pass with `--parallel_probe_runs`, including run-specific deterministic shuffles and static preflight planning for workstation launches
 - **Automated model selection**: Find optimal scikit-learn models for your data with LazyPredict, enhanced by automatic hyperparameter optimization
 - **Hyperparameter optimization**: Integrated Weights & Biases sweeps that conducts a hyperparameter search and trains the final version based on the best hyperparameters
 - **Complete reproducibility**: Every session generates a detailed log that can be used to reproduce your entire workflow
@@ -337,6 +338,24 @@ pip install -v -U git+https://github.com/facebookresearch/xformers.git@main#egg=
 
   Notes:
   - Pass your Hugging Face and W&B tokens in the GUI Info tab so remote runs can authenticate for gated model access, experiment tracking, and Hub uploads.
+
+  ### Parallel multi-seed linear probes
+
+  When embeddings are already cached, pooled sequence-level linear probes can train many seeds together instead of launching one Hugging Face Trainer run per seed:
+
+  ```bash
+  python -m main --model_names ESM2-8 --data_names DeepLoc-2 --num_runs 8 --parallel_probe_runs --parallel_probe_batch_mode run_specific --parallel_probe_index_strategy permutation --parallel_probe_max_group_size 8
+  ```
+
+  Protify infers `num_labels` from the dataset during normal `python -m main` runs. Do not pass `--num_labels` to `main`; that flag only exists on the synthetic benchmark and static planning helper scripts.
+
+  Before a larger workstation sweep, generate a no-training launch plan:
+
+  ```bash
+  python -m scripts.plan_parallel_probes --model_names ESM2-8 --data_names DeepLoc-2 --input_size 640 --num_runs 8 --parallel_batch_mode run_specific --parallel_index_strategy permutation --parallel_max_group_size 8 --probe_batch_size 512 --train_dataset_size 5473
+  ```
+
+  See [Probes and training](docs/probes_and_training.md#num_runs-aggregation) for eligibility, validation, telemetry, and comparison commands.
 
   ### Run jobs on Modal (advanced / self-hosted)
 
@@ -672,6 +691,12 @@ To run only CPU tests (no GPU required):
 
 ```bash
 docker run --rm -v "${PWD}":/workspace -w /workspace protify python -m pytest src/protify/testing_suite/ -v -m "not gpu and not slow"
+```
+
+For vectorized multi-seed linear probe changes, run the focused Docker suite from `src/protify`:
+
+```bash
+docker run --rm --gpus all -v "${PWD}":/workspace -e PYTHONPATH=/workspace -w /workspace/src/protify protify python -m pytest testing_suite/test_parallel_probe_benchmark.py testing_suite/test_parallel_probe_batches.py testing_suite/test_parallel_probe_compare.py testing_suite/test_parallel_probe_hardware_monitor.py testing_suite/test_parallel_probe_launch_manifest_runner.py testing_suite/test_parallel_probe_plan.py testing_suite/test_parallel_linear_probe.py testing_suite/test_parallel_probe_logger.py testing_suite/test_parallel_probe_preflight.py testing_suite/test_trainer_arguments.py -v
 ```
 
 See [docs/testing.md](docs/testing.md) for full details.

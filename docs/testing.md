@@ -25,6 +25,15 @@ Tests are under [src/protify/testing_suite/](../src/protify/testing_suite/). The
 | **test_seed_utils.py** | `set_global_seed` / `get_global_seed`, reproducibility (torch, numpy, random), `seed_worker`, `dataloader_generator`. |
 | **test_lazy_predict.py** | LazyClassifier and LazyRegressor fit, models, predictions, provide_models. |
 | **test_packaged_probe_export.py** | Linear and transformer probe save/load roundtrip via PackagedProbeModel, PPI inference with/without token_type_ids. |
+| **test_parallel_linear_probe.py** | Vectorized multi-seed linear probe behavior, exported single-run parity, shared and run-specific batches, per-run metrics, ensemble metrics, gradient clipping, chunking, and budget-derived group sizing. |
+| **test_parallel_probe_batches.py** | `ParallelRunDataset` deterministic per-run indexing, affine index strategy, tensor-cache fast paths, and collator shapes. |
+| **test_parallel_probe_plan.py** | Static grouping and resource estimates for model/dataset/probe/seed universes. |
+| **test_parallel_probe_preflight.py** | No-training launch-manifest generation, embedding prerequisites, execution waves, GPU placement metadata, validation templates, and helper-only `--num_labels` behavior. |
+| **test_parallel_probe_compare.py** | Sequential-vs-parallel result comparison, metric parity, manifest coverage, telemetry coverage, runner-report gates, and validation verdicts. |
+| **test_parallel_probe_benchmark.py** | Synthetic benchmark argument validation, plan summaries, run-specific loaders, and index-memory estimates. |
+| **test_parallel_probe_hardware_monitor.py** | `nvidia-smi` monitor command construction, JSONL summary parsing, and dry-run wrapper behavior. |
+| **test_parallel_probe_launch_manifest_runner.py** | Launch-manifest dry runs, execution planning, resume skips, wave concurrency, and over-budget execution gates. |
+| **test_parallel_probe_logger.py** | Result TSV preservation for parallel-probe timing and identity fields. |
 | **test_probe_attention.py** | Transformer attention with 2D/4D masks, s_max output, `resolve_attention_backend`. |
 | **embedding_test.py** | Standalone embedding diagnostic script (excluded from pytest collection). |
 
@@ -103,6 +112,16 @@ To run only CPU tests in Docker:
 ```bash
 docker run --rm -v "${PWD}":/workspace -w /workspace protify-env:latest python -m pytest src/protify/testing_suite -v -m "not gpu and not slow"
 ```
+
+### Parallel-probe focused suite
+
+For reviews that touch vectorized seed-bank training, run the focused suite from `src/protify` inside Docker:
+
+```bash
+docker run --rm --gpus all -v "${PWD}":/workspace -e PYTHONPATH=/workspace -w /workspace/src/protify protify-env:latest python -m pytest testing_suite/test_parallel_probe_benchmark.py testing_suite/test_parallel_probe_batches.py testing_suite/test_parallel_probe_compare.py testing_suite/test_parallel_probe_hardware_monitor.py testing_suite/test_parallel_probe_launch_manifest_runner.py testing_suite/test_parallel_probe_plan.py testing_suite/test_parallel_linear_probe.py testing_suite/test_parallel_probe_logger.py testing_suite/test_parallel_probe_preflight.py testing_suite/test_trainer_arguments.py -v
+```
+
+The current GH200 workstation validation for this focused suite passed with `180 passed`.
 
 ---
 
