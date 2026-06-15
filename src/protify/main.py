@@ -169,6 +169,28 @@ def parse_arguments():
     parser.add_argument("--full_finetuning", action="store_true", help="Fully fine-tune the base model end-to-end.")
     parser.add_argument("--hybrid_probe", action="store_true", help="Train probe first, then fine-tune base model + probe jointly.")
     parser.add_argument("--num_runs", type=int, default=1, help="Number of training runs with different seeds. Results will show mean±std across runs.")
+    parser.add_argument("--parallel_probe_runs", action="store_true",
+                        help="Train eligible linear-probe num_runs in one vectorized HF Trainer pass.")
+    parser.add_argument("--parallel_probe_batch_mode", type=str, default='shared',
+                        choices=['shared', 'run_specific'],
+                        help="Batch mode for --parallel_probe_runs: shared reuses each minibatch across runs; run_specific uses deterministic per-run training permutations.")
+    parser.add_argument("--parallel_probe_index_strategy", type=str, default='permutation',
+                        choices=['permutation', 'affine'],
+                        help="Index strategy for --parallel_probe_batch_mode run_specific: permutation materializes per-run shuffled indices; affine uses memory-free deterministic bijections.")
+    parser.add_argument("--parallel_probe_max_group_size", type=int, default=None,
+                        help="Optional maximum number of seeded linear probes to place in one vectorized parallel-probe bank.")
+    parser.add_argument("--parallel_probe_training_state_budget_gb", type=float, default=None,
+                        help="Optional static training-state budget in GiB for automatic --parallel_probe_runs group-size chunking.")
+    parser.add_argument("--parallel_probe_estimated_peak_budget_gb", type=float, default=None,
+                        help="Optional static estimated peak-memory budget in GiB for automatic --parallel_probe_runs group-size chunking.")
+    parser.add_argument("--parallel_probe_max_grad_norm", type=float, default=0.0,
+                        help="Gradient clipping max norm for --parallel_probe_runs. Default 0 disables global clipping to avoid coupling seed banks.")
+    parser.add_argument("--parallel_probe_grad_clip_mode", type=str, default='global',
+                        choices=['none', 'global', 'per_run'],
+                        help="Gradient clipping mode for --parallel_probe_runs: none disables clipping, global uses HuggingFace global clipping, per_run clips each seed bank independently.")
+    parser.add_argument("--parallel_probe_ensemble_average_mode", type=str, default='logits',
+                        choices=['logits', 'probabilities'],
+                        help="How to average parallel-probe seed-bank predictions for reported ensemble metrics.")
     parser.add_argument("--no_compile", action="store_true", help="Disable torch.compile on probes during training (compiled by default).")
 
     # ----------------- Balanced Regression Metrics (EpHod-style) ----------------- #
@@ -376,6 +398,38 @@ def parse_arguments():
         yaml_args.aa_to_codon = _merge_store_true(args.aa_to_codon, "aa_to_codon")
         yaml_args.random_pair_flipping = _merge_store_true(args.random_pair_flipping, "random_pair_flipping")
         yaml_args.push_raw_probe = _merge_store_true(args.push_raw_probe, "push_raw_probe")
+        yaml_args.parallel_probe_runs = _merge_store_true(args.parallel_probe_runs, "parallel_probe_runs")
+        if (args.parallel_probe_batch_mode != "shared") or ("parallel_probe_batch_mode" not in yaml_args.__dict__):
+            yaml_args.parallel_probe_batch_mode = args.parallel_probe_batch_mode
+        if (args.parallel_probe_index_strategy != "permutation") or ("parallel_probe_index_strategy" not in yaml_args.__dict__):
+            yaml_args.parallel_probe_index_strategy = args.parallel_probe_index_strategy
+        if (args.parallel_probe_max_group_size is not None) or ("parallel_probe_max_group_size" not in yaml_args.__dict__):
+            yaml_args.parallel_probe_max_group_size = args.parallel_probe_max_group_size
+        if (
+                (args.parallel_probe_training_state_budget_gb is not None)
+                or ("parallel_probe_training_state_budget_gb" not in yaml_args.__dict__)
+            ):
+            yaml_args.parallel_probe_training_state_budget_gb = args.parallel_probe_training_state_budget_gb
+        if (
+                (args.parallel_probe_estimated_peak_budget_gb is not None)
+                or ("parallel_probe_estimated_peak_budget_gb" not in yaml_args.__dict__)
+            ):
+            yaml_args.parallel_probe_estimated_peak_budget_gb = args.parallel_probe_estimated_peak_budget_gb
+        if (
+                (args.parallel_probe_max_grad_norm != 0.0)
+                or ("parallel_probe_max_grad_norm" not in yaml_args.__dict__)
+            ):
+            yaml_args.parallel_probe_max_grad_norm = args.parallel_probe_max_grad_norm
+        if (
+                (args.parallel_probe_grad_clip_mode != "global")
+                or ("parallel_probe_grad_clip_mode" not in yaml_args.__dict__)
+            ):
+            yaml_args.parallel_probe_grad_clip_mode = args.parallel_probe_grad_clip_mode
+        if (
+                (args.parallel_probe_ensemble_average_mode != "logits")
+                or ("parallel_probe_ensemble_average_mode" not in yaml_args.__dict__)
+            ):
+            yaml_args.parallel_probe_ensemble_average_mode = args.parallel_probe_ensemble_average_mode
         # Ensure ProteinGym defaults exist when using YAML configs
         if not hasattr(yaml_args, 'proteingym'):
             yaml_args.proteingym = False

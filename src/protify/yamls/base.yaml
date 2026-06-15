@@ -111,6 +111,15 @@ base_patience: null
 full_finetuning: !!bool false
 hybrid_probe: !!bool false
 num_runs: !!int 1
+parallel_probe_runs: !!bool false
+parallel_probe_batch_mode: shared  # shared | run_specific
+parallel_probe_index_strategy: permutation  # permutation | affine
+parallel_probe_max_group_size: null
+parallel_probe_training_state_budget_gb: null
+parallel_probe_estimated_peak_budget_gb: null
+parallel_probe_max_grad_norm: !!float 0.0  # 0 disables global clipping across seed banks
+parallel_probe_grad_clip_mode: global  # none | global | per_run
+parallel_probe_ensemble_average_mode: logits  # logits | probabilities
 
 # Balanced regression metrics (EpHod-style; ignored for non-regression tasks)
 balanced_regression_metrics: !!bool true
