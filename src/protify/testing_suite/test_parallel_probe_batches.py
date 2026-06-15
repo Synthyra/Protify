@@ -23,6 +23,26 @@ def _base_dataset() -> TensorDataset:
     return TensorDataset(embeddings, labels)
 
 
+class TensorBackedEmbeddingDataset:
+    def __init__(self) -> None:
+        self.embeddings = [
+            torch.tensor([[idx, idx + 0.5]], dtype=torch.float64)
+            for idx in range(6)
+        ]
+        self.labels = list(range(6))
+        self.task_type = 'singlelabel'
+        self.full = False
+        self.embedding_standardizer = None
+        self.item_call_count = 0
+
+    def __len__(self) -> int:
+        return len(self.labels)
+
+    def __getitem__(self, idx: int):
+        self.item_call_count += 1
+        return self.embeddings[idx].float().squeeze(0), torch.tensor(self.labels[idx], dtype=torch.long)
+
+
 def test_parallel_run_dataset_package_export() -> None:
     assert "ParallelRunDataset" in probes_package.__all__
     assert probes_package.ParallelRunDataset is ParallelRunDataset
@@ -80,6 +100,39 @@ def test_parallel_run_dataset_collates_to_run_specific_probe_shape() -> None:
     assert batch['embeddings'].shape == (3, 2, 4)
     assert batch['labels'].shape == (3, 2)
     assert batch['labels'].dtype == torch.long
+
+
+def test_parallel_run_dataset_uses_tensor_cache_for_tensor_dataset() -> None:
+    base_dataset = _base_dataset()
+    dataset = ParallelRunDataset(base_dataset, run_seeds=(2, 4), independent_shuffles=True)
+    indices = dataset.run_indices_for(0)
+
+    embeddings, labels = dataset[0]
+
+    assert dataset.uses_tensor_cache is True
+    assert embeddings.shape == (2, 4)
+    assert labels.shape == (2,)
+    for run_idx, base_idx in enumerate(indices):
+        expected_embedding, expected_label = base_dataset[base_idx]
+        assert torch.equal(embeddings[run_idx], expected_embedding)
+        assert labels[run_idx].item() == expected_label.item()
+
+
+def test_parallel_run_dataset_uses_tensor_cache_for_in_memory_embeddings() -> None:
+    base_dataset = TensorBackedEmbeddingDataset()
+    dataset = ParallelRunDataset(base_dataset, run_seeds=(3, 7), independent_shuffles=True)
+    indices = dataset.run_indices_for(0)
+
+    embeddings, labels = dataset[0]
+
+    assert dataset.uses_tensor_cache is True
+    assert base_dataset.item_call_count == 0
+    assert embeddings.shape == (2, 2)
+    assert labels.shape == (2,)
+    for run_idx, base_idx in enumerate(indices):
+        expected_embedding = torch.tensor([base_idx, base_idx + 0.5], dtype=torch.float32)
+        assert torch.equal(embeddings[run_idx], expected_embedding)
+        assert labels[run_idx].item() == base_idx
 
 
 def test_parallel_run_dataset_rejects_empty_base_dataset() -> None:

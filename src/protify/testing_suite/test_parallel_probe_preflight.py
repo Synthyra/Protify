@@ -436,6 +436,7 @@ def test_parallel_probe_preflight_builds_cross_product_plan_report() -> None:
         "--num_runs",
         "2",
     ]
+    assert "--num_labels" not in manifest["groups"][0]["sequential_cli_args"]
     assert manifest["groups"][0]["sequential_command"] == [
         "python",
         "-m",
@@ -468,6 +469,7 @@ def test_parallel_probe_preflight_builds_cross_product_plan_report() -> None:
         "--parallel_probe_max_group_size",
         "2",
     ]
+    assert "--num_labels" not in manifest["groups"][0]["parallel_cli_args"]
     assert manifest["groups"][0]["parallel_command"] == [
         "python",
         "-m",

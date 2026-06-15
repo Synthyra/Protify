@@ -39,7 +39,16 @@ def parse_args(argv=None):
     parser.add_argument("--input_size", type=int, required=True)
     parser.add_argument("--hidden_size", type=int, default=8192)
     parser.add_argument("--dropout", type=float, default=0.2)
-    parser.add_argument("--num_labels", type=int, default=2)
+    parser.add_argument(
+        "--num_labels",
+        type=int,
+        default=2,
+        help=(
+            "Planner-only label count for memory and FLOP estimates. "
+            "Generated python -m main commands do not include this because Protify "
+            "infers num_labels from the dataset."
+        ),
+    )
     parser.add_argument("--n_layers", type=int, default=1)
     parser.add_argument("--probe_hidden_sizes", nargs="+", type=int, default=None)
     parser.add_argument("--probe_dropouts", nargs="+", type=float, default=None)

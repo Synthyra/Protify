@@ -22,7 +22,15 @@ def parse_args():
     parser.add_argument("--num_samples", type=int, default=8192)
     parser.add_argument("--input_size", type=int, default=320)
     parser.add_argument("--hidden_size", type=int, default=256)
-    parser.add_argument("--num_labels", type=int, default=2)
+    parser.add_argument(
+        "--num_labels",
+        type=int,
+        default=2,
+        help=(
+            "Synthetic label count used only to generate random benchmark labels. "
+            "Real python -m main probe runs infer num_labels from the dataset."
+        ),
+    )
     parser.add_argument("--num_runs", type=int, default=8)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--epochs", type=int, default=3)
@@ -68,9 +76,9 @@ def resolve_device(device_arg: str) -> torch.device:
 
 
 def make_dataset(args, device: torch.device):
-    generator = torch.Generator()
-    generator.manual_seed(args.seed)
     data_device = device if args.data_on_device else torch.device("cpu")
+    generator = torch.Generator(device=data_device)
+    generator.manual_seed(args.seed)
     embeddings = torch.randn(args.num_samples, args.input_size, generator=generator, device=data_device)
     if args.task_type == "singlelabel":
         labels = torch.randint(args.num_labels, (args.num_samples,), generator=generator, device=data_device)
