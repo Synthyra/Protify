@@ -76,6 +76,10 @@ all_presets_with_paths = {
     'vec2vec-ESM2-650-ModernBERT-large-contrastive': 'lhallee/ESM2-650-ModernBERT-large-sequence-sequence-contrastive',
     # CaLM models (from calm.py)
     'CaLM': 'multimolecule/calm',
+    # CARBON models (from carbon.py) - decoder-only DNA language models
+    'CARBON-500M': 'HuggingFaceBio/Carbon-500M',
+    'CARBON-3B': 'HuggingFaceBio/Carbon-3B',
+    'CARBON-8B': 'HuggingFaceBio/Carbon-8B',
 }
 
 
@@ -126,6 +130,9 @@ currently_supported_models = [
     'AMPLIFY-120',
     'AMPLIFY-350',
     'CaLM',
+    'CARBON-500M',
+    'CARBON-3B',
+    'CARBON-8B',
 ]
 
 standard_models = [

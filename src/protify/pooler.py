@@ -20,6 +20,7 @@ class Pooler:
             'std': self.std_pooling,
             'var': self.var_pooling,
             'cls': self.cls_pooling,
+            'eos': self.eos_pooling,
             'parti': self._pool_parti,
         }
 
@@ -127,6 +128,13 @@ class Pooler:
 
     def cls_pooling(self, emb: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor: # (b, L, d) -> (b, d)
         return emb[:, 0, :]
+
+    def eos_pooling(self, emb: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor: # (b, L, d) -> (b, d)
+        # Last real token (e.g. CARBON's '</dna>' separator)
+        if attention_mask is None:
+            return emb[:, -1, :]
+        last_idx = (attention_mask.sum(dim=1) - 1).long()
+        return emb[torch.arange(emb.size(0), device=emb.device), last_idx]
 
     def __call__(
             self,

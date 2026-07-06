@@ -58,7 +58,12 @@ def select_hidden_state(
 
 def wrap_lora(module: nn.Module, r: int, lora_alpha: float, lora_dropout: float) -> nn.Module:
     # these modules handle ESM++ and ESM2 attention types, as well as any additional transformer blocks from Syndev
-    target_modules=["layernorm_qkv.1", "out_proj", "query", "key", "value", "dense"]
+    # Llama-style names (q_proj/k_proj/v_proj/o_proj/gate_proj/up_proj/down_proj) attach LoRA on CARBON.
+    # PEFT matches target names by suffix and ignores names absent from a model, so this union is safe for every model.
+    target_modules = [
+        "layernorm_qkv.1", "out_proj", "query", "key", "value", "dense",
+        "q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj",
+    ]
     lora_config = LoraConfig(
         r=r,
         lora_alpha=lora_alpha,
@@ -68,6 +73,8 @@ def wrap_lora(module: nn.Module, r: int, lora_alpha: float, lora_dropout: float)
     )
     module = LoraModel(module, lora_config, 'default')
     for name, param in module.named_parameters():
-        if 'classifier' in name.lower():
+        # 'classifier' covers ESM/BERT heads; 'score' covers Llama-style (e.g. CARBON)
+        # sequence-classification heads, which must stay trainable under LoRA.
+        if 'classifier' in name.lower() or 'score' in name.lower():
             param.requires_grad = True
     return module
