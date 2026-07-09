@@ -2,7 +2,7 @@
 
 ## Purpose and Sources
 
-This is the Gleghorn-Lab Protify checkout embedded in synth. Reusable training and evaluation behavior belongs here; parent-platform serving and orchestration belong in synth.
+This is the standalone Synthyra Protify checkout. Keep its public training, evaluation, packaging, and cloud interfaces independent of the parent synth workspace.
 
 - `docs/getting_started.md` and `docs/cli_and_config.md`: entrypoints and configuration
 - `docs/probes_and_training.md`: probe behavior
