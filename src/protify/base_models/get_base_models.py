@@ -39,6 +39,14 @@ class BaseModelArguments:
                 yield name, name, None
 
 
+def get_raw_sequence_length_limit(model_name: str, max_length: int) -> int:
+    """Map a tokenizer token budget to the corresponding raw-sequence budget."""
+    if 'carbon' in model_name.lower():
+        from .carbon import carbon_dna_length_for_tokens
+        return carbon_dna_length_for_tokens(max_length)
+    return max_length
+
+
 def get_base_model(model_name: str, masked_lm: bool = False, dtype=None, model_path: str = None):
     if 'vec2vec' in model_name.lower():
         from .vec2vec import build_vec2vec_model
@@ -88,6 +96,9 @@ def get_base_model(model_name: str, masked_lm: bool = False, dtype=None, model_p
     elif 'calm' in model_name.lower():
         from .calm import build_calm_model
         return build_calm_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
+    elif 'carbon' in model_name.lower():
+        from .carbon import build_carbon_model
+        return build_carbon_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
     elif 'custom' in model_name.lower():
         from .custom_model import build_custom_model
         assert model_path is not None, "model_path is required for custom models. Use --model_paths and --model_types custom."
@@ -133,6 +144,9 @@ def get_base_model_for_training(model_name: str, tokenwise: bool = False, num_la
     elif 'calm' in model_name.lower():
         from .calm import get_calm_for_training
         return get_calm_for_training(model_name, tokenwise, num_labels, hybrid, dtype=dtype, model_path=model_path)
+    elif 'carbon' in model_name.lower():
+        from .carbon import get_carbon_for_training
+        return get_carbon_for_training(model_name, tokenwise, num_labels, hybrid, dtype=dtype, model_path=model_path)
     else:
         raise ValueError(f"Model {model_name} not supported")
 
@@ -184,6 +198,9 @@ def get_tokenizer(model_name: str, model_path: str = None):
     elif 'calm' in model_name.lower():
         from .calm import get_calm_tokenizer
         return get_calm_tokenizer(model_name, model_path=model_path)
+    elif 'carbon' in model_name.lower():
+        from .carbon import get_carbon_tokenizer
+        return get_carbon_tokenizer(model_name, model_path=model_path)
     else:
         raise ValueError(f"Model {model_name} not supported")
 

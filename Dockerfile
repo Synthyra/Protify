@@ -35,7 +35,7 @@ COPY requirements.txt .
 RUN pip install --upgrade pip setuptools
 RUN pip install -r requirements.txt
 RUN pip install --force-reinstall torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
-RUN pip install numpy==1.26.4
+RUN pip install numpy==1.26.4 "fsspec[http]>=2023.1.0,<=2025.10.0" && pip check
 
 COPY . .
 

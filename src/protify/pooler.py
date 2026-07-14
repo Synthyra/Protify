@@ -20,6 +20,7 @@ class Pooler:
             'std': self.std_pooling,
             'var': self.var_pooling,
             'cls': self.cls_pooling,
+            'eos': self.eos_pooling,
             'parti': self._pool_parti,
         }
 
@@ -128,20 +129,89 @@ class Pooler:
     def cls_pooling(self, emb: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor: # (b, L, d) -> (b, d)
         return emb[:, 0, :]
 
+    def eos_pooling(
+            self,
+            emb: torch.Tensor,
+            attention_mask: Optional[torch.Tensor] = None,
+            input_ids: Optional[torch.Tensor] = None,
+            eos_token_id: Optional[int] = None,
+            **kwargs,
+        ) -> torch.Tensor: # (b, L, d) -> (b, d)
+        """Pool an explicit boundary token or the final active token.
+
+        ``attention_mask.sum() - 1`` only works for right-padded contiguous masks.
+        Taking the maximum active position also supports left padding and masks
+        with internal gaps. When the tokenizer exposes an explicit pooling token,
+        require exactly one active occurrence so a missing or duplicated boundary
+        cannot silently select the wrong representation.
+        """
+        if emb.ndim != 3:
+            raise ValueError(f"eos pooling expects rank-3 embeddings, got {tuple(emb.shape)}")
+        batch_size, sequence_length, _ = emb.shape
+
+        if attention_mask is None:
+            active_mask = torch.ones(
+                (batch_size, sequence_length),
+                dtype=torch.bool,
+                device=emb.device,
+            )
+        else:
+            if attention_mask.shape != (batch_size, sequence_length):
+                raise ValueError(
+                    "attention_mask shape must match the embedding batch and sequence dimensions"
+                )
+            if not torch.all((attention_mask == 0) | (attention_mask == 1)):
+                raise ValueError("attention_mask must contain only 0/1 values")
+            active_mask = attention_mask.to(device=emb.device, dtype=torch.bool)
+
+        if not torch.all(active_mask.any(dim=1)):
+            empty = torch.nonzero(~active_mask.any(dim=1), as_tuple=False).flatten().tolist()
+            raise ValueError(f"eos pooling received all-zero attention masks for samples {empty}")
+
+        if eos_token_id is not None:
+            if input_ids is None:
+                raise ValueError("input_ids are required when eos_token_id is provided")
+            if input_ids.shape != active_mask.shape:
+                raise ValueError("input_ids shape must match attention_mask for eos pooling")
+            explicit_eos = input_ids.to(device=emb.device).eq(int(eos_token_id)) & active_mask
+            eos_counts = explicit_eos.sum(dim=1)
+            if not torch.all(eos_counts == 1):
+                invalid = torch.nonzero(eos_counts != 1, as_tuple=False).flatten().tolist()
+                counts = [int(eos_counts[index].item()) for index in invalid]
+                raise ValueError(
+                    "eos pooling requires exactly one active boundary token per sample; "
+                    f"samples {invalid} had counts {counts}"
+                )
+            selected_idx = explicit_eos.to(dtype=torch.long).argmax(dim=1)
+        else:
+            positions = torch.arange(sequence_length, device=emb.device).expand(batch_size, -1)
+            selected_idx = positions.masked_fill(~active_mask, -1).amax(dim=1)
+
+        return emb[torch.arange(batch_size, device=emb.device), selected_idx]
+
     def __call__(
             self,
             emb: torch.Tensor,
             attention_mask: Optional[torch.Tensor] = None,
-            attentions: Optional[torch.Tensor] = None
+            attentions: Optional[torch.Tensor] = None,
+            input_ids: Optional[torch.Tensor] = None,
+            eos_token_id: Optional[int] = None,
         ) -> torch.Tensor: # [mean, max]
         if attention_mask is not None:
-            assert attention_mask.sum(dim=-1).min() > 0, (
-                "Pooler received samples with all-zero attention masks. "
-                "This causes NaN from division by zero. Filter empty inputs before pooling."
-            )
+            if not torch.all(attention_mask.sum(dim=-1) > 0):
+                raise ValueError(
+                    "Pooler received samples with all-zero attention masks. "
+                    "This causes NaN from division by zero. Filter empty inputs before pooling."
+                )
         final_emb: List[torch.Tensor] = []
         for pooling_type in self.pooling_types:
-            final_emb.append(self.pooling_options[pooling_type](emb=emb, attention_mask=attention_mask, attentions=attentions)) # (b, d)
+            final_emb.append(self.pooling_options[pooling_type](
+                emb=emb,
+                attention_mask=attention_mask,
+                attentions=attentions,
+                input_ids=input_ids,
+                eos_token_id=eos_token_id,
+            )) # (b, d)
         return torch.cat(final_emb, dim=-1) # (b, n_pooling_types * d)
     
 

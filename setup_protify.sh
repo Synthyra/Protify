@@ -25,7 +25,10 @@ pip install -r requirements.txt -U
 # Install torch and torchvision
 echo "Installing torch and torchvision..."
 pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu128 -U
-pip install --force-reinstall numpy==1.26.4
+pip install --force-reinstall numpy==1.26.4 "fsspec[http]>=2023.1.0,<=2025.10.0"
+
+# Fail immediately if a later reinstall introduced an incompatible dependency.
+pip check
 
 # List installed packages for verification
 echo -e "\nInstalled packages:"
