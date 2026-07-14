@@ -173,4 +173,12 @@ standard_models = [
     'OneHot-Protein',
 ]
 
+# Keep the default benchmark set stable while exposing DNA-specific CARBON
+# models in the GUI's explicit model picker.
+gui_models = standard_models + [
+    'CARBON-500M',
+    'CARBON-3B',
+    'CARBON-8B',
+]
+
 experimental_models = []

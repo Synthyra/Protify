@@ -1,4 +1,7 @@
-import entrypoint_setup
+try:
+    from . import entrypoint_setup
+except ImportError:
+    import entrypoint_setup
 
 import os
 import tkinter as tk
@@ -14,7 +17,12 @@ from types import SimpleNamespace
 from tkinter import ttk, messagebox, filedialog
 from concurrent.futures import ThreadPoolExecutor
 
-from base_models.get_base_models import BaseModelArguments, standard_models
+from base_models.get_base_models import (
+    BaseModelArguments,
+    get_raw_sequence_length_limit,
+    standard_models,
+)
+from base_models.supported_models import gui_models
 from data.supported_datasets import supported_datasets, standard_data_benchmark, internal_datasets
 from embedder import EmbeddingArguments
 from probes.get_probe import ProbeArguments
@@ -285,7 +293,7 @@ class GUI(MainProcess):
         ttk.Label(self.model_tab, text="Model Names:").grid(row=0, column=0, padx=10, pady=5, sticky="nw")
 
         self.model_listbox = tk.Listbox(self.model_tab, selectmode="extended", height=24)
-        for model_name in standard_models:
+        for model_name in gui_models:
             self.model_listbox.insert(tk.END, model_name)
         self.model_listbox.grid(row=0, column=1, padx=10, pady=5, sticky="nw")
         self.add_help_button(self.model_tab, 0, 2, "Select the language models to use for embedding. Multiple models can be selected.")
@@ -1820,6 +1828,10 @@ class GUI(MainProcess):
         # Gather settings
         selected_indices = self.data_listbox.curselection()
         selected_datasets = [self.data_listbox.get(i) for i in selected_indices]
+        selected_model_indices = self.model_listbox.curselection()
+        selected_models = [self.model_listbox.get(i) for i in selected_model_indices]
+        if not selected_models:
+            selected_models = standard_models
         data_dirs_str = self.settings_vars["data_dirs"].get().strip()
         data_dirs = [path.strip() for path in data_dirs_str.split(",") if path.strip()]
         
@@ -1852,6 +1864,13 @@ class GUI(MainProcess):
             # Update mixin attributes
             self._max_length = self.full_args.max_length
             self._trim = self.full_args.trim
+            raw_sequence_limits = [
+                get_raw_sequence_length_limit(model_name, self._max_length)
+                for model_name in selected_models
+            ]
+            self._data_max_length = (
+                min(raw_sequence_limits) if self._trim else max(raw_sequence_limits)
+            )
             self._delimiter = self.full_args.delimiter
             self._col_names = self.full_args.col_names
             self._multi_column = self.full_args.multi_column

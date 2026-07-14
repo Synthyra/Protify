@@ -19,10 +19,10 @@ from src.protify.embedder import EmbeddingArguments, get_embedding_filename
 from src.protify.hyperopt_utils import HyperoptModule
 
 
-def test_embedding_filename_preserves_default_cache_name():
+def test_embedding_filename_includes_default_length_cache_identity():
     filename = get_embedding_filename("ESM2-8", False, ["var", "mean"])
 
-    assert filename == "ESM2-8_False_mean_var.pth"
+    assert filename == "ESM2-8_False_len2048_mean_var.pth"
 
 
 def test_embedding_filename_adds_hidden_state_suffix_for_non_default():
@@ -40,8 +40,25 @@ def test_embedding_filename_adds_hidden_state_suffix_for_non_default():
         hidden_state_index=3,
     )
 
-    assert filename == "ESM2-8_False_hs6_mean_var.pth"
-    assert db_filename == "ESM2-8_True_hs3.db"
+    assert filename == "ESM2-8_False_hs6_len2048_mean_var.pth"
+    assert db_filename == "ESM2-8_True_hs3_len2048.db"
+
+
+def test_embedding_filename_changes_with_max_length():
+    short = get_embedding_filename(
+        "ESM2-8",
+        False,
+        ["mean"],
+        max_length=128,
+    )
+    long = get_embedding_filename(
+        "ESM2-8",
+        False,
+        ["mean"],
+        max_length=1024,
+    )
+
+    assert short != long
 
 
 def test_embedding_arguments_store_hidden_state_index():

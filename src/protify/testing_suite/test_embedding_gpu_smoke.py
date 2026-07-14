@@ -64,6 +64,7 @@ def test_gpu_embedding_hidden_state_smoke(tmp_path, model_name, hidden_state_ind
         False,
         ["mean"],
         hidden_state_index=hidden_state_index,
+        max_length=64,
     )
     save_path = tmp_path / filename
 
@@ -97,7 +98,7 @@ def test_gpu_embedding_esmc_6b_smoke(tmp_path):
     )
 
     embeddings = Embedder(args, sequences)("ESMC-6B")
-    filename = get_embedding_filename("ESMC-6B", False, ["mean"])
+    filename = get_embedding_filename("ESMC-6B", False, ["mean"], max_length=64)
     save_path = tmp_path / filename
 
     assert save_path.exists()

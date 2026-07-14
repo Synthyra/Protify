@@ -15,13 +15,11 @@ from pandas import read_csv, read_excel
 try:
     from utils import print_message, embedding_blob_to_tensor
     from seed_utils import get_global_seed
-    from embedder import get_embedding_filename
     from data.dataset_classes import EmbeddingStandardizer
     from metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
 except ImportError:
     from ..utils import print_message, embedding_blob_to_tensor
     from ..seed_utils import get_global_seed
-    from ..embedder import get_embedding_filename
     from .dataset_classes import EmbeddingStandardizer
     from ..metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
 from .supported_datasets import (
@@ -62,9 +60,10 @@ class DataArguments:
     data_paths: List[str]
         paths to the datasets
     max_length: int
-        max length of sequences
+        maximum tokenizer length. DataMixin may convert this to a model-specific
+        raw sequence limit before filtering or truncating.
     trim: bool
-        whether to trim sequences to max_length
+        whether to drop sequences that exceed max_length instead of truncating
     """
     def __init__(
             self,
@@ -133,6 +132,7 @@ class DataMixin:
         self._sql = False
         self._full = False
         self._max_length = 1024
+        self._data_max_length = 1024
         self._trim = False
         self._delimiter = ','
         self._col_names = ['seqs', 'labels']
@@ -145,6 +145,9 @@ class DataMixin:
         self.data_args = data_args
         self._multi_column = None if data_args is None else getattr(data_args, 'multi_column', None)
         if data_args is not None:
+            self._max_length = data_args.max_length
+            self._data_max_length = data_args.max_length
+            self._trim = data_args.trim
             self._aa_to_dna = data_args.aa_to_dna
             self._aa_to_rna = data_args.aa_to_rna
             self._dna_to_aa = data_args.dna_to_aa
@@ -166,6 +169,25 @@ class DataMixin:
         else:
             # Fallback for non-list input
             return all(isinstance(label, (int, float)) and label == int(label) for label in labels)
+
+    def _embedding_cache_filename(self, model_name: str, extension: str) -> str:
+        """Build the same embedding cache identity used by Embedder."""
+        model_type = None
+        model_path = None
+        model_args = getattr(self, 'model_args', None)
+        if model_args is not None:
+            for display_name, dispatch_name, candidate_path in model_args.model_entries():
+                if model_name in (display_name, dispatch_name):
+                    model_type = dispatch_name
+                    model_path = candidate_path
+                    break
+        return self.embedding_args.cache_filename(
+            model_name,
+            matrix_embed=self._full,
+            extension=extension,
+            model_type=model_type,
+            model_path=model_path,
+        )
 
     def _encode_labels(self, labels: list, tag2id: Dict[str, int]) -> List[torch.Tensor]:
         return [torch.tensor([tag2id[tag] for tag in doc], dtype=torch.long) for doc in labels]
@@ -242,7 +264,7 @@ class DataMixin:
         # Truncate longest first, but if that makes it shorter than the other, truncate that one
         seq_a, seq_b = ex['SeqA'], ex['SeqB']
         trunc_a, trunc_b = seq_a, seq_b
-        while len(trunc_a) + len(trunc_b) > self._max_length:
+        while len(trunc_a) + len(trunc_b) > self._data_max_length:
             if len(trunc_a) > len(trunc_b):
                 trunc_a = trunc_a[:-1]
             else:
@@ -499,6 +521,11 @@ class DataMixin:
             return self._translate_aa_to_codon(seq)
         raise AssertionError(f'Unsupported translation mode: {mode}')
 
+    @staticmethod
+    def _sanitize_sequence(seq: str) -> str:
+        """Preserve valid lowercase biological input and normalize it to uppercase."""
+        return ''.join(char for char in seq.upper() if char in AA_SET)
+
     def _find_first_present_column(self, available_columns: List[str], candidates_ordered: List[str]) -> str:
         """Return the first column from candidates_ordered that exists in available_columns (case-insensitive)."""
         lowercase_to_actual = {col.lower(): col for col in available_columns}
@@ -630,7 +657,7 @@ class DataMixin:
             hf_datasets: List[Tuple[Dataset, Dataset, Dataset, bool]],
             data_names: List[str],
         )-> Tuple[Dict[str, Tuple[Dataset, Dataset, Dataset, int, str, bool]], List[str]]:
-        max_length = self._max_length
+        max_length = self._data_max_length
         datasets, all_seqs = {}, set()
         translation_mode = self._active_translation_mode()
         for dataset, data_name in zip(hf_datasets, data_names):
@@ -674,24 +701,47 @@ class DataMixin:
             # 2) Legacy sanitization for non-translation workflows
             if translation_mode is None:
                 if ppi:
-                    train_set = train_set.map(lambda x: {'SeqA': ''.join(aa for aa in x['SeqA'] if aa in AA_SET),
-                                                         'SeqB': ''.join(aa for aa in x['SeqB'] if aa in AA_SET)})
-                    valid_set = valid_set.map(lambda x: {'SeqA': ''.join(aa for aa in x['SeqA'] if aa in AA_SET),
-                                                         'SeqB': ''.join(aa for aa in x['SeqB'] if aa in AA_SET)})
-                    test_set = test_set.map(lambda x: {'SeqA': ''.join(aa for aa in x['SeqA'] if aa in AA_SET),
-                                                        'SeqB': ''.join(aa for aa in x['SeqB'] if aa in AA_SET)})
+                    train_set = train_set.map(lambda x: {'SeqA': self._sanitize_sequence(x['SeqA']),
+                                                         'SeqB': self._sanitize_sequence(x['SeqB'])})
+                    valid_set = valid_set.map(lambda x: {'SeqA': self._sanitize_sequence(x['SeqA']),
+                                                         'SeqB': self._sanitize_sequence(x['SeqB'])})
+                    test_set = test_set.map(lambda x: {'SeqA': self._sanitize_sequence(x['SeqA']),
+                                                        'SeqB': self._sanitize_sequence(x['SeqB'])})
                 elif self.data_args.multi_column:
                     cols = self.data_args.multi_column
                     for col in cols:
-                        train_set = train_set.map(lambda x, _col=col: {_col: ''.join(aa for aa in x[_col] if aa in AA_SET)})
-                        valid_set = valid_set.map(lambda x, _col=col: {_col: ''.join(aa for aa in x[_col] if aa in AA_SET)})
-                        test_set = test_set.map(lambda x, _col=col: {_col: ''.join(aa for aa in x[_col] if aa in AA_SET)})
+                        train_set = train_set.map(lambda x, _col=col: {_col: self._sanitize_sequence(x[_col])})
+                        valid_set = valid_set.map(lambda x, _col=col: {_col: self._sanitize_sequence(x[_col])})
+                        test_set = test_set.map(lambda x, _col=col: {_col: self._sanitize_sequence(x[_col])})
                 else:
-                    train_set = train_set.map(lambda x: {'seqs': ''.join(aa for aa in x['seqs'] if aa in AA_SET)})
-                    valid_set = valid_set.map(lambda x: {'seqs': ''.join(aa for aa in x['seqs'] if aa in AA_SET)})
-                    test_set = test_set.map(lambda x: {'seqs': ''.join(aa for aa in x['seqs'] if aa in AA_SET)})
+                    train_set = train_set.map(lambda x: {'seqs': self._sanitize_sequence(x['seqs'])})
+                    valid_set = valid_set.map(lambda x: {'seqs': self._sanitize_sequence(x['seqs'])})
+                    test_set = test_set.map(lambda x: {'seqs': self._sanitize_sequence(x['seqs'])})
 
-            # 3) Remove any length 0 sequences
+            # 3) Translate before enforcing the target model's raw-sequence
+            # budget. Length limits apply to the sequence the tokenizer sees,
+            # not to the source alphabet before a 3x expansion or contraction.
+            if translation_mode is not None:
+                if ppi:
+                    train_set = train_set.map(lambda x: {'SeqA': self._translate_sequence_for_mode(x['SeqA'], translation_mode),
+                                                         'SeqB': self._translate_sequence_for_mode(x['SeqB'], translation_mode)})
+                    valid_set = valid_set.map(lambda x: {'SeqA': self._translate_sequence_for_mode(x['SeqA'], translation_mode),
+                                                         'SeqB': self._translate_sequence_for_mode(x['SeqB'], translation_mode)})
+                    test_set = test_set.map(lambda x: {'SeqA': self._translate_sequence_for_mode(x['SeqA'], translation_mode),
+                                                       'SeqB': self._translate_sequence_for_mode(x['SeqB'], translation_mode)})
+                elif self.data_args.multi_column:
+                    cols = self.data_args.multi_column
+                    for col in cols:
+                        train_set = train_set.map(lambda x, _col=col: {_col: self._translate_sequence_for_mode(x[_col], translation_mode)})
+                        valid_set = valid_set.map(lambda x, _col=col: {_col: self._translate_sequence_for_mode(x[_col], translation_mode)})
+                        test_set = test_set.map(lambda x, _col=col: {_col: self._translate_sequence_for_mode(x[_col], translation_mode)})
+                else:
+                    train_set = train_set.map(lambda x: {'seqs': self._translate_sequence_for_mode(x['seqs'], translation_mode)})
+                    valid_set = valid_set.map(lambda x: {'seqs': self._translate_sequence_for_mode(x['seqs'], translation_mode)})
+                    test_set = test_set.map(lambda x: {'seqs': self._translate_sequence_for_mode(x['seqs'], translation_mode)})
+                print_message(f"Translated sequences with mode {translation_mode} before length enforcement.")
+
+            # 4) Remove any length 0 sequences
             before_train, before_valid, before_test = len(train_set), len(valid_set), len(test_set)
             if ppi:
                 train_set = train_set.filter(lambda x: len(x['SeqA']) > 0 and len(x['SeqB']) > 0)
@@ -716,7 +766,7 @@ class DataMixin:
                     f"Removed length 0 rows - train: {before_train - len(train_set)}, valid: {before_valid - len(valid_set)}, test: {before_test - len(test_set)}"
                 )
 
-            # 4) Trim or truncate by length if necessary
+            # 5) Trim or truncate by length if necessary
             before_train, before_valid, before_test = len(train_set), len(valid_set), len(test_set)
             if self._trim: # trim by length
                 if ppi:
@@ -759,27 +809,6 @@ class DataMixin:
                     valid: {(before_valid - len(valid_set)) / before_valid * 100:.2f}%, \
                     test: {(before_test - len(test_set)) / before_test * 100:.2f}%"
                 )
-
-            # 5) Optional sequence translation (post-trim/truncate)
-            if translation_mode is not None:
-                if ppi:
-                    train_set = train_set.map(lambda x: {'SeqA': self._translate_sequence_for_mode(x['SeqA'], translation_mode),
-                                                         'SeqB': self._translate_sequence_for_mode(x['SeqB'], translation_mode)})
-                    valid_set = valid_set.map(lambda x: {'SeqA': self._translate_sequence_for_mode(x['SeqA'], translation_mode),
-                                                         'SeqB': self._translate_sequence_for_mode(x['SeqB'], translation_mode)})
-                    test_set = test_set.map(lambda x: {'SeqA': self._translate_sequence_for_mode(x['SeqA'], translation_mode),
-                                                       'SeqB': self._translate_sequence_for_mode(x['SeqB'], translation_mode)})
-                elif self.data_args.multi_column:
-                    cols = self.data_args.multi_column
-                    for col in cols:
-                        train_set = train_set.map(lambda x, _col=col: {_col: self._translate_sequence_for_mode(x[_col], translation_mode)})
-                        valid_set = valid_set.map(lambda x, _col=col: {_col: self._translate_sequence_for_mode(x[_col], translation_mode)})
-                        test_set = test_set.map(lambda x, _col=col: {_col: self._translate_sequence_for_mode(x[_col], translation_mode)})
-                else:
-                    train_set = train_set.map(lambda x: {'seqs': self._translate_sequence_for_mode(x['seqs'], translation_mode)})
-                    valid_set = valid_set.map(lambda x: {'seqs': self._translate_sequence_for_mode(x['seqs'], translation_mode)})
-                    test_set = test_set.map(lambda x: {'seqs': self._translate_sequence_for_mode(x['seqs'], translation_mode)})
-                print_message(f"Translated sequences with mode {translation_mode} (post-trim/truncate).")
 
             # 6) Record all_seqs
             if ppi:
@@ -1090,7 +1119,7 @@ class DataMixin:
         hidden_state_index = self.embedding_args.hidden_state_index
         if self._sql:
             import sqlite3
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db', hidden_state_index)
+            filename = self._embedding_cache_filename(model_name, 'db')
             save_path = os.path.join(save_dir, filename)
             with sqlite3.connect(save_path) as conn:
                 c = conn.cursor()
@@ -1106,7 +1135,7 @@ class DataMixin:
                     embedding = self._select_from_sql(c, seq, cast_to_torch=False)
                     test_array.append(embedding)
         else:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth', hidden_state_index)
+            filename = self._embedding_cache_filename(model_name, 'pth')
             save_path = os.path.join(save_dir, filename)
             emb_dict = torch.load(save_path)
             for seq in train_seqs:
@@ -1152,7 +1181,7 @@ class DataMixin:
         pooling_types = self.embedding_args.pooling_types
         hidden_state_index = self.embedding_args.hidden_state_index
         if self._sql:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'db', hidden_state_index)
+            filename = self._embedding_cache_filename(model_name, 'db')
             save_path = os.path.join(save_dir, filename)
             with sqlite3.connect(save_path) as conn:
                 c = conn.cursor()
@@ -1174,7 +1203,7 @@ class DataMixin:
                     embedding_b = self._select_from_sql(c, seq_b, cast_to_torch=False)
                     test_array.append(np.concatenate([embedding_a, embedding_b], axis=-1))
         else:
-            filename = get_embedding_filename(model_name, self._full, pooling_types, 'pth', hidden_state_index)
+            filename = self._embedding_cache_filename(model_name, 'pth')
             save_path = os.path.join(save_dir, filename)
             emb_dict = torch.load(save_path)
             for seq_a, seq_b in zip(train_seqs_a, train_seqs_b):

@@ -39,6 +39,14 @@ class BaseModelArguments:
                 yield name, name, None
 
 
+def get_raw_sequence_length_limit(model_name: str, max_length: int) -> int:
+    """Map a tokenizer token budget to the corresponding raw-sequence budget."""
+    if 'carbon' in model_name.lower():
+        from .carbon import carbon_dna_length_for_tokens
+        return carbon_dna_length_for_tokens(max_length)
+    return max_length
+
+
 def get_base_model(model_name: str, masked_lm: bool = False, dtype=None, model_path: str = None):
     if 'vec2vec' in model_name.lower():
         from .vec2vec import build_vec2vec_model
