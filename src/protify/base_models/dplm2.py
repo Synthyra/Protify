@@ -5,29 +5,29 @@ import torch
 import torch.nn as nn
 from typing import List, Optional, Union, Dict
 
-from .utils import ensure_fastplms_submodule_on_path, select_hidden_state
+from .utils import ensure_fastplms_submodule_on_path, load_fastplms_model, select_hidden_state
 
 
 ensure_fastplms_submodule_on_path()
 
-from fastplms.dplm2.modeling_dplm2 import (
+from fastplms.models.dplm2.modeling_dplm2 import (
     DPLM2ForMaskedLM,
     DPLM2ForSequenceClassification,
     DPLM2ForTokenClassification,
 )
-from transformers import EsmTokenizer
+from fastplms.models.dplm2.tokenization_dplm2 import DPLM2Tokenizer
 from .base_tokenizer import BaseSequenceTokenizer
 
 
 presets = {
-    "DPLM2-150": "airkingbd/dplm2_150m",
-    "DPLM2-650": "airkingbd/dplm2_650m",
-    "DPLM2-3B": "airkingbd/dplm2_3b",
+    "DPLM2-150": "Synthyra/DPLM2-150M",
+    "DPLM2-650": "Synthyra/DPLM2-650M",
+    "DPLM2-3B": "Synthyra/DPLM2-3B",
 }
 
 
 class DPLM2TokenizerWrapper(BaseSequenceTokenizer):
-    def __init__(self, tokenizer: EsmTokenizer):
+    def __init__(self, tokenizer: DPLM2Tokenizer):
         super().__init__(tokenizer)
 
     def __call__(
@@ -35,10 +35,14 @@ class DPLM2TokenizerWrapper(BaseSequenceTokenizer):
     ) -> Dict[str, torch.Tensor]:
         if isinstance(sequences, str):
             sequences = [sequences]
+        sequences = [
+            f"{self.tokenizer.aa_cls_token}{sequence}{self.tokenizer.aa_eos_token}"
+            for sequence in sequences
+        ]
         kwargs.setdefault("return_tensors", "pt")
         kwargs.setdefault("padding", "max_length")
         kwargs.setdefault("truncation", True)
-        kwargs.setdefault("add_special_tokens", True)
+        kwargs["add_special_tokens"] = False
         tokenized = self.tokenizer(sequences, **kwargs)
         return tokenized
 
@@ -46,8 +50,12 @@ class DPLM2TokenizerWrapper(BaseSequenceTokenizer):
 class DPLM2ForEmbedding(nn.Module):
     def __init__(self, model_path: str, dtype: torch.dtype = None):
         super().__init__()
-        self.dplm2 = DPLM2ForMaskedLM.from_pretrained(model_path, dtype=dtype, attn_backend="flex")
-        self.dplm2.attn_backend = "flex"
+        self.dplm2 = load_fastplms_model(
+            DPLM2ForMaskedLM,
+            model_path,
+            dtype=dtype,
+            attn_implementation="sdpa",
+        )
 
     def forward(
         self,
@@ -76,17 +84,23 @@ class DPLM2ForEmbedding(nn.Module):
 
 
 def get_dplm2_tokenizer(preset: str, model_path: str = None):
-    return DPLM2TokenizerWrapper(EsmTokenizer.from_pretrained("facebook/esm2_t6_8M_UR50D"))
+    return DPLM2TokenizerWrapper(
+        DPLM2Tokenizer.from_pretrained(model_path or presets[preset])
+    )
 
 
 def build_dplm2_model(preset: str, masked_lm: bool = False, dtype: torch.dtype = None, model_path: str = None, **kwargs):
     model_path = model_path or presets[preset]
     if masked_lm:
-        model = DPLM2ForMaskedLM.from_pretrained(model_path, dtype=dtype, attn_backend="flex").eval()
-        model.attn_backend = "flex"
+        model = load_fastplms_model(
+            DPLM2ForMaskedLM,
+            model_path,
+            dtype=dtype,
+            attn_implementation="sdpa",
+        ).eval()
     else:
         model = DPLM2ForEmbedding(model_path, dtype=dtype).eval()
-    tokenizer = get_dplm2_tokenizer(preset)
+    tokenizer = get_dplm2_tokenizer(preset, model_path=model_path)
     return model, tokenizer
 
 
@@ -100,24 +114,30 @@ def get_dplm2_for_training(
 ):
     model_path = model_path or presets[preset]
     if hybrid:
-        model = DPLM2ForMaskedLM.from_pretrained(model_path, dtype=dtype, attn_backend="flex").eval()
+        model = load_fastplms_model(
+            DPLM2ForMaskedLM,
+            model_path,
+            dtype=dtype,
+            attn_implementation="sdpa",
+        ).eval()
     else:
         if tokenwise:
-            model = DPLM2ForTokenClassification.from_pretrained(
+            model = load_fastplms_model(
+                DPLM2ForTokenClassification,
                 model_path,
                 num_labels=num_labels,
                 dtype=dtype,
-                attn_backend="flex",
+                attn_implementation="sdpa",
             ).eval()
         else:
-            model = DPLM2ForSequenceClassification.from_pretrained(
+            model = load_fastplms_model(
+                DPLM2ForSequenceClassification,
                 model_path,
                 num_labels=num_labels,
                 dtype=dtype,
-                attn_backend="flex",
+                attn_implementation="sdpa",
             ).eval()
-    model.attn_backend = "flex"
-    tokenizer = get_dplm2_tokenizer(preset)
+    tokenizer = get_dplm2_tokenizer(preset, model_path=model_path)
     return model, tokenizer
 
 

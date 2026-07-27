@@ -20,8 +20,21 @@ def _copy_runtime_code(save_dir: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     src_package_dir = repo_root / "src" / "protify"
     dst_package_dir = save_dir / "protify"
+    excluded_directories = {
+        ".cache",
+        "__pycache__",
+        "benchmarks",
+        "fastplms",
+        "logs",
+        "scripts",
+        "testing_suite",
+    }
     for src_file in src_package_dir.rglob("*.py"):
         relative_path = src_file.relative_to(src_package_dir)
+        if any(part in excluded_directories for part in relative_path.parts[:-1]):
+            continue
+        if not src_file.is_file():
+            continue
         dst_file = dst_package_dir / relative_path
         dst_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_file, dst_file)

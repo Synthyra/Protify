@@ -1,11 +1,12 @@
 pytest
-torch>=2.5.1
-torchvision
+torch==2.13.0
 tensorflow==2.20.0
-transformers==4.57.6
+transformers==5.13.0
+huggingface-hub>=0.34,<2
+tokenizers>=0.22,<0.23
+safetensors>=0.5,<1
 accelerate==1.12.0
 datasets==4.5.0
-hf_transfer==0.1.9
 peft
 tf-keras
 torchinfo
@@ -13,8 +14,9 @@ torchmetrics
 scikit-learn==1.5.0
 scipy>=1.13.1
 pyarrow
-einops
+einops>=0.8,<1
 numpy==1.26.4
+tqdm>=4.67,<5
 networkx>=3.4.2
 xgboost
 lightgbm

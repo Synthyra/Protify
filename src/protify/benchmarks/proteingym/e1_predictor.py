@@ -8,11 +8,15 @@ from typing import Dict, Iterator, List, Tuple, TypedDict, Union
 import torch
 from tqdm import tqdm
 
-_FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'fastplms')
+_FASTPLMS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'fastplms',
+    'src',
+)
 if _FASTPLMS not in sys.path:
     sys.path.insert(0, _FASTPLMS)
 
-from fastplms.e1.modeling_e1 import E1ForMaskedLM, E1MaskedLMOutputWithPast, E1BatchPreparer, get_context, DataPrepConfig, KVCache
+from fastplms.models.e1.modeling_e1 import E1ForMaskedLM, E1MaskedLMOutputWithPast, E1BatchPreparer, get_context, DataPrepConfig, KVCache
 
 IndexedSequence = tuple[int, str]
 logger = logging.getLogger(__name__)

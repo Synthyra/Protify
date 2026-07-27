@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
-# NOTE: switch to cudnn-devel if you need to compile CUDA extensions (e.g. flash-attn from source)
-FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
+# FastPLMs 1.0 validates PyTorch 2.13 against CUDA 13.0. The devel image also
+# supplies ptxas for compiled attention kernels, which PyTorch no longer bundles.
+FROM nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04@sha256:8b2705ea7a8653ad3451b46ab835eced92d77b44e671b9cf3ad4f95fbb2efe5e
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONPATH=/app \
@@ -9,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     TF_ENABLE_ONEDNN_OPTS=0 \
     TOKENIZERS_PARALLELISM=true \
     PROJECT_ROOT=/workspace \
-    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HF_XET_HIGH_PERFORMANCE=1 \
     DISABLE_PANDERA_IMPORT_WARNING=True \
     HF_HOME=/workspace/.cache/huggingface \
     TORCH_HOME=/workspace/.cache/torch \
@@ -33,9 +34,8 @@ WORKDIR /app
 COPY requirements.txt .
 
 RUN pip install --upgrade pip setuptools
+RUN pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cu130
 RUN pip install -r requirements.txt
-RUN pip install --force-reinstall torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
-RUN pip install numpy==1.26.4
 
 COPY . .
 

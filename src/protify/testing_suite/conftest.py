@@ -10,11 +10,15 @@ collect_ignore = ["embedding_test.py"]
 
 
 def _normalize_fastplms_imports() -> None:
-    fastplms_root = os.path.abspath(
+    fastplms_repository = os.path.abspath(
         os.path.join(os.path.dirname(os.path.dirname(__file__)), "fastplms")
     )
+    fastplms_root = os.path.join(fastplms_repository, "src")
     fastplms_package = os.path.join(fastplms_root, "fastplms")
-    assert os.path.isdir(fastplms_package), f"FastPLMs package not found: {fastplms_package}"
+    assert os.path.isfile(os.path.join(fastplms_package, "__init__.py")), (
+        f"FastPLMs 1.0 package not found: {fastplms_package}. "
+        "Run `git submodule update --init --recursive`."
+    )
     if fastplms_root in sys.path:
         sys.path.remove(fastplms_root)
     sys.path.insert(0, fastplms_root)

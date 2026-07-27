@@ -37,13 +37,13 @@ all_presets_with_paths = {
     'GLM2-650': 'tattabio/gLM2_650M',
     'GLM2-GAIA': 'tattabio/gLM2_650M_embed',
     # DPLM models (from dplm.py)
-    'DPLM-150': 'airkingbd/dplm_150m',
-    'DPLM-650': 'airkingbd/dplm_650m',
-    'DPLM-3B': 'airkingbd/dplm_3b',
+    'DPLM-150': 'Synthyra/DPLM-150M',
+    'DPLM-650': 'Synthyra/DPLM-650M',
+    'DPLM-3B': 'Synthyra/DPLM-3B',
     # DPLM2 models (from dplm2.py)
-    'DPLM2-150': 'airkingbd/dplm2_150m',
-    'DPLM2-650': 'airkingbd/dplm2_650m',
-    'DPLM2-3B': 'airkingbd/dplm2_3b',
+    'DPLM2-150': 'Synthyra/DPLM2-150M',
+    'DPLM2-650': 'Synthyra/DPLM2-650M',
+    'DPLM2-3B': 'Synthyra/DPLM2-3B',
     # AMPLIFY models (from amplify.py)
     'AMPLIFY-120': 'GleghornLab/AMPLIFY_120M',
     'AMPLIFY-350': 'GleghornLab/AMPLIFY_350M',

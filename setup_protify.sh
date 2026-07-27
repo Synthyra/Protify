@@ -22,9 +22,9 @@ pip install pip setuptools -U
 echo "Installing requirements"
 pip install -r requirements.txt -U
 
-# Install torch and torchvision
-echo "Installing torch and torchvision..."
-pip install --force-reinstall torch torchvision --index-url https://download.pytorch.org/whl/cu128 -U
+# Reinstall the FastPLMs 1.0 validation build from the CUDA wheel index.
+echo "Installing PyTorch 2.13..."
+pip install --force-reinstall torch==2.13.0 --index-url https://download.pytorch.org/whl/cu130
 pip install --force-reinstall numpy==1.26.4
 
 # List installed packages for verification

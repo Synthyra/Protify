@@ -5,12 +5,12 @@ import torch
 import torch.nn as nn
 from typing import Optional, Union, List, Dict
 
-from .utils import ensure_fastplms_submodule_on_path, select_hidden_state
+from .utils import ensure_fastplms_submodule_on_path, load_fastplms_model, select_hidden_state
 
 
 ensure_fastplms_submodule_on_path()
 
-from fastplms.esm2.modeling_fastesm import (
+from fastplms.models.esm2.modeling_fastesm import (
     FastEsmModel,
     FastEsmForMaskedLM,
     FastEsmForSequenceClassification,
@@ -50,8 +50,7 @@ class ESM2TokenizerWrapper(BaseSequenceTokenizer):
 class FastEsmForEmbedding(nn.Module):
     def __init__(self, model_path: str, dtype: torch.dtype = None):
         super().__init__()
-        self.esm = FastEsmModel.from_pretrained(model_path, dtype=dtype, attn_backend="flex")
-        self.esm.attn_backend = "flex"
+        self.esm = load_fastplms_model(FastEsmModel, model_path, dtype=dtype)
 
     def forward(
             self,
@@ -80,41 +79,39 @@ class FastEsmForEmbedding(nn.Module):
 
 
 def get_esm2_tokenizer(preset: str, model_path: str = None):
-    return ESM2TokenizerWrapper(EsmTokenizer.from_pretrained('facebook/esm2_t6_8M_UR50D'))
+    return ESM2TokenizerWrapper(EsmTokenizer.from_pretrained(model_path or presets[preset]))
 
 
 def build_esm2_model(preset: str, masked_lm: bool = False, dtype: torch.dtype = None, model_path: str = None, **kwargs):
     path = model_path or presets[preset]
     if masked_lm:
-        model = FastEsmForMaskedLM.from_pretrained(path, dtype=dtype, attn_backend="flex").eval()
-        model.attn_backend = "flex"
+        model = load_fastplms_model(FastEsmForMaskedLM, path, dtype=dtype).eval()
     else:
         model = FastEsmForEmbedding(path, dtype=dtype).eval()
-    tokenizer = get_esm2_tokenizer(preset)
+    tokenizer = get_esm2_tokenizer(preset, model_path=path)
     return model, tokenizer
 
 
 def get_esm2_for_training(preset: str, tokenwise: bool = False, num_labels: int = None, hybrid: bool = False, dtype: torch.dtype = None, model_path: str = None):
     model_path = model_path or presets[preset]
     if hybrid:
-        model = FastEsmModel.from_pretrained(model_path, dtype=dtype, attn_backend="flex").eval()
+        model = load_fastplms_model(FastEsmModel, model_path, dtype=dtype).eval()
     else:
         if tokenwise:
-            model = FastEsmForTokenClassification.from_pretrained(
+            model = load_fastplms_model(
+                FastEsmForTokenClassification,
                 model_path,
                 num_labels=num_labels,
                 dtype=dtype,
-                attn_backend="flex",
             ).eval()
         else:
-            model = FastEsmForSequenceClassification.from_pretrained(
+            model = load_fastplms_model(
+                FastEsmForSequenceClassification,
                 model_path,
                 num_labels=num_labels,
                 dtype=dtype,
-                attn_backend="flex",
             ).eval()
-    model.attn_backend = "flex"
-    tokenizer = get_esm2_tokenizer(preset)
+    tokenizer = get_esm2_tokenizer(preset, model_path=model_path)
     return model, tokenizer
 
 

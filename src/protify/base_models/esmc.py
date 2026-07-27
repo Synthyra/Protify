@@ -5,19 +5,19 @@ import torch
 import torch.nn as nn
 from typing import Optional, Union, List, Dict
 
-from .utils import ensure_fastplms_submodule_on_path, select_hidden_state
+from .utils import ensure_fastplms_submodule_on_path, load_fastplms_model, select_hidden_state
 
 
 ensure_fastplms_submodule_on_path()
 
-from fastplms.esm_plusplus.modeling_esm_plusplus import (
+from fastplms.models.esm_plusplus.modeling_esm_plusplus import (
     ESMplusplusModel,
     ESMplusplusForMaskedLM,
     ESMplusplusForSequenceClassification,
     ESMplusplusForTokenClassification,
+    EsmSequenceTokenizer,
 )
 from .base_tokenizer import BaseSequenceTokenizer
-from .esmc_utils import EsmSequenceTokenizer
 
 
 presets = {
@@ -45,8 +45,7 @@ class ESMTokenizerWrapper(BaseSequenceTokenizer):
 class ESMplusplusForEmbedding(nn.Module):
     def __init__(self, model_path: str, dtype: torch.dtype = None):
         super().__init__()
-        self.esm = ESMplusplusModel.from_pretrained(model_path, dtype=dtype, attn_backend="flex")
-        self.esm.attn_backend = "flex"
+        self.esm = load_fastplms_model(ESMplusplusModel, model_path, dtype=dtype)
 
     def forward(
             self,
@@ -82,8 +81,7 @@ def get_esmc_tokenizer(preset: str, model_path: str = None):
 def build_esmc_model(preset: str, masked_lm: bool = False, dtype: torch.dtype = None, model_path: str = None, **kwargs):
     path = model_path or presets[preset]
     if masked_lm:
-        model = ESMplusplusForMaskedLM.from_pretrained(path, dtype=dtype, attn_backend="flex").eval()
-        model.attn_backend = "flex"
+        model = load_fastplms_model(ESMplusplusForMaskedLM, path, dtype=dtype).eval()
     else:
         model = ESMplusplusForEmbedding(path, dtype=dtype).eval()
     tokenizer = get_esmc_tokenizer(preset)
@@ -93,23 +91,22 @@ def build_esmc_model(preset: str, masked_lm: bool = False, dtype: torch.dtype = 
 def get_esmc_for_training(preset: str, tokenwise: bool = False, num_labels: int = None, hybrid: bool = False, dtype: torch.dtype = None, model_path: str = None):
     model_path = model_path or presets[preset]
     if hybrid:
-        model = ESMplusplusModel.from_pretrained(model_path, dtype=dtype, attn_backend="flex").eval()
+        model = load_fastplms_model(ESMplusplusModel, model_path, dtype=dtype).eval()
     else:
         if tokenwise:
-            model = ESMplusplusForTokenClassification.from_pretrained(
+            model = load_fastplms_model(
+                ESMplusplusForTokenClassification,
                 model_path,
                 num_labels=num_labels,
                 dtype=dtype,
-                attn_backend="flex",
             ).eval()
         else:
-            model = ESMplusplusForSequenceClassification.from_pretrained(
+            model = load_fastplms_model(
+                ESMplusplusForSequenceClassification,
                 model_path,
                 num_labels=num_labels,
                 dtype=dtype,
-                attn_backend="flex",
             ).eval()
-    model.attn_backend = "flex"
     tokenizer = get_esmc_tokenizer(preset)
     return model, tokenizer
 

@@ -25,7 +25,7 @@ From the repository root:
 ```bash
 git clone https://github.com/Gleghorn-Lab/Protify.git
 cd Protify
-git submodule update --init --remote --recursive
+git submodule update --init --recursive
 py -m pip install -r requirements.txt
 ```
 

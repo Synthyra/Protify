@@ -1,4 +1,4 @@
-"""Verify that FastPLMs submodule imports resolve correctly after the rehaul."""
+"""Verify that Protify resolves the FastPLMs 1.0 submodule source contract."""
 
 import sys
 import os
@@ -7,10 +7,11 @@ import pytest
 
 def _ensure_fastplms_on_path():
     """Mirror the _FASTPLMS sys.path logic used by base_models/*.py."""
-    # From base_models: one level up from testing_suite, then into fastplms
+    # FastPLMs 1.0 is a source repository rather than an installable distribution.
     fastplms_root = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "fastplms",
+        "src",
     )
     if fastplms_root in sys.path:
         sys.path.remove(fastplms_root)
@@ -35,10 +36,20 @@ def test_fastplms_root_exists():
     assert os.path.isdir(os.path.join(FASTPLMS_ROOT, "fastplms")), (
         "fastplms/ package directory missing inside submodule root"
     )
+    assert os.path.isfile(os.path.join(FASTPLMS_ROOT, "fastplms", "models.toml"))
+
+
+def test_fastplms_version_and_registry():
+    import fastplms
+    from fastplms import get_model_registry
+
+    assert fastplms.__version__ == "1.0.0"
+    registry = get_model_registry()
+    assert registry.families["dplm2"].attention == ("sdpa",)
 
 
 def test_import_esm2():
-    from fastplms.esm2.modeling_fastesm import (
+    from fastplms.models.esm2.modeling_fastesm import (
         FastEsmModel,
         FastEsmForMaskedLM,
         FastEsmForSequenceClassification,
@@ -49,7 +60,7 @@ def test_import_esm2():
 
 
 def test_import_esm_plusplus():
-    from fastplms.esm_plusplus.modeling_esm_plusplus import (
+    from fastplms.models.esm_plusplus.modeling_esm_plusplus import (
         ESMplusplusModel,
         ESMplusplusForMaskedLM,
         ESMplusplusForSequenceClassification,
@@ -60,7 +71,7 @@ def test_import_esm_plusplus():
 
 
 def test_import_dplm():
-    from fastplms.dplm.modeling_dplm import (
+    from fastplms.models.dplm.modeling_dplm import (
         DPLMForMaskedLM,
         DPLMForSequenceClassification,
         DPLMForTokenClassification,
@@ -70,7 +81,7 @@ def test_import_dplm():
 
 
 def test_import_dplm2():
-    from fastplms.dplm2.modeling_dplm2 import (
+    from fastplms.models.dplm2.modeling_dplm2 import (
         DPLM2ForMaskedLM,
         DPLM2ForSequenceClassification,
         DPLM2ForTokenClassification,
@@ -80,7 +91,7 @@ def test_import_dplm2():
 
 
 def test_import_e1():
-    from fastplms.e1.modeling_e1 import (
+    from fastplms.models.e1.modeling_e1 import (
         E1Model,
         E1ForMaskedLM,
         E1ForSequenceClassification,
@@ -108,9 +119,21 @@ def test_import_attention():
 
 
 def test_import_embedding_mixin():
-    from fastplms.embedding_mixin import Pooler, EmbeddingMixin, ProteinDataset, parse_fasta, build_collator
-    for obj in (Pooler, EmbeddingMixin, ProteinDataset, parse_fasta, build_collator):
+    from fastplms.embeddings import (
+        EmbeddingMixin,
+        EmbeddingResult,
+        Pooler,
+        embed_dataset,
+        parse_fasta,
+    )
+    for obj in (Pooler, EmbeddingMixin, EmbeddingResult, embed_dataset, parse_fasta):
         assert obj is not None
+
+
+def test_import_dplm2_tokenizer():
+    from fastplms.models.dplm2.tokenization_dplm2 import DPLM2Tokenizer
+
+    assert DPLM2Tokenizer is not None
 
 
 def test_base_models_import_esm2():

@@ -6,3 +6,9 @@
 
 # Keep dependency manifest used during build
 !requirements.txt
+
+# FastPLMs 1.0 runtime metadata and its bundled E1 tokenizer are non-Python
+# assets required by the source package.
+!src/protify/fastplms/kernels.lock
+!src/protify/fastplms/src/fastplms/models.toml
+!src/protify/fastplms/src/fastplms/models/e1/tokenizer.json

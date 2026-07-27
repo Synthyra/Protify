@@ -10,11 +10,15 @@ import torch
 from tqdm import tqdm
 from transformers.utils import logging
 
-_FASTPLMS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'fastplms')
+_FASTPLMS = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    'fastplms',
+    'src',
+)
 if _FASTPLMS not in sys.path:
     sys.path.insert(0, _FASTPLMS)
 
-from fastplms.e1.modeling_e1 import E1ForMaskedLM, DataPrepConfig
+from fastplms.models.e1.modeling_e1 import E1ForMaskedLM, DataPrepConfig
 from .e1_predictor import E1Predictor
 
 logger = logging.get_logger(__name__)

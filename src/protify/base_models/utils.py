@@ -1,6 +1,6 @@
 import os
 import sys
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -8,12 +8,24 @@ from peft import LoraConfig, LoraModel
 
 
 def ensure_fastplms_submodule_on_path() -> str:
-    fastplms_root = os.path.join(
+    fastplms_repository = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         'fastplms',
     )
-    if fastplms_root in sys.path:
-        sys.path.remove(fastplms_root)
+    fastplms_root = os.path.join(fastplms_repository, 'src')
+    fastplms_package = os.path.join(fastplms_root, 'fastplms')
+    if not os.path.isfile(os.path.join(fastplms_package, '__init__.py')):
+        raise ImportError(
+            "FastPLMs 1.0 source package is missing. Initialize the submodule with "
+            "`git submodule update --init --recursive`."
+        )
+
+    normalized_root = os.path.normcase(os.path.abspath(fastplms_root))
+    sys.path[:] = [
+        path
+        for path in sys.path
+        if os.path.normcase(os.path.abspath(path)) != normalized_root
+    ]
     sys.path.insert(0, fastplms_root)
 
     if "fastplms" not in sys.modules:
@@ -29,9 +41,9 @@ def ensure_fastplms_submodule_on_path() -> str:
     if "__path__" in fastplms_module.__dict__:
         module_locations.extend(list(fastplms_module.__dict__["__path__"]))
 
-    fastplms_root_abs = os.path.abspath(os.path.join(fastplms_root, 'fastplms'))
+    fastplms_root_abs = os.path.normcase(os.path.abspath(fastplms_package))
     loaded_from_submodule = any(
-        os.path.abspath(str(location)).startswith(fastplms_root_abs)
+        os.path.normcase(os.path.abspath(str(location))).startswith(fastplms_root_abs)
         for location in module_locations
     )
     if loaded_from_submodule:
@@ -41,6 +53,39 @@ def ensure_fastplms_submodule_on_path() -> str:
         if module_name == "fastplms" or module_name.startswith("fastplms."):
             del sys.modules[module_name]
     return fastplms_root
+
+
+def load_fastplms_model(
+    model_class: Type[Any],
+    model_path: str,
+    *,
+    dtype: Optional[torch.dtype] = None,
+    attn_implementation: str = "flex_attention",
+    **kwargs: Any,
+) -> nn.Module:
+    """Load a FastPLMs 1.0 model through the Transformers attention contract."""
+    if dtype not in (None, torch.float32, torch.bfloat16):
+        raise ValueError(
+            "FastPLMs 1.0 supports model_dtype values float32 and bfloat16; "
+            f"received {dtype}."
+        )
+
+    load_kwargs = dict(kwargs)
+    if dtype is not None:
+        module_name = model_class.__module__
+        fp32_parameter_families = (
+            "fastplms.models.esm2.",
+            "fastplms.models.dplm.",
+            "fastplms.models.dplm2.",
+        )
+        load_kwargs["dtype"] = (
+            torch.float32
+            if dtype is torch.bfloat16
+            and module_name.startswith(fp32_parameter_families)
+            else dtype
+        )
+    load_kwargs["attn_implementation"] = attn_implementation
+    return model_class.from_pretrained(model_path, **load_kwargs)
 
 
 def select_hidden_state(

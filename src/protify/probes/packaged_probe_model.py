@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from transformers import AutoModel, PreTrainedModel, PretrainedConfig
+from transformers import AutoConfig, AutoModel, PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassifierOutput
 from typing import Any, Dict, Optional
 
@@ -63,7 +63,16 @@ class PackagedProbeModel(PreTrainedModel):
             model_path = all_presets_with_paths[self.config.base_model_name]
         else:
             model_path = self.config.base_model_name
-        model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
+
+        # Transformers 5 initializes custom architectures on the meta device
+        # before loading the outer checkpoint. A nested from_pretrained call is
+        # rejected in that context, and the packaged checkpoint already contains
+        # the backbone weights, so build only the backbone structure on meta.
+        if torch.get_default_device().type == "meta":
+            backbone_config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            model = AutoModel.from_config(backbone_config, trust_remote_code=True)
+        else:
+            model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
         model.eval()
         return model
 
