@@ -1,23 +1,33 @@
 import argparse
 import json
 import time
-
 import torch
+from collections.abc import Sequence
 from torch.utils.data import DataLoader, TensorDataset
 
 try:
     from probes.linear_probe import LinearProbe, LinearProbeConfig
     from probes.parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
     from probes.parallel_probe_batches import ParallelRunDataset
-    from probes.parallel_probe_plan import build_seed_run_specs, estimate_parallel_probe_plan, plan_parallel_probe_runs
+    from probes.parallel_probe_plan import (
+        ParallelProbeExecutionPlan,
+        build_seed_run_specs,
+        estimate_parallel_probe_plan,
+        plan_parallel_probe_runs,
+    )
 except ImportError:
     from protify.probes.linear_probe import LinearProbe, LinearProbeConfig
     from protify.probes.parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
     from protify.probes.parallel_probe_batches import ParallelRunDataset
-    from protify.probes.parallel_probe_plan import build_seed_run_specs, estimate_parallel_probe_plan, plan_parallel_probe_runs
+    from protify.probes.parallel_probe_plan import (
+        ParallelProbeExecutionPlan,
+        build_seed_run_specs,
+        estimate_parallel_probe_plan,
+        plan_parallel_probe_runs,
+    )
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark sequential vs vectorized linear probe seeds.")
     parser.add_argument("--num_samples", type=int, default=8192)
     parser.add_argument("--input_size", type=int, default=320)
@@ -50,7 +60,7 @@ def parse_args():
     return validate_args(parser.parse_args())
 
 
-def validate_args(args):
+def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     assert args.num_samples > 0, "num_samples must be positive."
     assert args.input_size > 0, "input_size must be positive."
     assert args.hidden_size > 0, "hidden_size must be positive."
@@ -75,29 +85,40 @@ def resolve_device(device_arg: str) -> torch.device:
     return torch.device(device_arg)
 
 
-def make_dataset(args, device: torch.device):
+def make_dataset(args: argparse.Namespace, device: torch.device) -> TensorDataset:
+    # n is sample count and d is pooled embedding width.
     data_device = device if args.data_on_device else torch.device("cpu")
     generator = torch.Generator(device=data_device)
     generator.manual_seed(args.seed)
-    embeddings = torch.randn(args.num_samples, args.input_size, generator=generator, device=data_device)
+    embeddings = torch.randn(  # (n, d)
+        args.num_samples,
+        args.input_size,
+        generator=generator,
+        device=data_device,
+    )
     if args.task_type == "singlelabel":
-        labels = torch.randint(args.num_labels, (args.num_samples,), generator=generator, device=data_device)
+        labels = torch.randint(  # (n,)
+            args.num_labels,
+            (args.num_samples,),
+            generator=generator,
+            device=data_device,
+        )
     else:
-        labels = torch.randn(args.num_samples, 1, generator=generator, device=data_device)
+        labels = torch.randn(args.num_samples, 1, generator=generator, device=data_device)  # (n, 1)
     return TensorDataset(embeddings, labels)
 
 
-def make_loader(dataset, batch_size: int, seed: int) -> DataLoader:
+def make_loader(dataset: TensorDataset, batch_size: int, seed: int) -> DataLoader:
     generator = torch.Generator()
     generator.manual_seed(seed)
     return DataLoader(dataset, batch_size=batch_size, shuffle=True, generator=generator, num_workers=0)
 
 
-def run_seeds(args):
+def run_seeds(args: argparse.Namespace) -> list[int]:
     return [args.seed + run_idx for run_idx in range(args.num_runs)]
 
 
-def parallel_probe_trainer_key(args) -> str:
+def parallel_probe_trainer_key(args: argparse.Namespace) -> str:
     return (
         f"epochs={args.epochs}|"
         f"batch={args.batch_size}|"
@@ -108,7 +129,7 @@ def parallel_probe_trainer_key(args) -> str:
     )
 
 
-def build_synthetic_plan(args):
+def build_synthetic_plan(args: argparse.Namespace) -> ParallelProbeExecutionPlan:
     run_specs = build_seed_run_specs(
         run_id_prefix="synthetic/synthetic-model",
         base_seed=args.seed,
@@ -133,7 +154,10 @@ def build_synthetic_plan(args):
     return plan_parallel_probe_runs(run_specs, max_parallel_group_size=args.parallel_max_group_size)
 
 
-def plan_summary_dict(plan, args=None):
+def plan_summary_dict(
+    plan: ParallelProbeExecutionPlan,
+    args: argparse.Namespace | None = None,
+) -> dict[str, object]:
     if args is None:
         estimate = estimate_parallel_probe_plan(plan)
     else:
@@ -170,7 +194,7 @@ def plan_summary_dict(plan, args=None):
     }
 
 
-def benchmark_config_dict(args):
+def benchmark_config_dict(args: argparse.Namespace) -> dict[str, object]:
     return {
         "num_samples": args.num_samples,
         "input_size": args.input_size,
@@ -189,7 +213,7 @@ def benchmark_config_dict(args):
     }
 
 
-def speedup_formula_dict():
+def speedup_formula_dict() -> dict[str, str]:
     return {
         "sequential_total_seconds": "sequential_seconds",
         "parallel_total_seconds": "parallel_seconds",
@@ -201,7 +225,10 @@ def speedup_formula_dict():
     }
 
 
-def benchmark_comparison_contract(args, plan):
+def benchmark_comparison_contract(
+    args: argparse.Namespace,
+    plan: ParallelProbeExecutionPlan,
+) -> dict[str, object]:
     return {
         "sequential_trainer_invocations": plan.total_runs,
         "parallel_trainer_invocations": plan.trainer_invocations,
@@ -230,7 +257,10 @@ def benchmark_comparison_contract(args, plan):
     }
 
 
-def plan_only_result(args, plan):
+def plan_only_result(
+    args: argparse.Namespace,
+    plan: ParallelProbeExecutionPlan,
+) -> dict[str, object]:
     result = benchmark_config_dict(args)
     result["plan_only"] = True
     result["plan"] = plan_summary_dict(plan, args)
@@ -238,7 +268,7 @@ def plan_only_result(args, plan):
     return result
 
 
-def parallel_seed_groups(args):
+def parallel_seed_groups(args: argparse.Namespace) -> tuple[tuple[int, ...], ...]:
     seeds = run_seeds(args)
     if args.parallel_max_group_size is None:
         return (tuple(seeds),)
@@ -248,7 +278,13 @@ def parallel_seed_groups(args):
     return tuple(groups)
 
 
-def make_parallel_loader(args, dataset, seeds):
+def make_parallel_loader(
+    args: argparse.Namespace,
+    dataset: TensorDataset,
+    seeds: Sequence[int],
+) -> tuple[DataLoader, int]:
+    # Shared batches contain embeddings (b, d). Run-specific batches contain
+    # embeddings (b, r, d), where r is the number of seeds in this group.
     if args.parallel_batch_mode == "shared":
         return make_loader(dataset, args.batch_size, args.seed), 0
     parallel_dataset = ParallelRunDataset(
@@ -266,12 +302,23 @@ def synchronize(device: torch.device) -> None:
         torch.cuda.synchronize()
 
 
-def move_batch(batch, device: torch.device):
+def move_batch(
+    batch: Sequence[torch.Tensor],
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Embeddings are (b, d) or (b, r, d). Labels are (b,), (b, 1),
+    # (b, r), or (b, r, 1), depending on task and batch mode.
     embeddings, labels = batch
-    return embeddings.to(device, non_blocking=True), labels.to(device, non_blocking=True)
+    moved_embeddings = embeddings.to(device, non_blocking=True)  # (b, d) or (b, r, d)
+    moved_labels = labels.to(device, non_blocking=True)  # (b,), (b, 1), (b, r), or (b, r, 1)
+    return moved_embeddings, moved_labels
 
 
-def train_sequential(args, dataset, device: torch.device) -> float:
+def train_sequential(
+    args: argparse.Namespace,
+    dataset: TensorDataset,
+    device: torch.device,
+) -> float:
     start = time.perf_counter()
     for run_idx in range(args.num_runs):
         run_seed = args.seed + run_idx
@@ -293,16 +340,20 @@ def train_sequential(args, dataset, device: torch.device) -> float:
         model.train()
         for _epoch in range(args.epochs):
             for batch in loader:
-                embeddings, labels = move_batch(batch, device)
+                embeddings, labels = move_batch(batch, device)  # (b, d), (b,) or (b, 1)
                 optimizer.zero_grad(set_to_none=True)
-                loss = model(embeddings=embeddings, labels=labels).loss
+                loss = model(embeddings=embeddings, labels=labels).loss  # ()
                 loss.backward()
                 optimizer.step()
     synchronize(device)
     return time.perf_counter() - start
 
 
-def train_parallel(args, dataset, device: torch.device):
+def train_parallel(
+    args: argparse.Namespace,
+    dataset: TensorDataset,
+    device: torch.device,
+) -> tuple[float, int]:
     total_seconds = 0.0
     peak_index_memory_bytes = 0
     for seeds in parallel_seed_groups(args):
@@ -327,9 +378,11 @@ def train_parallel(args, dataset, device: torch.device):
         model.train()
         for _epoch in range(args.epochs):
             for batch in loader:
+                # Shared: (b, d) plus (b,) or (b, 1). Run-specific:
+                # (b, r, d) plus (b, r) or (b, r, 1).
                 embeddings, labels = move_batch(batch, device)
                 optimizer.zero_grad(set_to_none=True)
-                loss = model(embeddings=embeddings, labels=labels).loss
+                loss = model(embeddings=embeddings, labels=labels).loss  # ()
                 loss.backward()
                 optimizer.step()
         synchronize(device)

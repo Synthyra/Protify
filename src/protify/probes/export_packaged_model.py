@@ -1,7 +1,8 @@
 import shutil
 import tempfile
+
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any
 
 from huggingface_hub import HfApi
 from torch import nn
@@ -37,12 +38,10 @@ def _is_supported_base_model(source_model_name: str) -> bool:
         return False
     if "onehot" in model_name_l:
         return False
-    if "vec2vec" in model_name_l:
-        return False
     return True
 
 
-def _extract_sep_token_id(tokenizer) -> Optional[int]:
+def _extract_sep_token_id(tokenizer: Any) -> int | None:
     try:
         tokenizer_backend = tokenizer.tokenizer
     except AttributeError:
@@ -83,13 +82,13 @@ def _copy_runtime_code(export_dir: Path) -> None:
 
 
 def _build_packaged_model(
-        trained_model: nn.Module,
-        source_model_name: str,
-        probe_args,
-        embedding_args,
-        tokenizer,
-        ppi: bool,
-    ) -> PackagedProbeModel:
+    trained_model: nn.Module,
+    source_model_name: str,
+    probe_args: Any,
+    embedding_args: Any,
+    tokenizer: Any,
+    ppi: bool,
+) -> PackagedProbeModel:
     if isinstance(trained_model, HybridProbe):
         base_model = trained_model.model
         probe_model = trained_model.probe
@@ -118,17 +117,17 @@ def _build_packaged_model(
 
 
 def export_packaged_model_to_hub(
-        trained_model: nn.Module,
-        source_model_name: str,
-        probe_args,
-        embedding_args,
-        tokenizer,
-        repo_id: str,
-        model_card: str,
-        ppi: bool = False,
-        private: bool = True,
-        hf_token: Optional[str] = None,
-    ) -> Tuple[bool, str]:
+    trained_model: nn.Module,
+    source_model_name: str,
+    probe_args: Any,
+    embedding_args: Any,
+    tokenizer: Any,
+    repo_id: str,
+    model_card: str,
+    ppi: bool = False,
+    private: bool = True,
+    hf_token: str | None = None,
+) -> tuple[bool, str]:
     if not _is_supported_base_model(source_model_name):
         return False, f"Packaged export is not supported for base model: {source_model_name}"
 

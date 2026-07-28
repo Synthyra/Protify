@@ -16,8 +16,8 @@ for path in (PROTIFY_ROOT, SRC_ROOT, REPO_ROOT):
 from src.protify.embedder import Embedder, EmbeddingArguments, get_embedding_filename
 
 
-RUN_GPU_SMOKE = "PROTIFY_GPU_SMOKE" in os.environ and os.environ["PROTIFY_GPU_SMOKE"] == "1"
-RUN_GPU_6B_SMOKE = "PROTIFY_GPU_6B_SMOKE" in os.environ and os.environ["PROTIFY_GPU_6B_SMOKE"] == "1"
+RUN_GPU_SMOKE = os.environ.get("PROTIFY_GPU_SMOKE") == "1"
+RUN_GPU_6B_SMOKE = os.environ.get("PROTIFY_GPU_6B_SMOKE") == "1"
 pytestmark = pytest.mark.skipif(
     not RUN_GPU_SMOKE and not RUN_GPU_6B_SMOKE,
     reason="Set PROTIFY_GPU_SMOKE=1 to run model-loading GPU embedding smokes.",
@@ -58,7 +58,7 @@ def test_gpu_embedding_hidden_state_smoke(tmp_path, model_name, hidden_state_ind
         autocast=True,
     )
 
-    embeddings = Embedder(args, sequences)(model_name)
+    embeddings = Embedder(args, sequences)(model_name)  # sequence -> (d,)
     filename = get_embedding_filename(
         model_name,
         False,
@@ -70,8 +70,9 @@ def test_gpu_embedding_hidden_state_smoke(tmp_path, model_name, hidden_state_ind
     assert save_path.exists()
     assert set(embeddings) == set(sequences)
     for sequence in sequences:
-        assert embeddings[sequence].ndim == 1
-        assert embeddings[sequence].numel() > 0
+        embedding = embeddings[sequence]  # (d,)
+        assert embedding.ndim == 1
+        assert embedding.numel() > 0
 
 
 def test_gpu_embedding_esmc_6b_smoke(tmp_path):
@@ -96,11 +97,12 @@ def test_gpu_embedding_esmc_6b_smoke(tmp_path):
         autocast=True,
     )
 
-    embeddings = Embedder(args, sequences)("ESMC-6B")
+    embeddings = Embedder(args, sequences)("ESMC-6B")  # sequence -> (d,)
     filename = get_embedding_filename("ESMC-6B", False, ["mean"])
     save_path = tmp_path / filename
 
     assert save_path.exists()
     assert set(embeddings) == set(sequences)
-    assert embeddings[sequences[0]].ndim == 1
-    assert embeddings[sequences[0]].numel() > 0
+    embedding = embeddings[sequences[0]]  # (d,)
+    assert embedding.ndim == 1
+    assert embedding.numel() > 0

@@ -22,11 +22,11 @@ def test_transformer_returns_attentions_and_s_max_from_2d_mask() -> None:
         rotary=True,
         attention_backend="flex",
     )
-    hidden_states = torch.randn(2, 4, 16)
+    hidden_states = torch.randn(2, 4, 16)  # (b=2, l=4, d=16)
     attention_mask = torch.tensor(
         [[1, 1, 1, 0], [1, 1, 1, 1]],
         dtype=torch.bool,
-    )
+    )  # (b=2, l=4)
 
     outputs = transformer(
         hidden_states=hidden_states,
@@ -35,6 +35,9 @@ def test_transformer_returns_attentions_and_s_max_from_2d_mask() -> None:
         output_hidden_states=True,
         output_s_max=True,
     )
+    # last_hidden_state: (b, l, d); each hidden state: (b, l, d);
+    # each attention map: (b, h=4, l, l); two s_max layer entries,
+    # each containing h=4 scalar tensors ()
 
     assert outputs.last_hidden_state.shape == (2, 4, 16)
     assert outputs.hidden_states is not None
@@ -58,7 +61,7 @@ def test_transformer_accepts_explicit_4d_attention_mask() -> None:
         rotary=True,
         attention_backend="sdpa",
     )
-    hidden_states = torch.randn(2, 4, 16)
+    hidden_states = torch.randn(2, 4, 16)  # (b=2, l=4, d=16)
     attention_mask_4d = torch.tensor(
         [
             [[
@@ -75,13 +78,14 @@ def test_transformer_accepts_explicit_4d_attention_mask() -> None:
             ]],
         ],
         dtype=torch.bool,
-    )
+    )  # (b=2, 1, l=4, l=4)
 
     outputs = transformer(
         hidden_states=hidden_states,
         attention_mask_4d=attention_mask_4d,
         output_s_max=True,
     )
+    # last_hidden_state: (b, l, d); one layer of h=4 scalar () s_max entries
 
     assert outputs.last_hidden_state.shape == (2, 4, 16)
     assert outputs.s_max is not None

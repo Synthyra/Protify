@@ -1,19 +1,13 @@
 import pandas as pd
-from typing import Optional
 from huggingface_hub import hf_hub_download
 
 
-def _load_parquet_by_dms(repo_id: str, dms_id: str) -> Optional[pd.DataFrame]:
-    """
-    Loads a single-assay parquet shard from the Hub at by_dms_id/{DMS_id}.parquet.
-    """
-    assay_files = []
+def _load_parquet_by_dms(repo_id: str, dms_id: str) -> pd.DataFrame:
+    """Load one ProteinGym assay shard from the Hub."""
     id_str = str(dms_id)
-    assay_files.append(f"by_dms_id/{id_str}.parquet")
-    for filename in assay_files:
-        local_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset")
-        df = pd.read_parquet(local_path)
-        return df
+    filename = f"by_dms_id/{id_str}.parquet"
+    local_path = hf_hub_download(repo_id=repo_id, filename=filename, repo_type="dataset")
+    return pd.read_parquet(local_path)
 
 
 def load_proteingym_dms(dms_id: str, mode: str, repo_id: str = "GleghornLab/ProteinGym_DMS") -> pd.DataFrame:

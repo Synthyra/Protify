@@ -1,7 +1,6 @@
 """Tests for model_components: MLP, SwiGLU, RotaryEmbedding, MultiHeadAttention."""
 
 import torch
-import pytest
 
 try:
     from src.protify.model_components.mlp import intermediate_correction_fn, SwiGLU, swiglu_ln_ffn
@@ -36,54 +35,53 @@ def test_intermediate_correction_fn_rounds_up() -> None:
 def test_swiglu_output_shape() -> None:
     torch.manual_seed(0)
     swiglu = SwiGLU()
-    x = torch.randn(2, 4, 32)
-    out = swiglu(x)
-    assert out.shape == (2, 4, 16)
+    X = torch.randn(2, 4, 32)  # (2, 4, 32)
+    output = swiglu(X)  # (2, 4, 16)
+    assert output.shape == (2, 4, 16)
 
 
 def test_swiglu_ln_ffn_output_shape() -> None:
     torch.manual_seed(0)
     ffn = swiglu_ln_ffn(hidden_size=16, expansion_ratio=8 / 3, dropout=0.0)
-    x = torch.randn(2, 4, 16)
-    out = ffn(x)
-    assert out.shape == (2, 4, 16)
+    X = torch.randn(2, 4, 16)  # (2, 4, 16)
+    output = ffn(X)  # (2, 4, 16)
+    assert output.shape == (2, 4, 16)
 
 
 def test_rotate_half_preserves_shape() -> None:
-    x = torch.randn(2, 4, 2, 8)
-    out = rotate_half(x)
-    assert out.shape == x.shape
+    X = torch.randn(2, 4, 2, 8)  # (2, 4, 2, 8)
+    output = rotate_half(X)  # (2, 4, 2, 8)
+    assert output.shape == X.shape
 
 
 def test_rotate_half_values() -> None:
     # For non-interleaved: cat(-x2, x1) where x1, x2 = chunk(2)
-    x = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
-    out = rotate_half(x)
-    expected = torch.tensor([[-3.0, -4.0, 1.0, 2.0]])
-    assert torch.allclose(out, expected)
+    X = torch.tensor([[1.0, 2.0, 3.0, 4.0]])  # (1, 4)
+    output = rotate_half(X)  # (1, 4)
+    expected = torch.tensor([[-3.0, -4.0, 1.0, 2.0]])  # (1, 4)
+    assert torch.allclose(output, expected)
 
 
 def test_rotary_embedding_output_shapes() -> None:
     torch.manual_seed(0)
     # dim is half of head_dim (operates on pairs)
     rotary = RotaryEmbedding(dim=4)
-    # shape: (batch, seq_len, n_heads, head_dim)
-    q = torch.randn(2, 4, 2, 8)
-    k = torch.randn(2, 4, 2, 8)
-    q_rot, k_rot = rotary(q, k)
-    assert q_rot.shape == q.shape
-    assert k_rot.shape == k.shape
+    Q = torch.randn(2, 4, 2, 8)  # (2, 4, 2, 8)
+    K = torch.randn(2, 4, 2, 8)  # (2, 4, 2, 8)
+    Q_rotated, K_rotated = rotary(Q, K)  # each (2, 4, 2, 8)
+    assert Q_rotated.shape == Q.shape
+    assert K_rotated.shape == K.shape
 
 
 def test_rotary_embedding_cache_grows() -> None:
     rotary = RotaryEmbedding(dim=4)
-    q_short = torch.randn(1, 2, 1, 8)
-    k_short = torch.randn(1, 2, 1, 8)
-    rotary(q_short, k_short)
+    Q_short = torch.randn(1, 2, 1, 8)  # (1, 2, 1, 8)
+    K_short = torch.randn(1, 2, 1, 8)  # (1, 2, 1, 8)
+    rotary(Q_short, K_short)  # returned tensors are each (1, 2, 1, 8)
     cached_len_1 = rotary._seq_len_cached
-    q_long = torch.randn(1, 8, 1, 8)
-    k_long = torch.randn(1, 8, 1, 8)
-    rotary(q_long, k_long)
+    Q_long = torch.randn(1, 8, 1, 8)  # (1, 8, 1, 8)
+    K_long = torch.randn(1, 8, 1, 8)  # (1, 8, 1, 8)
+    rotary(Q_long, K_long)  # returned tensors are each (1, 8, 1, 8)
     cached_len_2 = rotary._seq_len_cached
     assert cached_len_2 >= cached_len_1
 
@@ -91,17 +89,24 @@ def test_rotary_embedding_cache_grows() -> None:
 def test_multihead_attention_output_shape() -> None:
     torch.manual_seed(0)
     mha = MultiHeadAttention(hidden_size=16, n_heads=2, attention_backend="sdpa")
-    x = torch.randn(2, 4, 16)
-    out, _, _ = mha(x)
-    assert out.shape == (2, 4, 16)
+    X = torch.randn(2, 4, 16)  # (2, 4, 16)
+    output, _, _ = mha(X)  # (2, 4, 16)
+    assert output.shape == (2, 4, 16)
 
 
 def test_multihead_attention_with_2d_mask() -> None:
     torch.manual_seed(0)
     mha = MultiHeadAttention(hidden_size=16, n_heads=2, attention_backend="sdpa")
-    x = torch.randn(2, 4, 16)
-    mask_2d = torch.tensor([[1, 1, 1, 0], [1, 1, 1, 1]], dtype=torch.bool)
-    # Convert 2D mask to 4D for sdpa: (b, 1, 1, L)
-    mask_4d = mask_2d[:, None, None, :].expand(-1, -1, 4, -1)
-    out, _, _ = mha(x, attention_mask_4d=mask_4d)
-    assert out.shape == (2, 4, 16)
+    X = torch.randn(2, 4, 16)  # (2, 4, 16)
+    attention_mask_2d = torch.tensor(
+        [[1, 1, 1, 0], [1, 1, 1, 1]],
+        dtype=torch.bool,
+    )  # (2, 4)
+    attention_mask_4d = attention_mask_2d[:, None, None, :].expand(
+        -1,
+        -1,
+        4,
+        -1,
+    )  # (2, 1, 4, 4)
+    output, _, _ = mha(X, attention_mask_4d=attention_mask_4d)  # (2, 4, 16)
+    assert output.shape == (2, 4, 16)

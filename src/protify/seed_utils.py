@@ -6,8 +6,9 @@ random number generators used in the platform (torch, numpy, scikit-learn, rando
 """
 
 import os
-import time
 import random
+import time
+
 import numpy as np
 from typing import Optional
 
@@ -16,12 +17,7 @@ _GLOBAL_SEED: Optional[int] = None
 
 
 def get_global_seed() -> Optional[int]:
-    """
-    Get the currently set global seed.
-    
-    Returns:
-        The current global seed value, or None if not set.
-    """
+    """Return the current global seed, or None when no seed has been set."""
     return _GLOBAL_SEED
 
 
@@ -32,7 +28,7 @@ def set_cublas_workspace_config() -> None:
       - ":4096:8" (recommended)
       - ":16:8"   (minimal workspace)
     """
-    # Only set if not already provided by the environment/user
+    # An explicit environment value belongs to the caller.
     if "CUBLAS_WORKSPACE_CONFIG" not in os.environ:
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
@@ -40,23 +36,22 @@ def set_cublas_workspace_config() -> None:
 def seed_worker(worker_id: int) -> None:
     """Use with torch.utils.data.DataLoader(worker_init_fn=seed_worker) to sync NumPy/random per-worker."""
     import torch
+
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
 
 
 def dataloader_generator(seed: Optional[int]):
-    """
-    Use with torch.utils.data.DataLoader(generator=dataloader_generator(seed)) to sync NumPy/random per-worker.
-    """
+    """Build the seeded generator passed to ``DataLoader(generator=...)``."""
     import torch
-    
+
     if seed is None:
         seed = set_global_seed()
 
-    g = torch.Generator()
-    g.manual_seed(seed)
-    return g
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
 
 
 def set_global_seed(seed: Optional[int] = None) -> int:
@@ -73,44 +68,39 @@ def set_global_seed(seed: Optional[int] = None) -> int:
     
     Returns:
         The seed value that was set.
-    """    
-    # Generate seed from current time if not provided
+    """
+    global _GLOBAL_SEED
+
     if seed is None:
         seed = int(time.time() * 1000000) % (2**31)
-    
-    # Store the global seed
-    global _GLOBAL_SEED
+
     _GLOBAL_SEED = seed
-    
+
     random.seed(seed)
     np.random.seed(seed)
 
     # Import torch lazily to avoid initializing CUDA before env is set elsewhere
     import torch
+
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)  # For multi-GPU setups
+        torch.cuda.manual_seed_all(seed)
+
     return seed
 
 
 def set_determinism() -> None:
-    # set_cublas_workspace_config() must happen BEFORE importing torch
-    #set_cublas_workspace_config()
-
-    # Import torch only after the env var has been set
     import torch
 
-    # Set deterministic behavior for reproducibility
-    # Note: This can significantly slow down operations. Only use if you need to be 100% reproducible
+    # Deterministic kernels can significantly reduce throughput.
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-    if hasattr(torch, 'use_deterministic_algorithms'):
+    if hasattr(torch, "use_deterministic_algorithms"):
         try:
             torch.use_deterministic_algorithms(True, warn_only=False)
-        except Exception as e:
-            print(f'torch.use_deterministic_algorithms is not available: {e}')
-            # print torch version
-            print(f'torch version: {torch.__version__}')
-            print('Make sure you are using the correct version of torch')
+        except Exception as error:
+            print(f"torch.use_deterministic_algorithms is not available: {error}")
+            print(f"torch version: {torch.__version__}")
+            print("Make sure you are using the correct version of torch")

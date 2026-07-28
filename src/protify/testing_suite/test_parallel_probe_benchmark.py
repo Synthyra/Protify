@@ -12,7 +12,7 @@ except ImportError:
         from ..scripts import benchmark_parallel_probes as benchmark
 
 
-def _args(**overrides):
+def _args(**overrides: int | float | str | bool | None) -> SimpleNamespace:
     values = {
         "num_samples": 12,
         "input_size": 4,
@@ -35,8 +35,7 @@ def _args(**overrides):
         "training_flop_multiplier": 3,
         "plan_only": False,
     }
-    for key, value in overrides.items():
-        values[key] = value
+    values.update(overrides)
     return SimpleNamespace(**values)
 
 
@@ -174,9 +173,12 @@ def test_benchmark_plan_summary_counts_permutation_index_memory() -> None:
 
 def test_benchmark_shared_parallel_loader_keeps_base_batch_shape() -> None:
     args = _args(parallel_batch_mode="shared")
-    dataset = benchmark.make_dataset(args, torch.device("cpu"))
+    dataset = benchmark.make_dataset(
+        args,
+        torch.device("cpu"),
+    )  # embeddings: (n, d); labels: (n,)
     loader, index_memory_bytes = benchmark.make_parallel_loader(args, dataset, benchmark.run_seeds(args))
-    embeddings, labels = next(iter(loader))
+    embeddings, labels = next(iter(loader))  # (b, d); (b,)
 
     assert index_memory_bytes == 0
     assert embeddings.shape == (args.batch_size, args.input_size)
@@ -185,10 +187,13 @@ def test_benchmark_shared_parallel_loader_keeps_base_batch_shape() -> None:
 
 def test_benchmark_run_specific_parallel_loader_uses_run_dimension() -> None:
     args = _args(parallel_batch_mode="run_specific", parallel_index_strategy="permutation")
-    dataset = benchmark.make_dataset(args, torch.device("cpu"))
+    dataset = benchmark.make_dataset(
+        args,
+        torch.device("cpu"),
+    )  # embeddings: (n, d); labels: (n,)
     seeds = benchmark.run_seeds(args)
     loader, index_memory_bytes = benchmark.make_parallel_loader(args, dataset, seeds)
-    embeddings, labels = next(iter(loader))
+    embeddings, labels = next(iter(loader))  # (b, r, d); (b, r)
 
     assert index_memory_bytes == args.num_runs * args.num_samples * 8
     assert embeddings.shape == (args.batch_size, args.num_runs, args.input_size)
@@ -197,10 +202,13 @@ def test_benchmark_run_specific_parallel_loader_uses_run_dimension() -> None:
 
 def test_benchmark_run_specific_affine_loader_has_zero_index_memory() -> None:
     args = _args(parallel_batch_mode="run_specific", parallel_index_strategy="affine")
-    dataset = benchmark.make_dataset(args, torch.device("cpu"))
+    dataset = benchmark.make_dataset(
+        args,
+        torch.device("cpu"),
+    )  # embeddings: (n, d); labels: (n,)
     seeds = benchmark.run_seeds(args)
     loader, index_memory_bytes = benchmark.make_parallel_loader(args, dataset, seeds)
-    embeddings, labels = next(iter(loader))
+    embeddings, labels = next(iter(loader))  # (b, r, d); (b, r)
 
     assert index_memory_bytes == 0
     assert embeddings.shape == (args.batch_size, args.num_runs, args.input_size)

@@ -40,6 +40,7 @@ class T5ForSequenceClassification(T5EncoderModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        labels: Optional[torch.Tensor] = None,
     ) -> SequenceClassifierOutput:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -104,7 +105,8 @@ class T5ForTokenClassification(T5EncoderModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-    ) -> SequenceClassifierOutput:
+        labels: Optional[torch.Tensor] = None,
+    ) -> TokenClassifierOutput:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         encoder_outputs = self.encoder(

@@ -27,7 +27,7 @@ Defined in [get_base_models.py](../src/protify/base_models/get_base_models.py).
 |----------|------|-------------|
 | `model_names` | List[str] | Preset names (e.g. ESM2-8, ProtT5). Use `['standard']` to expand to standard set, or names containing `'exp'` for experimental. Mutually exclusive with model_paths/model_types. |
 | `model_paths` | List[str] | Paths (HuggingFace IDs or local). Must pair with `model_types` (same length). |
-| `model_types` | List[str] | Type keyword per path: esm2, esmc, protbert, prott5, ankh, glm, dplm, dplm2, protclm, onehot, amplify, e1, vec2vec, calm, custom, random, etc. |
+| `model_types` | List[str] | Type keyword per path: esm2, esmc, protbert, prott5, ankh, glm, dplm, dplm2, protclm, onehot, amplify, e1, calm, custom, random, etc. |
 | `model_dtype` | str | Data type for loading (e.g. bf16, fp32). |
 
 **model_entries()** yields `(display_name, dispatch_type, model_path)` so that the pipeline can call `get_base_model(dispatch_type, ..., model_path=model_path)` and `get_tokenizer(dispatch_type, model_path=model_path)`.
@@ -37,15 +37,15 @@ Defined in [get_base_models.py](../src/protify/base_models/get_base_models.py).
 ## get_base_model and get_tokenizer
 
 - **get_base_model(model_name, masked_lm=False, dtype=None, model_path=None)**  
-  Returns `(model, tokenizer)` (or equivalent). Dispatch is by substring in `model_name.lower()`: e.g. random, esm2/dsm, esmc, protbert, prott5, ankh, glm, dplm2, dplm, protclm, onehot, amplify, e1, vec2vec, calm, custom. Custom requires `model_path`.
+  Returns `(model, tokenizer)` (or equivalent). Dispatch is by substring in `model_name.lower()`: e.g. random, esm2/dsm, esmc, protbert, prott5, ankh, glm, dplm2, dplm, protclm, onehot, amplify, e1, calm, custom. Custom requires `model_path`.
 
 - **get_base_model_for_training(model_name, tokenwise=False, num_labels=None, hybrid=False, dtype=None, model_path=None)**  
-  Same family names; used when training (probe or full/hybrid). Does not support random, onehot, vec2vec, custom in some code paths.
+  Same family names; used when training (probe or full/hybrid). Does not support random, onehot, or custom in some code paths.
 
 - **get_tokenizer(model_name, model_path=None)**  
   Returns the tokenizer for the given model name (and path for custom/path-based loading).
 
-Supported model type keywords (for `model_types` or in preset names) include: random, esm2, dsm, esmc, protbert, prott5, ankh, glm, dplm, dplm2, protclm, onehot, amplify, e1, vec2vec, calm, custom. See [supported_models.py](../src/protify/base_models/supported_models.py) for `all_presets_with_paths`, `currently_supported_models`, `standard_models`, `experimental_models`.
+Supported model type keywords (for `model_types` or in preset names) include: random, esm2, dsm, esmc, protbert, prott5, ankh, glm, dplm, dplm2, protclm, onehot, amplify, e1, calm, custom. See [supported_models.py](../src/protify/base_models/supported_models.py) for `all_presets_with_paths`, `currently_supported_models`, `standard_models`, `experimental_models`.
 
 ---
 

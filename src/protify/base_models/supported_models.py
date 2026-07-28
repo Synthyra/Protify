@@ -8,8 +8,8 @@ all_presets_with_paths = {
     'ESM2-650': 'Synthyra/ESM2-650M',
     'ESM2-3B': 'Synthyra/ESM2-3B',
     # DSM models (from esm2.py)
-    'DSM-150': 'GleghornLab/ESM_diff_150',
-    'DSM-650': 'GleghornLab/ESM_diff_650',
+    'DSM-150': 'GleghornLab/DSM_150',
+    'DSM-650': 'GleghornLab/DSM_650',
     'DSM-PPI': 'Synthyra/DSM_ppi_full',
     # ESMC models (from esmc.py)
     'ESMC-300': 'Synthyra/ESMplusplus_small',
@@ -59,21 +59,6 @@ all_presets_with_paths = {
     'OneHot-DNA': 'OneHot-DNA',
     'OneHot-RNA': 'OneHot-RNA',
     'OneHot-Codon': 'OneHot-Codon',
-    # Vec2Vec models (from vec2vec.py)
-    'vec2vec-ESM2-8-ESM2-35': 'lhallee/ESM2-8-ESM2-35-sequence-sequence',
-    'vec2vec-ESM2-8-ESM2-150': 'lhallee/ESM2-8-ESM2-150-sequence-sequence',
-    'vec2vec-ESM2-8-ESM2-650': 'lhallee/ESM2-8-ESM2-650-sequence-sequence',
-    'vec2vec-ESM2-8-ESM2-3B': 'lhallee/ESM2-8-ESM2-3B-sequence-sequence',
-    'vec2vec-ESM2-35-ESM2-150': 'lhallee/ESM2-35-ESM2-150-sequence-sequence',
-    'vec2vec-ESM2-35-ESM2-650': 'lhallee/ESM2-35-ESM2-650-sequence-sequence',
-    'vec2vec-ESM2-35-ESM2-3B': 'lhallee/ESM2-35-ESM2-3B-sequence-sequence',
-    'vec2vec-ESM2-150-ESM2-650': 'lhallee/ESM2-150-ESM2-650-sequence-sequence',
-    'vec2vec-ESM2-150-ESM2-3B': 'lhallee/ESM2-150-ESM2-3B-sequence-sequence',
-    'vec2vec-ESM2-650-ESM2-3B': 'lhallee/ESM2-650-ESM2-3B-sequence-sequence',
-    # Contrastive vec2vec adapters (ESM2-650 -> NLP), from run with
-    # --paired_batches --loss_coefficient_contrastive 4.0 --hub_suffix contrastive
-    'vec2vec-ESM2-650-ModernBERT-base-contrastive': 'lhallee/ESM2-650-ModernBERT-base-sequence-sequence-contrastive',
-    'vec2vec-ESM2-650-ModernBERT-large-contrastive': 'lhallee/ESM2-650-ModernBERT-large-sequence-sequence-contrastive',
     # CaLM models (from calm.py)
     'CaLM': 'multimolecule/calm',
 }
@@ -140,9 +125,6 @@ standard_models = [
     'E1-150',
     'E1-300',
     'E1-600',
-    'DSM-150',
-    'DSM-650',
-    'DSM-PPI',
     'ESM2-8',
     'ESM2-35',
     'ESM2-150',

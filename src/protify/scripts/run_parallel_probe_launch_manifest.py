@@ -2,10 +2,11 @@ import argparse
 import json
 import os
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 
-def parse_args(argv=None):
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Dry-run or execute commands from a parallel-probe preflight launch manifest."
     )
@@ -26,7 +27,7 @@ def parse_args(argv=None):
     return validate_args(parser.parse_args(argv))
 
 
-def validate_args(args):
+def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     assert args.manifest_path.strip() != "", "manifest_path must be non-empty."
     assert args.json_indent >= 0, "json_indent must be non-negative."
     if args.output_path is not None:
@@ -47,7 +48,7 @@ def validate_args(args):
     return args
 
 
-def load_launch_manifest(path_text: str):
+def load_launch_manifest(path_text: str) -> dict[str, object]:
     path = Path(path_text)
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -75,13 +76,15 @@ def command_field_for(variant: str, use_monitor: bool) -> str:
     return f"{variant}_command"
 
 
-def selected_values(values):
+def selected_values(values: Sequence[str] | None) -> set[str] | None:
     if values is None:
         return None
     return set(values)
 
 
-def manifest_group_by_command_id(manifest):
+def manifest_group_by_command_id(
+    manifest: dict[str, object],
+) -> dict[str, dict[str, object]]:
     groups_by_id = {}
     for group in manifest["groups"]:
         assert isinstance(group, dict), "Each launch manifest group must be an object."
@@ -92,7 +95,9 @@ def manifest_group_by_command_id(manifest):
     return groups_by_id
 
 
-def embedding_jobs_by_command_id(manifest):
+def embedding_jobs_by_command_id(
+    manifest: dict[str, object],
+) -> dict[str, dict[str, object]]:
     jobs_by_id = {}
     if "embedding_prerequisites" not in manifest:
         return jobs_by_id
@@ -116,13 +121,13 @@ def embedding_jobs_by_command_id(manifest):
     return jobs_by_id
 
 
-def variants_for_plan(variant: str):
+def variants_for_plan(variant: str) -> tuple[str, ...]:
     if variant == "both":
         return ("sequential", "parallel")
     return (variant,)
 
 
-def wave_gpu_over_budget_assignment_count(wave):
+def wave_gpu_over_budget_assignment_count(wave: dict[str, object]) -> int:
     if "gpu_over_memory_budget_count" in wave:
         over_budget_count = wave["gpu_over_memory_budget_count"]
         assert isinstance(over_budget_count, int), "wave gpu_over_memory_budget_count must be an integer."
@@ -143,7 +148,10 @@ def wave_gpu_over_budget_assignment_count(wave):
     return over_budget_count
 
 
-def monitor_summary_path_for_group(group, variant: str):
+def monitor_summary_path_for_group(
+    group: dict[str, object],
+    variant: str,
+) -> str | None:
     monitor_field = f"{variant}_monitor_command"
     if monitor_field not in group:
         return None
@@ -161,13 +169,18 @@ def monitor_summary_path_for_group(group, variant: str):
     return None
 
 
-def completion_summary_exists(summary_path):
+def completion_summary_exists(summary_path: str | None) -> bool:
     if summary_path is None:
         return False
     return Path(summary_path).is_file()
 
 
-def command_entry_for_group(group, variant: str, use_monitor: bool, skip_completed: bool = False):
+def command_entry_for_group(
+    group: dict[str, object],
+    variant: str,
+    use_monitor: bool,
+    skip_completed: bool = False,
+) -> dict[str, object]:
     command_field = command_field_for(variant, use_monitor)
     assert command_field in group, f"Launch manifest group missing {command_field}."
     command = group[command_field]
@@ -215,7 +228,7 @@ def command_entry_for_group(group, variant: str, use_monitor: bool, skip_complet
     }
 
 
-def command_entry_for_embedding_job(job):
+def command_entry_for_embedding_job(job: dict[str, object]) -> dict[str, object]:
     assert "command" in job, "Embedding prerequisite job missing command."
     command = job["command"]
     assert isinstance(command, list), "Embedding prerequisite command must be a command array."
@@ -245,7 +258,11 @@ def command_entry_for_embedding_job(job):
     }
 
 
-def build_embedding_wave(jobs_by_id, selected_command_ids, selected_wave_ids):
+def build_embedding_wave(
+    jobs_by_id: dict[str, dict[str, object]],
+    selected_command_ids: set[str] | None,
+    selected_wave_ids: set[str] | None,
+) -> dict[str, object] | None:
     embedding_wave_id = "embedding-prerequisites"
     if selected_wave_ids is not None and embedding_wave_id not in selected_wave_ids:
         return None
@@ -266,7 +283,10 @@ def build_embedding_wave(jobs_by_id, selected_command_ids, selected_wave_ids):
     }
 
 
-def build_launch_plan(manifest, args):
+def build_launch_plan(
+    manifest: dict[str, object],
+    args: argparse.Namespace,
+) -> dict[str, object]:
     groups_by_id = manifest_group_by_command_id(manifest)
     embedding_jobs_by_id = embedding_jobs_by_command_id(manifest)
     selected_command_ids = selected_values(args.command_ids)
@@ -367,14 +387,14 @@ def build_launch_plan(manifest, args):
     }
 
 
-def subprocess_environment(command_entry):
+def subprocess_environment(command_entry: dict[str, object]) -> dict[str, str]:
     environment = dict(os.environ)
     for key, value in command_entry["environment"].items():
         environment[key] = value
     return environment
 
 
-def run_command(command_entry):
+def run_command(command_entry: dict[str, object]) -> dict[str, object]:
     completed = subprocess.run(
         command_entry["command"],
         check=False,
@@ -385,7 +405,10 @@ def run_command(command_entry):
     return result
 
 
-def run_wave_sequential(wave, continue_on_failure: bool):
+def run_wave_sequential(
+    wave: dict[str, object],
+    continue_on_failure: bool,
+) -> tuple[list[dict[str, object]], int, bool]:
     wave_results = []
     failure_count = 0
     should_stop = False
@@ -403,7 +426,9 @@ def run_wave_sequential(wave, continue_on_failure: bool):
     return wave_results, failure_count, should_stop
 
 
-def run_wave_concurrent(wave):
+def run_wave_concurrent(
+    wave: dict[str, object],
+) -> tuple[list[dict[str, object]], int, bool]:
     wave_results = [None] * len(wave["commands"])
     processes = []
     for command_index, command_entry in enumerate(wave["commands"]):
@@ -428,7 +453,7 @@ def run_wave_concurrent(wave):
     return wave_results, failure_count, False
 
 
-def execute_launch_plan(plan):
+def execute_launch_plan(plan: dict[str, object]) -> dict[str, object]:
     assert plan["execute"], "execute_launch_plan requires a plan with execute=True."
     assert not plan["blocked_by_over_budget"], (
         "Launch plan includes waves over the preflight GPU memory budget. "
@@ -467,7 +492,7 @@ def execute_launch_plan(plan):
     }
 
 
-def build_report(args):
+def build_report(args: argparse.Namespace) -> dict[str, object]:
     manifest = load_launch_manifest(args.manifest_path)
     plan = build_launch_plan(manifest, args)
     report = {
@@ -485,7 +510,11 @@ def build_report(args):
     return report
 
 
-def write_report(report, output_path: str, json_indent: int) -> None:
+def write_report(
+    report: dict[str, object],
+    output_path: str,
+    json_indent: int,
+) -> None:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:

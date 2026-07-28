@@ -1,7 +1,9 @@
 import torch
+
+from typing import Any
 from torch import nn
 from transformers import PreTrainedModel, PretrainedConfig
-from typing import List, Optional
+
 try:
     from ..pooler import Pooler
 except ImportError:
@@ -13,13 +15,14 @@ except ImportError:
 
 class HybridProbeConfig(PretrainedConfig):
     model_type = "hybrid_probe"
+
     def __init__(
-            self,
-            tokenwise: bool = False,
-            matrix_embed: bool = False,
-            pooling_types: List[str] = ['mean', 'cls'],
-            **kwargs,
-    ):
+        self,
+        tokenwise: bool = False,
+        matrix_embed: bool = False,
+        pooling_types: list[str] = ['mean', 'cls'],
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         self.tokenwise = tokenwise
         self.matrix_embed = matrix_embed
@@ -29,7 +32,8 @@ class HybridProbeConfig(PretrainedConfig):
 class HybridProbe(PreTrainedModel):
     config_class = HybridProbeConfig
     all_tied_weights_keys = {}
-    def __init__(self, config: HybridProbeConfig, model: nn.Module, probe: nn.Module):
+
+    def __init__(self, config: HybridProbeConfig, model: nn.Module, probe: nn.Module) -> None:
         super().__init__(config)
         self.config = config
         self.pool_before_probe = not config.tokenwise and not config.matrix_embed
@@ -38,15 +42,27 @@ class HybridProbe(PreTrainedModel):
         self.probe = probe
 
     def forward(
-            self,
-            input_ids,
-            attention_mask: Optional[torch.Tensor] = None,
-            labels: Optional[torch.Tensor] = None,
-    ):
-        x = self.model(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        labels: torch.Tensor | None = None,
+    ) -> Any:
+        # input_ids: (b, l); attention_mask: (b, l) or None. Label shape is task-dependent.
+        hidden_states = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+        ).last_hidden_state  # (b, l, d)
+
         if self.pool_before_probe:
-            x = self.pooler(x, attention_mask)
-            y = self.probe(x, labels=labels)
+            # p is the configured number of pooling operations.
+            probe_embeddings = self.pooler(hidden_states, attention_mask)  # (b, p * d)
+            probe_output = self.probe(probe_embeddings, labels=labels)
         else:
-            y = self.probe(x, attention_mask=attention_mask, labels=labels)
-        return y
+            probe_output = self.probe(
+                hidden_states,
+                attention_mask=attention_mask,
+                labels=labels,
+            )
+
+        # probe_output.logits: (b, c) or (b, l, c), depending on the probe contract.
+        return probe_output

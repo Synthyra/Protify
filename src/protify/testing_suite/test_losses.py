@@ -1,7 +1,6 @@
 """Tests for probes/losses.py loss function dispatch and custom losses."""
 
 import torch
-import pytest
 from torch import nn
 
 try:
@@ -47,9 +46,9 @@ def test_get_loss_fct_tokenwise_nonregression() -> None:
 def test_soft_bce_loss_forward() -> None:
     torch.manual_seed(0)
     loss_fn = SoftBCELoss()
-    y_pred = torch.sigmoid(torch.randn(4, 3))
-    y_true = torch.randint(0, 2, (4, 3)).float()
-    loss = loss_fn(y_pred, y_true)
+    y_pred = torch.sigmoid(torch.randn(4, 3))  # (b=4, c=3)
+    y_true = torch.randint(0, 2, (4, 3)).float()  # (b, c)
+    loss = loss_fn(y_pred, y_true)  # ()
     assert loss.ndim == 0
     assert loss.item() >= 0
 
@@ -57,44 +56,44 @@ def test_soft_bce_loss_forward() -> None:
 def test_soft_bce_loss_ignore_index() -> None:
     torch.manual_seed(0)
     loss_fn = SoftBCELoss(ignore_index=-100.0)
-    y_pred = torch.sigmoid(torch.randn(4))
-    y_true = torch.tensor([1.0, 0.0, -100.0, 1.0])
-    loss = loss_fn(y_pred, y_true)
+    y_pred = torch.sigmoid(torch.randn(4))  # (n=4,)
+    y_true = torch.tensor([1.0, 0.0, -100.0, 1.0])  # (n,)
+    loss = loss_fn(y_pred, y_true)  # ()
     assert loss.ndim == 0
     assert loss.item() >= 0
 
 
 def test_soft_bce_loss_all_ignored() -> None:
     loss_fn = SoftBCELoss(ignore_index=-100.0)
-    y_pred = torch.sigmoid(torch.randn(3))
-    y_true = torch.tensor([-100.0, -100.0, -100.0])
-    loss = loss_fn(y_pred, y_true)
+    y_pred = torch.sigmoid(torch.randn(3))  # (n=3,)
+    y_true = torch.tensor([-100.0, -100.0, -100.0])  # (n,)
+    loss = loss_fn(y_pred, y_true)  # ()
     assert loss.item() == 0.0
 
 
 def test_soft_bce_with_logits_loss_forward() -> None:
     torch.manual_seed(0)
     loss_fn = SoftBCEWithLogitsLoss()
-    y_pred = torch.randn(4, 3)
-    y_true = torch.randint(0, 2, (4, 3)).float()
-    loss = loss_fn(y_pred, y_true)
+    y_pred = torch.randn(4, 3)  # (b=4, c=3)
+    y_true = torch.randint(0, 2, (4, 3)).float()  # (b, c)
+    loss = loss_fn(y_pred, y_true)  # ()
     assert loss.ndim == 0
     assert loss.item() >= 0
 
 
 def test_soft_bce_with_logits_smooth_factor_changes_loss() -> None:
     torch.manual_seed(0)
-    y_pred = torch.randn(4, 3)
-    y_true = torch.randint(0, 2, (4, 3)).float()
+    y_pred = torch.randn(4, 3)  # (b=4, c=3)
+    y_true = torch.randint(0, 2, (4, 3)).float()  # (b, c)
 
-    loss_no_smooth = SoftBCEWithLogitsLoss(smooth_factor=None)(y_pred, y_true)
-    loss_smooth = SoftBCEWithLogitsLoss(smooth_factor=0.1)(y_pred, y_true)
+    loss_no_smooth = SoftBCEWithLogitsLoss(smooth_factor=None)(y_pred, y_true)  # ()
+    loss_smooth = SoftBCEWithLogitsLoss(smooth_factor=0.1)(y_pred, y_true)  # ()
     assert loss_no_smooth.item() != loss_smooth.item()
 
 
 def test_soft_bce_with_logits_all_ignored() -> None:
     loss_fn = SoftBCEWithLogitsLoss(ignore_index=-100.0)
-    y_pred = torch.randn(3)
-    y_true = torch.tensor([-100.0, -100.0, -100.0])
-    loss = loss_fn(y_pred, y_true)
+    y_pred = torch.randn(3)  # (n=3,)
+    y_true = torch.tensor([-100.0, -100.0, -100.0])  # (n,)
+    loss = loss_fn(y_pred, y_true)  # ()
     assert loss.item() == 0.0

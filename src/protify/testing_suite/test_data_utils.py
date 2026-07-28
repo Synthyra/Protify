@@ -1,7 +1,6 @@
 """Tests for data/utils.py constants and translation mappings."""
 
 import torch
-import pytest
 
 try:
     from src.protify.data.utils import (
@@ -85,12 +84,23 @@ def test_rna_codon_to_aa_is_t_to_u_of_dna() -> None:
 
 def test_pad_and_concatenate_dimer_shapes() -> None:
     torch.manual_seed(0)
-    batch, L, d = 2, 4, 8
-    A = torch.randn(batch, L, d)
-    B = torch.randn(batch, L, d)
-    a_mask = torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]], dtype=torch.float)
-    b_mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]], dtype=torch.float)
-    combined, combined_mask = pad_and_concatenate_dimer(A, B, a_mask, b_mask)
+    b, l, d = 2, 4, 8
+    A = torch.randn(b, l, d)  # (b, l, d)
+    B = torch.randn(b, l, d)  # (b, l, d)
+    a_mask = torch.tensor(  # (b, l)
+        [[1, 1, 1, 0], [1, 1, 0, 0]],
+        dtype=torch.float,
+    )
+    b_mask = torch.tensor(  # (b, l)
+        [[1, 1, 0, 0], [1, 1, 1, 0]],
+        dtype=torch.float,
+    )
+    combined, combined_mask = pad_and_concatenate_dimer(  # (b, l_join=5, d); (b, l_join)
+        A,
+        B,
+        a_mask,
+        b_mask,
+    )
     # Max combined length: max(3+2, 2+3) = 5
     assert combined.shape == (2, 5, d)
     assert combined_mask.shape == (2, 5)
@@ -102,10 +112,13 @@ def test_pad_and_concatenate_dimer_shapes() -> None:
 
 def test_pad_and_concatenate_dimer_no_masks() -> None:
     torch.manual_seed(0)
-    batch, L, d = 2, 3, 4
-    A = torch.randn(batch, L, d)
-    B = torch.randn(batch, L, d)
-    combined, combined_mask = pad_and_concatenate_dimer(A, B)
-    # All tokens valid: max length = L + L = 6
+    b, l, d = 2, 3, 4
+    A = torch.randn(b, l, d)  # (b, l, d)
+    B = torch.randn(b, l, d)  # (b, l, d)
+    combined, combined_mask = pad_and_concatenate_dimer(  # (b, l_join=6, d); (b, l_join)
+        A,
+        B,
+    )
+    # All tokens valid: max length = l + l = 6
     assert combined.shape == (2, 6, d)
     assert combined_mask.sum().item() == 12

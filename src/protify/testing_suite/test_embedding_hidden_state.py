@@ -1,9 +1,9 @@
 import os
 import sys
-from types import SimpleNamespace
 
 import pytest
 import torch
+from types import SimpleNamespace
 
 
 PROTIFY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -51,25 +51,31 @@ def test_embedding_arguments_store_hidden_state_index():
 
 
 def test_select_hidden_state_uses_final_state_by_default():
-    final_state = torch.ones(2, 3, 4)
-    hidden_states = (torch.zeros(2, 3, 4), torch.full((2, 3, 4), 2.0))
+    final_state = torch.ones(2, 3, 4)  # (b=2, l=3, d=4)
+    hidden_states = (  # two tensors, each (b, l, d)
+        torch.zeros(2, 3, 4),
+        torch.full((2, 3, 4), 2.0),
+    )
 
-    selected = select_hidden_state(final_state, hidden_states, -1)
+    selected = select_hidden_state(final_state, hidden_states, -1)  # (b, l, d)
 
     assert selected is final_state
 
 
 def test_select_hidden_state_uses_requested_tuple_index():
-    final_state = torch.ones(2, 3, 4)
-    hidden_states = (torch.zeros(2, 3, 4), torch.full((2, 3, 4), 2.0))
+    final_state = torch.ones(2, 3, 4)  # (b=2, l=3, d=4)
+    hidden_states = (  # two tensors, each (b, l, d)
+        torch.zeros(2, 3, 4),
+        torch.full((2, 3, 4), 2.0),
+    )
 
-    selected = select_hidden_state(final_state, hidden_states, 1)
+    selected = select_hidden_state(final_state, hidden_states, 1)  # (b, l, d)
 
     assert torch.equal(selected, hidden_states[1])
 
 
 def test_select_hidden_state_requires_hidden_states_for_non_default():
-    final_state = torch.ones(2, 3, 4)
+    final_state = torch.ones(2, 3, 4)  # (b=2, l=3, d=4)
 
     with pytest.raises(AssertionError):
         select_hidden_state(final_state, None, 0)

@@ -4,7 +4,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
 
 
 NVIDIA_SMI_QUERY_FIELDS = (
@@ -31,7 +30,7 @@ FIELD_ALIASES = {
 }
 
 
-def parse_args(argv=None):
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     raw_argv = sys.argv[1:] if argv is None else list(argv)
     command = None
     if "--command" in raw_argv:
@@ -58,7 +57,7 @@ def parse_args(argv=None):
     return validate_args(args)
 
 
-def validate_args(args):
+def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     assert args.interval_seconds > 0.0, "interval_seconds must be positive."
     assert args.json_indent >= 0, "json_indent must be non-negative."
     if args.gpu_index is not None:
@@ -74,7 +73,7 @@ def validate_args(args):
     return args
 
 
-def nvidia_smi_query_command(gpu_index: Optional[int] = None) -> List[str]:
+def nvidia_smi_query_command(gpu_index: int | None = None) -> list[str]:
     command = [
         "nvidia-smi",
         "--query-gpu=" + ",".join(NVIDIA_SMI_QUERY_FIELDS),
@@ -85,7 +84,7 @@ def nvidia_smi_query_command(gpu_index: Optional[int] = None) -> List[str]:
     return command
 
 
-def _parse_number(value: str):
+def _parse_number(value: str) -> int | float | str | None:
     cleaned = value.strip()
     if cleaned in ("", "[Not Supported]", "N/A"):
         return None
@@ -97,12 +96,12 @@ def _parse_number(value: str):
         return cleaned
 
 
-def parse_nvidia_smi_csv_line(line: str, sampled_at_unix_seconds: float) -> Dict[str, object]:
+def parse_nvidia_smi_csv_line(line: str, sampled_at_unix_seconds: float) -> dict[str, object]:
     parts = [part.strip() for part in line.split(",")]
     assert len(parts) == len(NVIDIA_SMI_QUERY_FIELDS), (
         f"Expected {len(NVIDIA_SMI_QUERY_FIELDS)} nvidia-smi columns, got {len(parts)}."
     )
-    sample: Dict[str, object] = {
+    sample: dict[str, object] = {
         "sampled_at_unix_seconds": sampled_at_unix_seconds,
     }
     for index, field in enumerate(NVIDIA_SMI_QUERY_FIELDS):
@@ -112,19 +111,19 @@ def parse_nvidia_smi_csv_line(line: str, sampled_at_unix_seconds: float) -> Dict
         else:
             sample[alias] = _parse_number(parts[index])
     if (
-            "memory_used_mib" in sample
-            and "memory_total_mib" in sample
-            and isinstance(sample["memory_used_mib"], (int, float))
-            and isinstance(sample["memory_total_mib"], (int, float))
-            and sample["memory_total_mib"] > 0
-        ):
+        "memory_used_mib" in sample
+        and "memory_total_mib" in sample
+        and isinstance(sample["memory_used_mib"], (int, float))
+        and isinstance(sample["memory_total_mib"], (int, float))
+        and sample["memory_total_mib"] > 0
+    ):
         sample["memory_used_fraction"] = (
             float(sample["memory_used_mib"]) / float(sample["memory_total_mib"])
         )
     return sample
 
 
-def parse_nvidia_smi_output(output: str, sampled_at_unix_seconds: float) -> List[Dict[str, object]]:
+def parse_nvidia_smi_output(output: str, sampled_at_unix_seconds: float) -> list[dict[str, object]]:
     samples = []
     for line in output.splitlines():
         stripped = line.strip()
@@ -134,7 +133,7 @@ def parse_nvidia_smi_output(output: str, sampled_at_unix_seconds: float) -> List
     return samples
 
 
-def sample_nvidia_smi(gpu_index: Optional[int] = None) -> List[Dict[str, object]]:
+def sample_nvidia_smi(gpu_index: int | None = None) -> list[dict[str, object]]:
     sampled_at = time.time()
     completed = subprocess.run(
         nvidia_smi_query_command(gpu_index),
@@ -145,14 +144,14 @@ def sample_nvidia_smi(gpu_index: Optional[int] = None) -> List[Dict[str, object]
     return parse_nvidia_smi_output(completed.stdout, sampled_at)
 
 
-def append_samples(path: Path, samples: List[Dict[str, object]]) -> None:
+def append_samples(path: Path, samples: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         for sample in samples:
             handle.write(json.dumps(sample, sort_keys=True) + "\n")
 
 
-def load_samples(path: Path) -> List[Dict[str, object]]:
+def load_samples(path: Path) -> list[dict[str, object]]:
     samples = []
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:
@@ -165,7 +164,7 @@ def load_samples(path: Path) -> List[Dict[str, object]]:
     return samples
 
 
-def _numeric_values(samples: List[Dict[str, object]], key: str) -> List[float]:
+def _numeric_values(samples: list[dict[str, object]], key: str) -> list[float]:
     values = []
     for sample in samples:
         if key not in sample:
@@ -178,19 +177,19 @@ def _numeric_values(samples: List[Dict[str, object]], key: str) -> List[float]:
     return values
 
 
-def _mean(values: List[float]) -> Optional[float]:
+def _mean(values: list[float]) -> float | None:
     if len(values) == 0:
         return None
     return sum(values) / float(len(values))
 
 
-def _maximum(values: List[float]) -> Optional[float]:
+def _maximum(values: list[float]) -> float | None:
     if len(values) == 0:
         return None
     return max(values)
 
 
-def summarize_samples(samples: List[Dict[str, object]]) -> Dict[str, object]:
+def summarize_samples(samples: list[dict[str, object]]) -> dict[str, object]:
     timestamps = _numeric_values(samples, "sampled_at_unix_seconds")
     gpu_indices = sorted(
         {
@@ -220,7 +219,7 @@ def summarize_samples(samples: List[Dict[str, object]]) -> Dict[str, object]:
     }
 
 
-def dry_run_plan(args) -> Dict[str, object]:
+def dry_run_plan(args: argparse.Namespace) -> dict[str, object]:
     return {
         "mode": "dry_run",
         "nvidia_smi_command": nvidia_smi_query_command(args.gpu_index),
@@ -231,7 +230,7 @@ def dry_run_plan(args) -> Dict[str, object]:
     }
 
 
-def write_summary_if_requested(summary: Dict[str, object], summary_json: Optional[str]) -> None:
+def write_summary_if_requested(summary: dict[str, object], summary_json: str | None) -> None:
     if summary_json is None:
         return
     path = Path(summary_json)
@@ -239,7 +238,7 @@ def write_summary_if_requested(summary: Dict[str, object], summary_json: Optiona
     path.write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def monitor_command(args) -> Dict[str, object]:
+def monitor_command(args: argparse.Namespace) -> dict[str, object]:
     output_path = Path(args.output_jsonl)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text("", encoding="utf-8")

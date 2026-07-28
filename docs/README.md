@@ -37,6 +37,7 @@ Results and logs go to `results/` and `logs/` by default. For full install optio
 | **Model components** | For developers: attention, attention_utils, transformer, mlp; which probes use which | [model_components.md](model_components.md) |
 | **ProteinGym** | ProteinGymRunner, scoring methods, run_proteingym_zero_shot, CLI args, compare_scoring_methods, benchmark | [proteingym.md](proteingym.md) |
 | **Visualization** | create_plots (TSV format, six PNGs), regression vs classification metrics, ci_plots, CLI | [visualization.md](visualization.md) |
+| **Embedding clustering** | Cluster saved vector or matrix embeddings, optional scaling, algorithm comparison, assignments, metrics, and diagnostic plots | [clustering.md](clustering.md) |
 | **Logging and replay** | MetricsLogger, results TSV shape, log_metrics, LogReplayer, replay flow | [logging_and_replay.md](logging_and_replay.md) |
 | **Hyperparameter optimization** | W&B sweep, sweep.yaml, HyperoptModule, CLI args, best-config rerun | [hyperparameter_optimization.md](hyperparameter_optimization.md) |
 | **Modal** | Tk GUI Modal tab and modal_backend vs legacy Gradio app, config and path rewriting, deploy and run | [modal.md](modal.md) |

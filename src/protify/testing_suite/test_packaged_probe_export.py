@@ -1,9 +1,8 @@
+import gc
 import shutil
 import tempfile
-import gc
-from pathlib import Path
-
 import torch
+from pathlib import Path
 from transformers import AutoModel, BertConfig, BertModel, BertTokenizerFast
 
 try:
@@ -69,10 +68,10 @@ def _create_tiny_backbone(backbone_dir: Path) -> tuple[BertModel, BertTokenizerF
 
 
 def _save_and_load_with_automodel(
-        packaged_model: PackagedProbeModel,
-        tokenizer: BertTokenizerFast,
-        model_dir: Path,
-    ) -> AutoModel:
+    packaged_model: PackagedProbeModel,
+    tokenizer: BertTokenizerFast,
+    model_dir: Path,
+) -> AutoModel:
     packaged_model.config.auto_map = {
         "AutoConfig": "packaged_probe_model.PackagedProbeConfig",
         "AutoModel": "packaged_probe_model.PackagedProbeModel",
@@ -118,8 +117,15 @@ def test_linear_packaged_roundtrip() -> None:
         packaged_model = PackagedProbeModel(config=packaged_config, base_model=backbone, probe=probe).eval()
         loaded_model = _save_and_load_with_automodel(packaged_model, tokenizer, model_dir)
 
-        batch = tokenizer(["A B C A", "B C D A"], padding="longest", return_tensors="pt")
-        outputs = loaded_model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+        batch = tokenizer(
+            ["A B C A", "B C D A"],
+            padding="longest",
+            return_tensors="pt",
+        )  # input_ids, attention_mask, and token_type_ids: (b=2, l=6)
+        outputs = loaded_model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+        )  # logits: (b=2, c=3)
         assert outputs.logits.shape == (2, 3), f"Unexpected linear packaged logits shape: {outputs.logits.shape}"
         del loaded_model
         gc.collect()
@@ -169,8 +175,15 @@ def test_transformer_packaged_roundtrip() -> None:
         packaged_model = PackagedProbeModel(config=packaged_config, base_model=backbone, probe=probe).eval()
         loaded_model = _save_and_load_with_automodel(packaged_model, tokenizer, model_dir)
 
-        batch = tokenizer(["A B C D", "D C B A"], padding="longest", return_tensors="pt")
-        outputs = loaded_model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+        batch = tokenizer(
+            ["A B C D", "D C B A"],
+            padding="longest",
+            return_tensors="pt",
+        )  # input_ids, attention_mask, and token_type_ids: (b=2, l=6)
+        outputs = loaded_model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+        )  # logits: (b=2, c=2)
         assert outputs.logits.shape == (2, 2), f"Unexpected transformer packaged logits shape: {outputs.logits.shape}"
         del loaded_model
         gc.collect()
@@ -215,19 +228,19 @@ def test_ppi_packaged_inference_with_and_without_token_type_ids() -> None:
             ["D C B", "A C B"],
             padding="longest",
             return_tensors="pt",
-        )
+        )  # input_ids, attention_mask, and token_type_ids: (b=2, l_pair=9)
 
         outputs_with_token_types = loaded_model(
             input_ids=pair_batch["input_ids"],
             attention_mask=pair_batch["attention_mask"],
             token_type_ids=pair_batch["token_type_ids"],
-        )
+        )  # logits: (b=2, c=2)
         assert outputs_with_token_types.logits.shape == (2, 2), "PPI logits shape mismatch with token_type_ids"
 
         outputs_without_token_types = loaded_model(
             input_ids=pair_batch["input_ids"],
             attention_mask=pair_batch["attention_mask"],
-        )
+        )  # logits: (b=2, c=2)
         assert outputs_without_token_types.logits.shape == (2, 2), "PPI logits shape mismatch without token_type_ids"
         del loaded_model
         gc.collect()

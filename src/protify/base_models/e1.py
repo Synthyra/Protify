@@ -1,9 +1,8 @@
-"""
-We use the FastPLM implementation of E1.
-"""
+"""E1 adapters backed by the vendored FastPLMs implementation."""
+
 import torch
 import torch.nn as nn
-from typing import Optional, Union, List, Dict, Tuple
+from typing import Any
 
 from .utils import ensure_fastplms_submodule_on_path, load_fastplms_model, select_hidden_state
 
@@ -28,53 +27,61 @@ presets = {
 
 
 class E1TokenizerWrapper(BaseSequenceTokenizer):
-    def __init__(self, tokenizer: E1BatchPreparer):
+    def __init__(self, tokenizer: E1BatchPreparer) -> None:
         super().__init__(tokenizer)
 
-    def __call__(self, sequences: Union[str, List[str]], **kwargs) -> Dict[str, torch.Tensor]:
+    def __call__(self, sequences: str | list[str], **kwargs: Any) -> dict[str, Any]:
         if isinstance(sequences, str):
             sequences = [sequences]
-        tokenized = self.tokenizer.get_batch_kwargs(sequences)
-        return tokenized
+        token_batch = self.tokenizer.get_batch_kwargs(sequences)
+        # input_ids, sequence ids, position ids, and labels: (b, l); context metadata: length b.
+        return token_batch
 
 
 class E1ForEmbedding(nn.Module):
-    def __init__(self, model_path: str, dtype: torch.dtype = None):
+    def __init__(self, model_path: str, dtype: torch.dtype | None = None) -> None:
         super().__init__()
         self.e1 = load_fastplms_model(E1Model, model_path, dtype=dtype)
 
     def forward(
-            self,
-            output_attentions: Optional[bool] = False,
-            output_hidden_states: Optional[bool] = False,
-            hidden_state_index: int = -1,
-            **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, ...]]]:
+        self,
+        output_attentions: bool | None = False,
+        output_hidden_states: bool | None = False,
+        hidden_state_index: int = -1,
+        **kwargs: Any,
+    ) -> torch.Tensor | tuple[torch.Tensor, Any]:
+        # Tensor fields in kwargs: input_ids, sequence ids, position ids, and labels are (b, l).
         output_hidden_states = output_hidden_states or hidden_state_index != -1
         # E1BatchPreparer emits labels for masked-LM/scoring consumers, while
         # the strict E1Model encoder contract intentionally does not accept them.
         kwargs.pop("labels", None)
-        out = self.e1(
+        model_output = self.e1(
             **kwargs,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-        )
+        )  # last_hidden_state: (b, l, d); hidden states: each (b, l, d); attentions: each (b, h, l, l)
         hidden_state = select_hidden_state(
-            out.last_hidden_state,
-            out.hidden_states,
+            model_output.last_hidden_state,
+            model_output.hidden_states,
             hidden_state_index,
-        )
+        )  # (b, l, d)
         if output_attentions:
-            return hidden_state, out.attentions
-        return hidden_state
+            return hidden_state, model_output.attentions  # (b, l, d), each attention (b, h, l, l)
+        return hidden_state  # (b, l, d)
 
 
-def get_e1_tokenizer(preset: str, model_path: str = None):
+def get_e1_tokenizer(preset: str, model_path: str | None = None) -> E1TokenizerWrapper:
     tokenizer = E1BatchPreparer(tokenizer_source=model_path or presets[preset])
     return E1TokenizerWrapper(tokenizer)
 
 
-def build_e1_model(preset: str, masked_lm: bool = False, dtype: torch.dtype = None, model_path: str = None, **kwargs):
+def build_e1_model(
+    preset: str,
+    masked_lm: bool = False,
+    dtype: torch.dtype | None = None,
+    model_path: str | None = None,
+    **kwargs: Any,
+) -> tuple[nn.Module, E1TokenizerWrapper]:
     model_path = model_path or presets[preset]
     if masked_lm:
         model = load_fastplms_model(E1ForMaskedLM, model_path, dtype=dtype).eval()
@@ -84,7 +91,14 @@ def build_e1_model(preset: str, masked_lm: bool = False, dtype: torch.dtype = No
     return model, tokenizer
 
 
-def get_e1_for_training(preset: str, tokenwise: bool = False, num_labels: int = None, hybrid: bool = False, dtype: torch.dtype = None, model_path: str = None):
+def get_e1_for_training(
+    preset: str,
+    tokenwise: bool = False,
+    num_labels: int | None = None,
+    hybrid: bool = False,
+    dtype: torch.dtype | None = None,
+    model_path: str | None = None,
+) -> tuple[nn.Module, E1TokenizerWrapper]:
     model_path = model_path or presets[preset]
     if hybrid:
         model = load_fastplms_model(E1Model, model_path, dtype=dtype).eval()

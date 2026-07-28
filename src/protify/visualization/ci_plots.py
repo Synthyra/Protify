@@ -1,28 +1,34 @@
 import os
+
 import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np
-from scipy.stats import spearmanr, pearsonr
+import seaborn as sns
+from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import r2_score
 
 from visualization.pauc_plot import plot_roc_with_ci
 
 
-def regression_ci_plot(y_true, y_pred, save_path, title=None):
+def regression_ci_plot(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    save_path: str | os.PathLike[str],
+    title: str | None = None,
+) -> None:
     """
     Calculate the spearman rho and p-value of the regression model.
     Plot the line of best fit with 95% confidence intervals for spearman rho.
     Display the R-squared value, spearman rho, pearson rho, and p-values.
     """
-    # Compute R‑squared, Spearman and Pearson correlations
-    y_true, y_pred = y_true.flatten(), y_pred.flatten()
-    mask = np.isfinite(y_true) & np.isfinite(y_pred)
-    y_true, y_pred = y_true[mask], y_pred[mask]
+    # Inputs may have any rank; n is the shared flattened element count.
+    # y_true: (...); y_pred: (...)
+    y_true, y_pred = y_true.flatten(), y_pred.flatten()  # (n,), (n,)
+    mask = np.isfinite(y_true) & np.isfinite(y_pred)  # (n,); n_f = finite paired observations
+    y_true, y_pred = y_true[mask], y_pred[mask]  # (n_f,), (n_f,)
     r2 = r2_score(y_true, y_pred)
     r_s, p_s = spearmanr(y_true, y_pred)
     r_p, p_p = pearsonr(y_true, y_pred)
 
-    # Create scatter plot and regression line with 95% CI
     fig, ax = plt.subplots(figsize=(8, 6))
     sns.scatterplot(x=y_true, y=y_pred, ax=ax)
     sns.regplot(
@@ -38,7 +44,6 @@ def regression_ci_plot(y_true, y_pred, save_path, title=None):
     else:
         ax.set_title('Regression Plot with 95% Confidence Interval')
 
-    # Annotate statistics on the plot
     stats_text = (
         f"$R^2$ = {r2:.2f}\n"
         f"Spearman $\\rho$ = {r_s:.2f}  (p = {p_s:.2e})\n"
@@ -50,46 +55,47 @@ def regression_ci_plot(y_true, y_pred, save_path, title=None):
         fontsize=12, verticalalignment='top'
     )
 
-    # Save the figure
     fig.savefig(save_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
 
 
-def classification_ci_plot(y_true, y_pred, save_path, title=None):
-    """
-    Use pauc to display classification plot
-    """
+def classification_ci_plot(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    save_path: str | os.PathLike[str],
+    title: str | None = None,
+) -> None:
+    """Plot a classification ROC curve with confidence intervals."""
+    # y_true: (n,), (b, l), or (n, c); y_pred: (n,), (b, l, c), or (n, c)
     if len(y_pred.shape) == 3 and len(y_true.shape) == 2:
-        y_pred = y_pred.reshape(-1, y_pred.shape[-1])
-        y_true = y_true.reshape(-1)
+        y_pred = y_pred.reshape(-1, y_pred.shape[-1])  # (b * l, c)
+        y_true = y_true.reshape(-1)  # (b * l,)
 
-    ### Note: removing this gives you one plot per multilabel class
+    # Flattening intentionally produces one aggregate multilabel plot.
     if len(y_pred.shape) == 2 and len(y_true.shape) == 2:
-        y_pred = y_pred.flatten()
-        y_true = y_true.flatten()
+        y_pred = y_pred.flatten()  # (n * c,)
+        y_true = y_true.flatten()  # (n * c,)
 
-    # if more than 10,000 data points, only pass 10,000
-    # else, pAUC can be very slow
+    # Cap the leading sample dimension because pAUC can be slow.
     if y_true.shape[0] > 10000:
-        y_pred = y_pred[:10000]
-        y_true = y_true[:10000]
+        y_pred = y_pred[:10000]  # (n_cap, ...), n_cap = 10_000
+        y_true = y_true[:10000]  # (n_cap, ...), n_cap = 10_000
 
     print(y_true.shape, y_pred.shape)
 
     try:
         plot_roc_with_ci(y_true, y_pred, save_path, fig_title=title)
-    except Exception as e:
-        print(f"Error plotting pAUC curve, likely the wrong version: {e}")
+    except Exception as error:
+        print(f"Error plotting pAUC curve, likely the wrong version: {error}")
 
 
 if __name__ == "__main__":
     # py -m visualization.ci_plots
-    import os
     os.makedirs("plots/test_plots", exist_ok=True)
-    y_true = np.random.rand(100)
-    y_pred = np.random.rand(100)
+    y_true = np.random.rand(100)  # (100,)
+    y_pred = np.random.rand(100)  # (100,)
     regression_ci_plot(y_true, y_pred, "plots/test_plots/regression.png", title="Regression Plot")
 
-    y_true = np.random.randint(0, 2, (50, 514))
-    y_pred = np.random.rand(50, 514, 4)
+    y_true = np.random.randint(0, 2, (50, 514))  # (50, 514)
+    y_pred = np.random.rand(50, 514, 4)  # (50, 514, 4)
     classification_ci_plot(y_true, y_pred, "plots/test_plots/classification.png", title="Classification Plot")

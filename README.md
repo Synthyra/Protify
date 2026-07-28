@@ -225,7 +225,7 @@ For more details about supported models and datasets, including programmatic acc
 - **Automated model selection**: Find optimal scikit-learn models for your data with LazyPredict, enhanced by automatic hyperparameter optimization
 - **Hyperparameter optimization**: Integrated Weights & Biases sweeps that conducts a hyperparameter search and trains the final version based on the best hyperparameters
 - **Complete reproducibility**: Every session generates a detailed log that can be used to reproduce your entire workflow
-- **Publication-ready visualizations**: Generate cross-model and dataset comparisons with radar and bar plots, embedding analysis with PCA, t-SNE, and UMAP, and statistically sound confidence interval plots
+- **Publication-ready visualizations**: Generate cross-model and dataset comparisons, confidence interval plots, dimensionality reductions, and [multi-algorithm clustering diagnostics](docs/clustering.md) from saved embeddings
 - **Extensive dataset support**: Access 60+ protein datasets by default, or easily integrate your own local or private datasets
 - **Advanced interaction modeling**: Support for protein-protein interaction datasets
   - Coming soon: Protein-small molecule interaction capabilities
@@ -471,7 +471,7 @@ pip install -v -U git+https://github.com/facebookresearch/xformers.git@main#egg=
   python -m main --model_paths Synthyra/ESM2-8M answerdotai/ModernBERT-base --model_types esm2 custom --data_names DeepLoc-2
   ```
 
-  Valid `--model_types` values: `esm2`, `dsm`, `esmc`, `protbert`, `prott5`, `ankh`, `glm`, `dplm`, `dplm2`, `protclm`, `onehot`, `amplify`, `e1`, `vec2vec`, `calm`, `custom`, `random`.
+  Valid `--model_types` values: `esm2`, `dsm`, `esmc`, `protbert`, `prott5`, `ankh`, `glm`, `dplm`, `dplm2`, `protclm`, `onehot`, `amplify`, `e1`, `calm`, `custom`, `random`.
 
   Or, set up a yaml file with your desired settings (so you don't have to type out everything in the CLI)
   ```

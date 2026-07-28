@@ -1,12 +1,13 @@
 """Verify that Protify resolves the FastPLMs 1.0 submodule source contract."""
 
-import sys
 import os
+import sys
+
 import pytest
 
 
-def _ensure_fastplms_on_path():
-    """Mirror the _FASTPLMS sys.path logic used by base_models/*.py."""
+def _ensure_fastplms_on_path() -> str:
+    """Reset FastPLMs imports to the vendored source tree for each contract test."""
     # FastPLMs 1.0 is a source repository rather than an installable distribution.
     fastplms_root = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -27,7 +28,7 @@ FASTPLMS_ROOT = _ensure_fastplms_on_path()
 
 
 @pytest.fixture(autouse=True)
-def _reset_fastplms_import_path():
+def _reset_fastplms_import_path() -> None:
     _ensure_fastplms_on_path()
 
 
@@ -55,7 +56,12 @@ def test_import_esm2():
         FastEsmForSequenceClassification,
         FastEsmForTokenClassification,
     )
-    for cls in (FastEsmModel, FastEsmForMaskedLM, FastEsmForSequenceClassification, FastEsmForTokenClassification):
+    for cls in (
+        FastEsmModel,
+        FastEsmForMaskedLM,
+        FastEsmForSequenceClassification,
+        FastEsmForTokenClassification,
+    ):
         assert cls is not None
 
 
@@ -66,7 +72,12 @@ def test_import_esm_plusplus():
         ESMplusplusForSequenceClassification,
         ESMplusplusForTokenClassification,
     )
-    for cls in (ESMplusplusModel, ESMplusplusForMaskedLM, ESMplusplusForSequenceClassification, ESMplusplusForTokenClassification):
+    for cls in (
+        ESMplusplusModel,
+        ESMplusplusForMaskedLM,
+        ESMplusplusForSequenceClassification,
+        ESMplusplusForTokenClassification,
+    ):
         assert cls is not None
 
 
@@ -102,8 +113,17 @@ def test_import_e1():
         get_context,
         KVCache,
     )
-    for obj in (E1Model, E1ForMaskedLM, E1ForSequenceClassification, E1ForTokenClassification,
-                E1BatchPreparer, E1MaskedLMOutputWithPast, DataPrepConfig, get_context, KVCache):
+    for obj in (
+        E1Model,
+        E1ForMaskedLM,
+        E1ForSequenceClassification,
+        E1ForTokenClassification,
+        E1BatchPreparer,
+        E1MaskedLMOutputWithPast,
+        DataPrepConfig,
+        get_context,
+        KVCache,
+    ):
         assert obj is not None
 
 

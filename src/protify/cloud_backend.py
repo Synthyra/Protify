@@ -58,7 +58,7 @@ class CloudBackend(ABC):
 class HTTPCloudBackend(CloudBackend):
     """Built-in HTTP backend. Talks to any server implementing the /v1/protify/* API."""
 
-    def __init__(self, base_url: str, api_key: str, timeout: int = 30):
+    def __init__(self, base_url: str, api_key: str, timeout: int = 30) -> None:
         import requests
 
         self.base_url = base_url.rstrip("/")
@@ -70,15 +70,29 @@ class HTTPCloudBackend(CloudBackend):
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
-    def _post(self, path: str, json_data: Optional[Dict[str, Any]] = None, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        resp = self._session.post(self._url(path), json=json_data, params=params, timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.json()
+    def _post(
+        self,
+        path: str,
+        json_data: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        response = self._session.post(
+            self._url(path),
+            json=json_data,
+            params=params,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        resp = self._session.get(self._url(path), params=params, timeout=self.timeout)
-        resp.raise_for_status()
-        return resp.json()
+        response = self._session.get(
+            self._url(path),
+            params=params,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        return response.json()
 
     def submit_job(
         self,
@@ -102,11 +116,14 @@ class HTTPCloudBackend(CloudBackend):
         offset: int = 0,
         max_chars: int = 50000,
     ) -> Dict[str, Any]:
-        return self._get("/v1/protify/logs", params={
-            "job_id": job_id,
-            "offset": offset,
-            "max_chars": max_chars,
-        })
+        return self._get(
+            "/v1/protify/logs",
+            params={
+                "job_id": job_id,
+                "offset": offset,
+                "max_chars": max_chars,
+            },
+        )
 
     def cancel_job(self, job_id: str) -> Dict[str, Any]:
         return self._post("/v1/protify/cancel", params={"job_id": job_id})
@@ -118,9 +135,7 @@ class HTTPCloudBackend(CloudBackend):
         return self._get("/v1/protify/jobs")
 
 
-# ---------------------------------------------------------------------------
-# Global backend registry
-# ---------------------------------------------------------------------------
+# Process-wide backend registry.
 
 _CLOUD_BACKEND: Optional[CloudBackend] = None
 

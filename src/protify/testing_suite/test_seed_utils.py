@@ -32,43 +32,43 @@ def test_set_global_seed_none_generates_seed() -> None:
 
 def test_reproducibility_torch() -> None:
     set_global_seed(99)
-    a = torch.randn(5)
+    first_draw = torch.randn(5)  # (n=5,)
     set_global_seed(99)
-    b = torch.randn(5)
-    assert torch.equal(a, b)
+    second_draw = torch.randn(5)  # (n=5,)
+    assert torch.equal(first_draw, second_draw)
 
 
 def test_reproducibility_numpy() -> None:
     set_global_seed(99)
-    a = np.random.rand(5)
+    first_draw = np.random.rand(5)  # (n=5,)
     set_global_seed(99)
-    b = np.random.rand(5)
-    assert np.array_equal(a, b)
+    second_draw = np.random.rand(5)  # (n=5,)
+    assert np.array_equal(first_draw, second_draw)
 
 
 def test_reproducibility_random() -> None:
     set_global_seed(99)
-    a = [random.random() for _ in range(5)]
+    first_draw = [random.random() for _ in range(5)]
     set_global_seed(99)
-    b = [random.random() for _ in range(5)]
-    assert a == b
+    second_draw = [random.random() for _ in range(5)]
+    assert first_draw == second_draw
 
 
 def test_seed_worker_deterministic() -> None:
     torch.manual_seed(42)
     seed_worker(0)
-    a = np.random.rand(3)
-    val_a = random.random()
+    first_worker_draw = np.random.rand(3)  # (n=3,)
+    first_random_value = random.random()
 
     torch.manual_seed(42)
     seed_worker(0)
-    b = np.random.rand(3)
-    val_b = random.random()
+    second_worker_draw = np.random.rand(3)  # (n=3,)
+    second_random_value = random.random()
 
-    assert np.array_equal(a, b)
-    assert val_a == val_b
+    assert np.array_equal(first_worker_draw, second_worker_draw)
+    assert first_random_value == second_random_value
 
 
 def test_dataloader_generator_returns_generator() -> None:
-    g = dataloader_generator(42)
-    assert isinstance(g, torch.Generator)
+    generator = dataloader_generator(42)
+    assert isinstance(generator, torch.Generator)

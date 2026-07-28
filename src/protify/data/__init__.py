@@ -14,4 +14,4 @@ try:
 except ImportError:
     dataset_descriptions = {}
 
-from .dataset_utils import list_supported_datasets, get_dataset_info 
+from .dataset_utils import get_dataset_info, list_supported_datasets

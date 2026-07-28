@@ -1,21 +1,13 @@
-"""Probes package exports.
+"""Public probe classes and parallel-probe planning helpers."""
 
-This enables convenient imports like:
-    from protify.probes import TransformerForSequenceClassification, LinearProbe
-
-Works both when the repository is the main module and when it is used as a
-submodule in another project (so long as `src/` is on PYTHONPATH or the
-package is installed).
-"""
-
-from .linear_probe import LinearProbe, LinearProbeConfig  # noqa: F401
-from .parallel_probe_batches import ParallelRunDataset  # noqa: F401
-from .parallel_linear_probe import (  # noqa: F401
+from .linear_probe import LinearProbe, LinearProbeConfig
+from .parallel_probe_batches import ParallelRunDataset
+from .parallel_linear_probe import (
     ParallelLinearProbe,
     ParallelLinearProbeConfig,
     ParallelLinearProbeEnsemble,
 )
-from .parallel_probe_plan import (  # noqa: F401
+from .parallel_probe_plan import (
     ParallelProbeExecutionPlan,
     ParallelProbeGroup,
     ParallelProbeGroupEstimate,
@@ -40,8 +32,8 @@ from .transformer_probe import (
     TransformerForSequenceClassification,
     TransformerForTokenClassification,
     TransformerProbeConfig,
-)  # noqa: F401
-from .packaged_probe_model import PackagedProbeConfig, PackagedProbeModel  # noqa: F401
+)
+from .packaged_probe_model import PackagedProbeConfig, PackagedProbeModel
 
 __all__ = [
     "LinearProbe",
@@ -75,5 +67,3 @@ __all__ = [
     "PackagedProbeConfig",
     "PackagedProbeModel",
 ]
-
-

@@ -92,39 +92,39 @@ def test_linear_probe_forward_singlelabel() -> None:
     torch.manual_seed(0)
     args = _make_args(probe_type="linear", tokenwise=False, task_type="singlelabel", num_labels=3)
     probe = get_probe(args).eval()
-    x = torch.randn(2, 16)
-    out = probe(x)
-    assert out.logits.shape == (2, 3)
+    embeddings = torch.randn(2, 16)  # (b=2, d=16)
+    output = probe(embeddings)  # logits: (b=2, c=3)
+    assert output.logits.shape == (2, 3)
 
 
 def test_linear_probe_forward_regression() -> None:
     torch.manual_seed(0)
     args = _make_args(probe_type="linear", tokenwise=False, task_type="regression", num_labels=1)
     probe = get_probe(args).eval()
-    x = torch.randn(2, 16)
-    out = probe(x)
-    assert out.logits.shape == (2, 1)
+    embeddings = torch.randn(2, 16)  # (b=2, d=16)
+    output = probe(embeddings)  # logits: (b=2, c=1)
+    assert output.logits.shape == (2, 1)
 
 
 def test_linear_probe_forward_multilabel() -> None:
     torch.manual_seed(0)
     args = _make_args(probe_type="linear", tokenwise=False, task_type="multilabel", num_labels=4)
     probe = get_probe(args).eval()
-    x = torch.randn(2, 16)
-    out = probe(x)
-    assert out.logits.shape == (2, 4)
+    embeddings = torch.randn(2, 16)  # (b=2, d=16)
+    output = probe(embeddings)  # logits: (b=2, c=4)
+    assert output.logits.shape == (2, 4)
 
 
 def test_linear_probe_forward_with_labels_returns_loss() -> None:
     torch.manual_seed(0)
     args = _make_args(probe_type="linear", tokenwise=False, task_type="singlelabel", num_labels=3)
     probe = get_probe(args)
-    x = torch.randn(2, 16)
-    labels = torch.tensor([0, 2])
-    out = probe(x, labels=labels)
-    assert out.loss is not None
-    assert out.loss.ndim == 0
-    assert out.loss.item() > 0
+    embeddings = torch.randn(2, 16)  # (b=2, d=16)
+    labels = torch.tensor([0, 2])  # (b=2,)
+    output = probe(embeddings, labels=labels)  # logits: (b=2, c=3); loss: ()
+    assert output.loss is not None
+    assert output.loss.ndim == 0
+    assert output.loss.item() > 0
 
 
 def test_linear_probe_forward_sigmoid_regression() -> None:
@@ -134,12 +134,12 @@ def test_linear_probe_forward_sigmoid_regression() -> None:
         task_type="sigmoid_regression", num_labels=1,
     )
     probe = get_probe(args).eval()
-    x = torch.randn(2, 16)
-    out = probe(x)
-    assert out.logits.shape == (2, 1)
+    embeddings = torch.randn(2, 16)  # (b=2, d=16)
+    output = probe(embeddings)  # logits: (b=2, c=1)
+    assert output.logits.shape == (2, 1)
     # sigmoid_regression should output values in [0, 1]
-    assert (out.logits >= 0).all()
-    assert (out.logits <= 1).all()
+    assert (output.logits >= 0).all()  # (b, c) -> ()
+    assert (output.logits <= 1).all()  # (b, c) -> ()
 
 
 def test_rebuild_probe_from_saved_config_linear() -> None:

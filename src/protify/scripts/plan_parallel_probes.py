@@ -1,9 +1,18 @@
 import argparse
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 try:
     from probes.parallel_probe_plan import (
+        ParallelProbeCompatibilityKey,
+        ParallelProbeExecutionPlan,
+        ParallelProbeExecutionWave,
+        ParallelProbeGroup,
+        ParallelProbeGroupEstimate,
+        ParallelProbePlanEstimate,
+        ParallelProbeRunSpec,
+        ParallelProbeWaveSchedule,
         build_seed_run_specs,
         estimate_parallel_probe_plan,
         linear_probe_batch_activation_count,
@@ -16,6 +25,14 @@ try:
     )
 except ImportError:
     from protify.probes.parallel_probe_plan import (
+        ParallelProbeCompatibilityKey,
+        ParallelProbeExecutionPlan,
+        ParallelProbeExecutionWave,
+        ParallelProbeGroup,
+        ParallelProbeGroupEstimate,
+        ParallelProbePlanEstimate,
+        ParallelProbeRunSpec,
+        ParallelProbeWaveSchedule,
         build_seed_run_specs,
         estimate_parallel_probe_plan,
         linear_probe_batch_activation_count,
@@ -28,7 +45,10 @@ except ImportError:
     )
 
 
-def parse_args(argv=None):
+GroupSizeCaps = dict[ParallelProbeCompatibilityKey, int]
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Create a no-training parallel linear-probe execution plan for a model/dataset sweep."
     )
@@ -104,7 +124,7 @@ def parse_args(argv=None):
     return validate_args(parser.parse_args(argv))
 
 
-def validate_args(args):
+def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     assert len(args.model_names) > 0, "At least one model name is required."
     assert len(args.data_names) > 0, "At least one dataset name is required."
     assert args.num_runs > 0, "num_runs must be positive."
@@ -176,7 +196,7 @@ class ProbePlanConfig:
         dropout_label = str(self.dropout).replace(".", "p")
         return f"h{self.hidden_size}_l{self.n_layers}_d{dropout_label}"
 
-    def to_report(self):
+    def to_report(self) -> dict[str, object]:
         return {
             "label": self.label,
             "hidden_size": self.hidden_size,
@@ -185,7 +205,10 @@ class ProbePlanConfig:
         }
 
 
-def probe_config_parameter_count(args, probe_config: ProbePlanConfig) -> int:
+def probe_config_parameter_count(
+    args: argparse.Namespace,
+    probe_config: ProbePlanConfig,
+) -> int:
     if args.probe_type != "linear":
         return 0
     return linear_probe_parameter_count(
@@ -198,7 +221,10 @@ def probe_config_parameter_count(args, probe_config: ProbePlanConfig) -> int:
     )
 
 
-def probe_config_recommendation(args, probe_config: ProbePlanConfig):
+def probe_config_recommendation(
+    args: argparse.Namespace,
+    probe_config: ProbePlanConfig,
+) -> dict[str, object]:
     parameter_count = probe_config_parameter_count(args, probe_config)
     bytes_per_run = parameter_count * args.dtype_bytes * (2 + args.optimizer_state_multiplier)
     if args.probe_type == "linear":
@@ -286,25 +312,25 @@ def probe_config_recommendation(args, probe_config: ProbePlanConfig):
     }
 
 
-def probe_hidden_sizes(args):
+def probe_hidden_sizes(args: argparse.Namespace) -> tuple[int, ...]:
     if args.probe_hidden_sizes is None:
         return (args.hidden_size,)
     return tuple(args.probe_hidden_sizes)
 
 
-def probe_dropouts(args):
+def probe_dropouts(args: argparse.Namespace) -> tuple[float, ...]:
     if args.probe_dropouts is None:
         return (args.dropout,)
     return tuple(args.probe_dropouts)
 
 
-def probe_n_layers(args):
+def probe_n_layers(args: argparse.Namespace) -> tuple[int, ...]:
     if args.probe_n_layers is None:
         return (args.n_layers,)
     return tuple(args.probe_n_layers)
 
 
-def probe_plan_configs(args):
+def probe_plan_configs(args: argparse.Namespace) -> tuple[ProbePlanConfig, ...]:
     configs = []
     for hidden_size in probe_hidden_sizes(args):
         for dropout in probe_dropouts(args):
@@ -319,7 +345,7 @@ def probe_plan_configs(args):
     return tuple(configs)
 
 
-def trainer_key(args, probe_config: ProbePlanConfig) -> str:
+def trainer_key(args: argparse.Namespace, probe_config: ProbePlanConfig) -> str:
     return (
         f"batch_mode={args.parallel_batch_mode}|"
         f"index_strategy={args.parallel_index_strategy}|"
@@ -333,7 +359,7 @@ def trainer_key(args, probe_config: ProbePlanConfig) -> str:
     )
 
 
-def build_universe_run_specs(args):
+def build_universe_run_specs(args: argparse.Namespace) -> tuple[ParallelProbeRunSpec, ...]:
     specs = []
     probe_configs = probe_plan_configs(args)
     include_probe_label = len(probe_configs) > 1
@@ -374,7 +400,11 @@ def build_universe_run_specs(args):
     return tuple(specs)
 
 
-def effective_max_group_size_for_spec(args, spec, parallel_max_group_size=None):
+def effective_max_group_size_for_spec(
+    args: argparse.Namespace,
+    spec: ParallelProbeRunSpec,
+    parallel_max_group_size: int | None = None,
+) -> int | None:
     candidate_group_sizes = []
     if parallel_max_group_size is None:
         parallel_max_group_size = args.parallel_max_group_size
@@ -412,7 +442,11 @@ def effective_max_group_size_for_spec(args, spec, parallel_max_group_size=None):
     return min(args.num_runs, min(candidate_group_sizes))
 
 
-def effective_max_group_size_by_key(args, run_specs, parallel_max_group_size=None):
+def effective_max_group_size_by_key(
+    args: argparse.Namespace,
+    run_specs: Sequence[ParallelProbeRunSpec],
+    parallel_max_group_size: int | None = None,
+) -> GroupSizeCaps | None:
     max_group_size_by_key = {}
     for spec in run_specs:
         if spec.is_parallel_linear_eligible():
@@ -430,7 +464,9 @@ def effective_max_group_size_by_key(args, run_specs, parallel_max_group_size=Non
     return max_group_size_by_key
 
 
-def group_size_cap_report(max_group_size_by_key):
+def group_size_cap_report(
+    max_group_size_by_key: GroupSizeCaps | None,
+) -> list[dict[str, object]]:
     if max_group_size_by_key is None:
         return []
     reports = []
@@ -460,7 +496,10 @@ def group_size_cap_report(max_group_size_by_key):
     return reports
 
 
-def applied_group_size_cap(group, max_group_size_by_key):
+def applied_group_size_cap(
+    group: ParallelProbeGroup,
+    max_group_size_by_key: GroupSizeCaps | None,
+) -> int | None:
     if not group.eligible or max_group_size_by_key is None:
         return None
     key = group.compatibility_key
@@ -469,7 +508,11 @@ def applied_group_size_cap(group, max_group_size_by_key):
     return max_group_size_by_key[key]
 
 
-def group_report(group, estimate, max_group_size_by_key=None):
+def group_report(
+    group: ParallelProbeGroup,
+    estimate: ParallelProbeGroupEstimate,
+    max_group_size_by_key: GroupSizeCaps | None = None,
+) -> dict[str, object]:
     representative = group.runs[0]
     return {
         "execution_kind": group.execution_kind,
@@ -519,7 +562,7 @@ def group_report(group, estimate, max_group_size_by_key=None):
     }
 
 
-def group_size_sweep_candidates(args):
+def group_size_sweep_candidates(args: argparse.Namespace) -> tuple[int, ...]:
     candidates = [1]
     size = 2
     while size < args.num_runs:
@@ -532,7 +575,10 @@ def group_size_sweep_candidates(args):
     return tuple(sorted(set(candidates)))
 
 
-def group_size_sweep_report(args, run_specs):
+def group_size_sweep_report(
+    args: argparse.Namespace,
+    run_specs: Sequence[ParallelProbeRunSpec],
+) -> list[dict[str, object]]:
     reports = []
     has_budget_cap = (
         args.training_state_budget_gb is not None
@@ -570,7 +616,10 @@ def group_size_sweep_report(args, run_specs):
     return reports
 
 
-def _estimate_plan_for_args(args, plan):
+def _estimate_plan_for_args(
+    args: argparse.Namespace,
+    plan: ParallelProbeExecutionPlan,
+) -> ParallelProbePlanEstimate:
     return estimate_parallel_probe_plan(
         plan,
         dtype_bytes=args.dtype_bytes,
@@ -586,7 +635,7 @@ def _estimate_plan_for_args(args, plan):
     )
 
 
-def recommendation_group_size_candidates(args):
+def recommendation_group_size_candidates(args: argparse.Namespace) -> tuple[int, ...]:
     candidates = group_size_sweep_candidates(args)
     if args.parallel_max_group_size is not None:
         candidates = tuple(
@@ -597,7 +646,10 @@ def recommendation_group_size_candidates(args):
     return candidates
 
 
-def effective_group_size_summary(max_group_size_by_key, requested_group_size: int):
+def effective_group_size_summary(
+    max_group_size_by_key: GroupSizeCaps | None,
+    requested_group_size: int,
+) -> dict[str, object]:
     if max_group_size_by_key is None:
         return {
             "min_effective_group_size": requested_group_size,
@@ -612,7 +664,10 @@ def effective_group_size_summary(max_group_size_by_key, requested_group_size: in
     }
 
 
-def parallel_cli_args_for_group_size(args, group_size: int):
+def parallel_cli_args_for_group_size(
+    args: argparse.Namespace,
+    group_size: int,
+) -> list[str]:
     cli_args = [
         "--num_runs",
         str(args.num_runs),
@@ -641,7 +696,11 @@ def parallel_cli_args_for_group_size(args, group_size: int):
     return cli_args
 
 
-def manifest_runner_template_args(args, execute: bool, variant: str):
+def manifest_runner_template_args(
+    args: argparse.Namespace,
+    execute: bool,
+    variant: str,
+) -> list[str]:
     assert variant in ("parallel", "sequential", "both"), "variant must be parallel, sequential, or both."
     if args.wave_max_groups > 1 and variant == "parallel":
         wave_execution_mode = "concurrent"
@@ -673,7 +732,10 @@ def manifest_runner_template_args(args, execute: bool, variant: str):
     return cli_args
 
 
-def manifest_embedding_runner_template_args(args, execute: bool):
+def manifest_embedding_runner_template_args(
+    args: argparse.Namespace,
+    execute: bool,
+) -> list[str]:
     if execute:
         output_path = f"{args.telemetry_dir}/manifest_runner_embeddings_execute.report.json"
     else:
@@ -693,7 +755,11 @@ def manifest_embedding_runner_template_args(args, execute: bool):
     return cli_args
 
 
-def execution_recommendation_candidate(args, run_specs, requested_group_size: int):
+def execution_recommendation_candidate(
+    args: argparse.Namespace,
+    run_specs: Sequence[ParallelProbeRunSpec],
+    requested_group_size: int,
+) -> dict[str, object]:
     max_group_size_by_key = effective_max_group_size_by_key(
         args,
         run_specs,
@@ -770,7 +836,10 @@ def _recommendation_sort_key(candidate):
     )
 
 
-def execution_recommendation_report(args, run_specs):
+def execution_recommendation_report(
+    args: argparse.Namespace,
+    run_specs: Sequence[ParallelProbeRunSpec],
+) -> dict[str, object]:
     candidates = [
         execution_recommendation_candidate(args, run_specs, group_size)
         for group_size in recommendation_group_size_candidates(args)
@@ -829,13 +898,16 @@ def execution_recommendation_report(args, run_specs):
     }
 
 
-def wave_memory_budget_bytes(args):
+def wave_memory_budget_bytes(args: argparse.Namespace) -> int | None:
     if args.wave_memory_budget_gb is None:
         return None
     return int(args.wave_memory_budget_gb * (1024 ** 3))
 
 
-def execution_wave_schedule(args, estimate):
+def execution_wave_schedule(
+    args: argparse.Namespace,
+    estimate: ParallelProbePlanEstimate,
+) -> ParallelProbeWaveSchedule:
     return schedule_parallel_probe_execution_waves(
         estimate,
         max_wave_peak_bytes=wave_memory_budget_bytes(args),
@@ -844,30 +916,33 @@ def execution_wave_schedule(args, estimate):
     )
 
 
-def execution_wave_report(schedule):
+def execution_wave_report(schedule: ParallelProbeWaveSchedule) -> dict[str, object]:
     return schedule.summary_dict()
 
 
-def gpu_peak_flops_per_second(args):
+def gpu_peak_flops_per_second(args: argparse.Namespace) -> float | None:
     if args.gpu_peak_tflops is None:
         return None
     return float(args.gpu_peak_tflops) * 1_000_000_000_000.0
 
 
-def gpu_memory_bandwidth_bytes_per_second(args):
+def gpu_memory_bandwidth_bytes_per_second(args: argparse.Namespace) -> float | None:
     if args.gpu_memory_bandwidth_gbps is None:
         return None
     return float(args.gpu_memory_bandwidth_gbps) * 1_000_000_000.0
 
 
-def _max_present(values):
+def _max_present(values: Sequence[float | None]) -> float | None:
     present_values = [value for value in values if value is not None]
     if len(present_values) == 0:
         return None
     return max(present_values)
 
 
-def _roofline_bottleneck(compute_seconds, memory_seconds):
+def _roofline_bottleneck(
+    compute_seconds: float | None,
+    memory_seconds: float | None,
+) -> str | None:
     if compute_seconds is None and memory_seconds is None:
         return None
     if compute_seconds is None:
@@ -881,7 +956,10 @@ def _roofline_bottleneck(compute_seconds, memory_seconds):
     return "balanced"
 
 
-def hardware_roofline_report(args, schedule):
+def hardware_roofline_report(
+    args: argparse.Namespace,
+    schedule: ParallelProbeWaveSchedule,
+) -> dict[str, object]:
     peak_flops_per_second = gpu_peak_flops_per_second(args)
     memory_bandwidth_bytes_per_second = gpu_memory_bandwidth_bytes_per_second(args)
     profile_available = (
@@ -977,7 +1055,12 @@ def hardware_roofline_report(args, schedule):
     }
 
 
-def validation_readiness_report(args, plan, estimate, schedule):
+def validation_readiness_report(
+    args: argparse.Namespace,
+    plan: ParallelProbeExecutionPlan,
+    estimate: ParallelProbePlanEstimate,
+    schedule: ParallelProbeWaveSchedule,
+) -> dict[str, object]:
     vectorized_group_count = len(plan.vectorized_groups)
     eligible_singleton_group_count = sum(
         1 for group in plan.groups
@@ -1040,12 +1123,15 @@ def validation_readiness_report(args, plan, estimate, schedule):
     }
 
 
-def _append_flag(cli_args, flag: str, enabled: bool) -> None:
+def _append_flag(cli_args: list[str], flag: str, enabled: bool) -> None:
     if enabled:
         cli_args.append(flag)
 
 
-def _base_group_cli_args(args, group):
+def _base_group_cli_args(
+    args: argparse.Namespace,
+    group: ParallelProbeGroup,
+) -> list[str]:
     representative = group.runs[0]
     cli_args = [
         "--model_names",
@@ -1076,11 +1162,17 @@ def _base_group_cli_args(args, group):
     return cli_args
 
 
-def sequential_group_cli_args(args, group):
+def sequential_group_cli_args(
+    args: argparse.Namespace,
+    group: ParallelProbeGroup,
+) -> list[str]:
     return _base_group_cli_args(args, group)
 
 
-def parallel_group_cli_args(args, group):
+def parallel_group_cli_args(
+    args: argparse.Namespace,
+    group: ParallelProbeGroup,
+) -> list[str]:
     if not group.can_vectorize:
         return []
     cli_args = _base_group_cli_args(args, group)
@@ -1112,17 +1204,21 @@ def parallel_group_cli_args(args, group):
     return cli_args
 
 
-def protify_command(cli_args):
+def protify_command(cli_args: Sequence[str]) -> list[str]:
     return ["python", "-m", "main"] + list(cli_args)
 
 
-def embedding_kind_for_args(args) -> str:
+def embedding_kind_for_args(args: argparse.Namespace) -> str:
     if args.matrix_embed:
         return "matrix"
     return "pooled"
 
 
-def embedding_prerequisite_cli_args(args, model_name: str, data_name: str):
+def embedding_prerequisite_cli_args(
+    args: argparse.Namespace,
+    model_name: str,
+    data_name: str,
+) -> list[str]:
     cli_args = [
         "--model_names",
         model_name,
@@ -1152,7 +1248,10 @@ def embedding_prerequisite_cli_args(args, model_name: str, data_name: str):
     return cli_args
 
 
-def embedding_prerequisite_report(args, plan):
+def embedding_prerequisite_report(
+    args: argparse.Namespace,
+    plan: ParallelProbeExecutionPlan,
+) -> dict[str, object]:
     embedding_kind = embedding_kind_for_args(args)
     probe_configs = probe_plan_configs(args)
     jobs = []
@@ -1214,7 +1313,10 @@ def embedding_prerequisite_report(args, plan):
     }
 
 
-def gpu_assignment_by_group(args, schedule):
+def gpu_assignment_by_group(
+    args: argparse.Namespace,
+    schedule: ParallelProbeWaveSchedule,
+) -> dict[int, int]:
     if args.gpu_indices is None:
         return {}
     assignments = {}
@@ -1228,17 +1330,28 @@ def gpu_assignment_by_group(args, schedule):
     return assignments
 
 
-def group_environment_for_gpu(assigned_gpu_index):
+def group_environment_for_gpu(assigned_gpu_index: int | None) -> dict[str, str]:
     if assigned_gpu_index is None:
         return {}
     return {"CUDA_VISIBLE_DEVICES": str(assigned_gpu_index)}
 
 
-def telemetry_file_path(args, command_id: str, variant: str, suffix: str) -> str:
+def telemetry_file_path(
+    args: argparse.Namespace,
+    command_id: str,
+    variant: str,
+    suffix: str,
+) -> str:
     return f"{args.telemetry_dir}/{command_id}_{variant}.{suffix}"
 
 
-def monitor_command(args, command_id: str, variant: str, command, assigned_gpu_index=None):
+def monitor_command(
+    args: argparse.Namespace,
+    command_id: str,
+    variant: str,
+    command: Sequence[str],
+    assigned_gpu_index: int | None = None,
+) -> list[str]:
     if len(command) == 0:
         return []
     monitor_gpu_index = args.monitor_gpu_index
@@ -1262,7 +1375,13 @@ def monitor_command(args, command_id: str, variant: str, command, assigned_gpu_i
     return monitor_args
 
 
-def group_launch_manifest(args, group, estimate, group_index: int, assigned_gpu_index=None):
+def group_launch_manifest(
+    args: argparse.Namespace,
+    group: ParallelProbeGroup,
+    estimate: ParallelProbeGroupEstimate,
+    group_index: int,
+    assigned_gpu_index: int | None = None,
+) -> dict[str, object]:
     representative = group.runs[0]
     command_id = f"group-{group_index + 1}"
     sequential_cli_args = sequential_group_cli_args(args, group)
@@ -1313,7 +1432,12 @@ def group_launch_manifest(args, group, estimate, group_index: int, assigned_gpu_
     }
 
 
-def wave_gpu_assignment_report(wave, group_manifests, group_estimates, memory_budget_bytes=None):
+def wave_gpu_assignment_report(
+    wave: ParallelProbeExecutionWave,
+    group_manifests: Sequence[dict[str, object]],
+    group_estimates: Sequence[ParallelProbeGroupEstimate],
+    memory_budget_bytes: int | None = None,
+) -> list[dict[str, object]]:
     gpu_reports_by_index = {}
     for group_index in wave.group_indices:
         group_manifest = group_manifests[group_index]
@@ -1355,7 +1479,13 @@ def wave_gpu_assignment_report(wave, group_manifests, group_estimates, memory_bu
     ]
 
 
-def launch_manifest_report(args, plan, estimate, schedule, embedding_prerequisites=None):
+def launch_manifest_report(
+    args: argparse.Namespace,
+    plan: ParallelProbeExecutionPlan,
+    estimate: ParallelProbePlanEstimate,
+    schedule: ParallelProbeWaveSchedule,
+    embedding_prerequisites: dict[str, object] | None = None,
+) -> dict[str, object]:
     gpu_assignments = gpu_assignment_by_group(args, schedule)
     gpu_memory_budget_bytes = None
     if args.gpu_indices is not None:
@@ -1442,7 +1572,7 @@ def launch_manifest_report(args, plan, estimate, schedule, embedding_prerequisit
     }
 
 
-def parallel_cli_args(args):
+def parallel_cli_args(args: argparse.Namespace) -> list[str]:
     cli_args = [
         "--num_runs",
         str(args.num_runs),
@@ -1471,7 +1601,11 @@ def parallel_cli_args(args):
     return cli_args
 
 
-def compare_results_template_args(args, runner_report_paths, output_path: str):
+def compare_results_template_args(
+    args: argparse.Namespace,
+    runner_report_paths: Sequence[str],
+    output_path: str,
+) -> list[str]:
     cli_args = [
         "--sequential_results",
         "<sequential_results.tsv>",
@@ -1499,7 +1633,11 @@ def compare_results_template_args(args, runner_report_paths, output_path: str):
     return cli_args
 
 
-def validation_comparison_report(args, plan, run_specs):
+def validation_comparison_report(
+    args: argparse.Namespace,
+    plan: ParallelProbeExecutionPlan,
+    run_specs: Sequence[ParallelProbeRunSpec],
+) -> dict[str, object]:
     speedup_formulas = {
         "sequential_total_seconds": "sequential.training_time_seconds",
         "parallel_total_seconds": "parallel.training_time_seconds",
@@ -1555,7 +1693,7 @@ def validation_comparison_report(args, plan, run_specs):
     }
 
 
-def build_plan_report(args):
+def build_plan_report(args: argparse.Namespace) -> dict[str, object]:
     run_specs = build_universe_run_specs(args)
     probe_configs = probe_plan_configs(args)
     max_group_size_by_key = effective_max_group_size_by_key(args, run_specs)

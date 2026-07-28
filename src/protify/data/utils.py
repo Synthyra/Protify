@@ -2,12 +2,12 @@ import torch
 from typing import Optional, Tuple
 
 
-AA_SET = set('LAGVSERTIPDKQNFYMHWCXBUOZ*')
-CODON_SET = set('aA@bB#$%rRnNdDcCeEqQ^G&ghHiIj+MmlJLkK(fFpPoO=szZwSXTtxWyYuvUV]})')
-DNA_SET = set('ATCG')
-RNA_SET = set('AUCG')
-NONCANONICAL_AMINO_ACIDS = set('XBUOZ*')
-AMINO_ACID_TO_HUMAN_CODON = {
+AA_SET: set[str] = set('LAGVSERTIPDKQNFYMHWCXBUOZ*')
+CODON_SET: set[str] = set('aA@bB#$%rRnNdDcCeEqQ^G&ghHiIj+MmlJLkK(fFpPoO=szZwSXTtxWyYuvUV]})')
+DNA_SET: set[str] = set('ATCG')
+RNA_SET: set[str] = set('AUCG')
+NONCANONICAL_AMINO_ACIDS: set[str] = set('XBUOZ*')
+AMINO_ACID_TO_HUMAN_CODON: dict[str, str] = {
     'A': 'GCC',
     'R': 'CGC',
     'N': 'AAC',
@@ -31,7 +31,7 @@ AMINO_ACID_TO_HUMAN_CODON = {
 }
 NONCANONICAL_ALANINE_CODON = 'GCT'
 
-AA_TO_CODON_TOKEN = {
+AA_TO_CODON_TOKEN: dict[str, str] = {
     'A': 'A',
     'R': 'B',
     'N': 'N',
@@ -53,7 +53,7 @@ AA_TO_CODON_TOKEN = {
     'Y': 'Y',
     'V': 'V',
 }
-CODON_TO_AA = {
+CODON_TO_AA: dict[str, str] = {
     'a':'A',
     'A':'A',
     '@':'A',
@@ -119,7 +119,7 @@ CODON_TO_AA = {
     '}':'*',
     ')':'*',
 }
-DNA_CODON_TO_AA = {
+DNA_CODON_TO_AA: dict[str, str] = {
     'TTT': 'F', 'TTC': 'F', 'TTA': 'L', 'TTG': 'L',
     'TCT': 'S', 'TCC': 'S', 'TCA': 'S', 'TCG': 'S',
     'TAT': 'Y', 'TAC': 'Y', 'TAA': '*', 'TAG': '*',
@@ -138,36 +138,39 @@ DNA_CODON_TO_AA = {
     'GGT': 'G', 'GGC': 'G', 'GGA': 'G', 'GGG': 'G',
 }
 
-RNA_CODON_TO_AA = {
+RNA_CODON_TO_AA: dict[str, str] = {
     codon.replace('T', 'U'): aa for codon, aa in DNA_CODON_TO_AA.items()
 }
 
 
-
 def pad_and_concatenate_dimer(
-        A: torch.Tensor,
-        B: torch.Tensor,
-        a_mask: Optional[torch.Tensor] = None,
-        b_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Given two sequences A and B with masks, pad (if needed) and concatenate them.
-    """
-    batch_size, L, d = A.size()
+    A: torch.Tensor,
+    B: torch.Tensor,
+    a_mask: Optional[torch.Tensor] = None,
+    b_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Concatenate each pair of valid sequence embeddings into a padded batch."""
+    # A: (b, l_a, d); B: (b, l_b, d)
+    batch_size, a_seq_len, hidden_size = A.size()  # b, l_a, d
     if a_mask is None:
-        a_mask = torch.ones(batch_size, L, device=A.device)
+        a_mask = torch.ones(batch_size, a_seq_len, device=A.device)  # (b, l_a)
     if b_mask is None:
-        b_mask = torch.ones(batch_size, L, device=A.device)
-    # Compute the maximum (valid) length in the batch.
-    max_len = max(
+        # The historical no-mask path assumes l_b == l_a.
+        b_mask = torch.ones(batch_size, a_seq_len, device=A.device)  # (b, l_a)
+
+    # a_mask: (b, l_a); b_mask: (b, l_b) when supplied by the caller
+    max_len = max(  # l_out = max_i(l_a_i + l_b_i)
         int(a_mask[i].sum().item() + b_mask[i].sum().item())
         for i in range(batch_size)
     )
-    combined = torch.zeros(batch_size, max_len, d, device=A.device)
-    combined_mask = torch.zeros(batch_size, max_len, device=A.device)
+    combined = torch.zeros(batch_size, max_len, hidden_size, device=A.device)  # (b, l_out, d)
+    combined_mask = torch.zeros(batch_size, max_len, device=A.device)  # (b, l_out)
+
     for i in range(batch_size):
-        a_len = int(a_mask[i].sum().item())
-        b_len = int(b_mask[i].sum().item())
-        combined[i, :a_len] = A[i, :a_len]
-        combined[i, a_len:a_len+b_len] = B[i, :b_len]
-        combined_mask[i, :a_len+b_len] = 1
-    return combined, combined_mask
+        a_len = int(a_mask[i].sum().item())  # l_a_i
+        b_len = int(b_mask[i].sum().item())  # l_b_i
+        combined[i, :a_len] = A[i, :a_len]  # (a_len, d) <- (a_len, d)
+        combined[i, a_len:a_len + b_len] = B[i, :b_len]  # (b_len, d) <- (b_len, d)
+        combined_mask[i, :a_len + b_len] = 1  # (a_len + b_len,)
+
+    return combined, combined_mask  # (b, l_out, d), (b, l_out)

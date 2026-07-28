@@ -33,7 +33,8 @@ def test_scikit_probe_passes_n_jobs_to_random_search(monkeypatch) -> None:
             self.best_params_ = {"alpha": 1.0}
             self.best_score_ = 0.5
 
-        def fit(self, X_train, y_train) -> None:
+        def fit(self, X_train: np.ndarray, y_train: np.ndarray) -> None:
+            # X_train: (n, d); y_train: (n,)
             captured["n_samples"] = X_train.shape[0]
 
     monkeypatch.setattr(scikit_classes, "RandomizedSearchCV", FakeRandomizedSearchCV)
@@ -44,8 +45,8 @@ def test_scikit_probe_passes_n_jobs_to_random_search(monkeypatch) -> None:
     )
 
     probe = ScikitProbe(ScikitArguments(n_jobs=4, n_iter=2, cv=2))
-    X_train = np.ones((8, 3))
-    y_train = np.arange(8, dtype=float)
+    X_train = np.ones((8, 3))  # (n=8, d=3)
+    y_train = np.arange(8, dtype=float)  # (n=8,)
     best_model, best_params = probe._tune_hyperparameters(
         Ridge,
         "Ridge",

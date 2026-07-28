@@ -1,53 +1,63 @@
-import torch
 import numpy as np
+import torch
+from typing import Any, Callable, Dict, List, Tuple
+
+from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import (
-    r2_score,
-    mean_squared_error,
-    mean_absolute_error,
+    accuracy_score,
+    auc,
+    confusion_matrix,
     f1_score,
+    hamming_loss,
+    make_scorer,
+    matthews_corrcoef,
+    mean_absolute_error,
+    mean_squared_error,
     precision_score,
+    precision_recall_curve,
+    r2_score,
     recall_score,
     roc_auc_score,
-    precision_recall_curve,
-    auc,
-    matthews_corrcoef,
-    confusion_matrix,
-    hamming_loss,
-    accuracy_score,
-    make_scorer,
 )
-from typing import Callable, Dict, Tuple
-from scipy.stats import pearsonr, spearmanr
 from transformers import EvalPrediction
 
 
 def softmax(x: np.ndarray) -> np.ndarray:
-    x = x - x.max(axis=-1, keepdims=True)
-    e = np.exp(x)
-    return e / np.sum(e, axis=-1, keepdims=True)
+    # x: (..., c)
+    x = x - x.max(axis=-1, keepdims=True)  # (..., c)
+    exponentials = np.exp(x)  # (..., c)
+    return exponentials / np.sum(exponentials, axis=-1, keepdims=True)  # (..., c)
 
 
-def regression_scorer() -> Callable:
+def regression_scorer() -> Callable[[np.ndarray, np.ndarray], float]:
     def dual_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        # y_true: (n,); y_pred: (n,)
         return spearmanr(y_true, y_pred).correlation * r2_score(y_true, y_pred)
+
     return dual_score
 
 
-def classification_scorer() -> Callable:
+def classification_scorer() -> Callable[[np.ndarray, np.ndarray], float]:
     def mcc_scorer(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        # y_true: (n,); y_pred: (n,)
         return matthews_corrcoef(y_true, y_pred)
+
     return mcc_scorer
 
 
-def get_classification_scorer():
+def get_classification_scorer() -> Any:
     return make_scorer(classification_scorer(), greater_is_better=True)
 
 
-def get_regression_scorer():
+def get_regression_scorer() -> Any:
     return make_scorer(regression_scorer(), greater_is_better=True)
 
 
-def calculate_max_metrics(ss: torch.Tensor, labels: torch.Tensor, cutoff: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def calculate_max_metrics(
+    ss: torch.Tensor,
+    labels: torch.Tensor,
+    cutoff: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Calculate precision, recall and F1 metrics for binary classification at a specific cutoff threshold.
 
@@ -70,19 +80,36 @@ def calculate_max_metrics(ss: torch.Tensor, labels: torch.Tensor, cutoff: float)
             - Recall = TP / (TP + FN)
             - F1 = 2 * (Precision * Recall) / (Precision + Recall)
     """
-    ss, labels = ss.float(), labels.float()
-    tp = torch.sum((ss >= cutoff) & (labels == 1.0))
-    fp = torch.sum((ss >= cutoff) & (labels == 0.0))
-    fn = torch.sum((ss < cutoff) & (labels == 1.0))
-    precision_denominator = tp + fp
-    precision = torch.where(precision_denominator != 0, tp / precision_denominator, torch.tensor(0.0))
-    recall_denominator = tp + fn
-    recall = torch.where(recall_denominator != 0, tp / recall_denominator, torch.tensor(0.0))
-    f1 = torch.where((precision + recall) != 0, (2 * precision * recall) / (precision + recall), torch.tensor(0.0))
-    return f1, precision, recall
+    # ss: (...); labels: (...)
+    ss, labels = ss.float(), labels.float()  # each (...)
+    tp = torch.sum((ss >= cutoff) & (labels == 1.0))  # ()
+    fp = torch.sum((ss >= cutoff) & (labels == 0.0))  # ()
+    fn = torch.sum((ss < cutoff) & (labels == 1.0))  # ()
+    precision_denominator = tp + fp  # ()
+    precision = torch.where(  # ()
+        precision_denominator != 0,
+        tp / precision_denominator,
+        torch.tensor(0.0),
+    )
+    recall_denominator = tp + fn  # ()
+    recall = torch.where(  # ()
+        recall_denominator != 0,
+        tp / recall_denominator,
+        torch.tensor(0.0),
+    )
+    f1 = torch.where(  # ()
+        (precision + recall) != 0,
+        (2 * precision * recall) / (precision + recall),
+        torch.tensor(0.0),
+    )
+    return f1, precision, recall  # each ()
 
 
-def max_metrics(ss: torch.Tensor, labels: torch.Tensor, increment: float = 0.01) -> Tuple[float, float, float, float]:
+def max_metrics(
+    ss: torch.Tensor,
+    labels: torch.Tensor,
+    increment: float = 0.01,
+) -> Tuple[float, float, float, float]:
     """
     Find optimal classification metrics by scanning different cutoff thresholds.
     Optimized version that vectorizes calculations across all cutoffs.
@@ -107,58 +134,63 @@ def max_metrics(ss: torch.Tensor, labels: torch.Tensor, increment: float = 0.01)
         - Returns metrics at the threshold that maximizes F1 score
         - Optimized to compute metrics for all cutoffs in parallel using vectorization
     """
-    # Handle NaNs by replacing with 0.0
-    ss = torch.nan_to_num(ss, nan=0.0)
-    ss = torch.clamp(ss, -1.0, 1.0)
+    # ss: (n,); labels: (n,)
+    ss = torch.nan_to_num(ss, nan=0.0)  # (n,)
+    ss = torch.clamp(ss, -1.0, 1.0)  # (n,)
     min_val = ss.min().item()
     max_val = 1
     if min_val >= max_val:
         min_val = 0
     
-    # Convert to float and ensure labels are binary
-    ss = ss.float()
-    labels = labels.float()
-    
-    # Create cutoff tensor
-    cutoffs = torch.arange(min_val, max_val, increment, device=ss.device, dtype=ss.dtype)
+    ss = ss.float()  # (n,)
+    labels = labels.float()  # (n,)
+
+    cutoffs = torch.arange(  # (k,); k = number of candidate thresholds
+        min_val,
+        max_val,
+        increment,
+        device=ss.device,
+        dtype=ss.dtype,
+    )
     n_cutoffs = len(cutoffs)
-    
+
     if n_cutoffs == 0:
-        # Edge case: no cutoffs to test
         return 0.0, 0.0, 0.0, min_val
-    
-    # Vectorize across all cutoffs: shape (n_cutoffs, n_samples)
-    # Expand cutoffs to (n_cutoffs, 1) and ss to (1, n_samples) for broadcasting
-    ss_expanded = ss.unsqueeze(0)  # (1, n_samples)
-    cutoffs_expanded = cutoffs.unsqueeze(1)  # (n_cutoffs, 1)
-    labels_expanded = labels.unsqueeze(0)  # (1, n_samples)
-    
-    # Compute predictions for all cutoffs at once: (n_cutoffs, n_samples)
-    predictions = (ss_expanded >= cutoffs_expanded).float()
-    
-    # Compute TP, FP, FN for all cutoffs simultaneously
-    # TP: predicted positive and label positive
-    tp = torch.sum(predictions * labels_expanded, dim=1)  # (n_cutoffs,)
-    # FP: predicted positive but label negative
-    fp = torch.sum(predictions * (1.0 - labels_expanded), dim=1)  # (n_cutoffs,)
-    # FN: predicted negative but label positive
-    fn = torch.sum((1.0 - predictions) * labels_expanded, dim=1)  # (n_cutoffs,)
-    
-    # Compute precision, recall, F1 for all cutoffs
-    precision_denominator = tp + fp
-    precision = torch.where(precision_denominator != 0, tp / precision_denominator, torch.tensor(0.0, device=ss.device))
-    
-    recall_denominator = tp + fn
-    recall = torch.where(recall_denominator != 0, tp / recall_denominator, torch.tensor(0.0, device=ss.device))
-    
-    # Compute F1 scores
-    f1_denominator = precision + recall
-    f1s = torch.where(f1_denominator != 0, (2 * precision * recall) / f1_denominator, torch.tensor(0.0, device=ss.device))
-    
-    # Handle NaN values by replacing with -1
-    valid_f1s = torch.where(torch.isnan(f1s), torch.tensor(-1.0, device=ss.device), f1s)
-    max_index = torch.argmax(valid_f1s)
-    
+
+    ss_expanded = ss.unsqueeze(0)  # (1, n)
+    cutoffs_expanded = cutoffs.unsqueeze(1)  # (k, 1)
+    labels_expanded = labels.unsqueeze(0)  # (1, n)
+    predictions = (ss_expanded >= cutoffs_expanded).float()  # (k, n)
+
+    tp = torch.sum(predictions * labels_expanded, dim=1)  # (k,)
+    fp = torch.sum(predictions * (1.0 - labels_expanded), dim=1)  # (k,)
+    fn = torch.sum((1.0 - predictions) * labels_expanded, dim=1)  # (k,)
+
+    precision_denominator = tp + fp  # (k,)
+    precision = torch.where(  # (k,)
+        precision_denominator != 0,
+        tp / precision_denominator,
+        torch.tensor(0.0, device=ss.device),
+    )
+    recall_denominator = tp + fn  # (k,)
+    recall = torch.where(  # (k,)
+        recall_denominator != 0,
+        tp / recall_denominator,
+        torch.tensor(0.0, device=ss.device),
+    )
+    f1_denominator = precision + recall  # (k,)
+    f1s = torch.where(  # (k,)
+        f1_denominator != 0,
+        (2 * precision * recall) / f1_denominator,
+        torch.tensor(0.0, device=ss.device),
+    )
+    valid_f1s = torch.where(  # (k,)
+        torch.isnan(f1s),
+        torch.tensor(-1.0, device=ss.device),
+        f1s,
+    )
+    max_index = torch.argmax(valid_f1s)  # ()
+
     return f1s[max_index].item(), precision[max_index].item(), recall[max_index].item(), cutoffs[max_index].item()
 
 
@@ -168,30 +200,31 @@ def calculate_robust_roc_auc_multiclass(y_true: np.ndarray, probs: np.ndarray) -
     Robust ROC AUC for multi-class (single-label) tasks.
     Handles missing classes in y_true by ignoring them in the weighted average.
     """
-    # Check for NaNs in probs
+    # y_true: (n,); probs: (n, c)
     if np.isnan(probs).any():
-        probs = np.nan_to_num(probs, nan=0.0)
-        
-    n_classes = probs.shape[1]
+        probs = np.nan_to_num(probs, nan=0.0)  # (n, c)
+
+    n_classes = probs.shape[1]  # c
     try:
         if n_classes == 2:
             if len(np.unique(y_true)) == 2:
+                # probs[:, 1]: (n,)
                 return roc_auc_score(y_true, probs[:, 1])
             return -100.0
-        
-        y_true_onehot = np.eye(n_classes)[y_true]
-        scores = []
-        weights = []
+
+        y_true_onehot = np.eye(n_classes)[y_true]  # (n, c)
+        scores: List[float] = []
+        class_weights: List[float] = []
         for i in range(n_classes):
-            # Only calculate if both positive and negative samples exist
             if len(np.unique(y_true_onehot[:, i])) == 2:
+                # y_true_onehot[:, i]: (n,); probs[:, i]: (n,)
                 scores.append(roc_auc_score(y_true_onehot[:, i], probs[:, i]))
-                weights.append(np.sum(y_true_onehot[:, i]))
-                
+                class_weights.append(np.sum(y_true_onehot[:, i]))
+
         if not scores:
             return -100.0
-            
-        return float(np.average(scores, weights=weights))
+
+        return float(np.average(scores, weights=class_weights))
     except Exception:
         return -100.0
 
@@ -200,31 +233,35 @@ def calculate_robust_pr_auc_multiclass(y_true: np.ndarray, probs: np.ndarray) ->
     """
     Robust PR AUC for multi-class (single-label) tasks.
     """
-    # Check for NaNs in probs
+    # y_true: (n,); probs: (n, c)
     if np.isnan(probs).any():
-        probs = np.nan_to_num(probs, nan=0.0)
+        probs = np.nan_to_num(probs, nan=0.0)  # (n, c)
 
-    n_classes = probs.shape[1]
+    n_classes = probs.shape[1]  # c
     try:
         if n_classes == 2:
             if len(np.unique(y_true)) == 2:
+                # probs[:, 1]: (n,)
                 precision, recall, _ = precision_recall_curve(y_true, probs[:, 1])
+                # precision: (q,); recall: (q,); _: (q - 1,); q = curve points
                 return auc(recall, precision)
             return -100.0
 
-        y_true_onehot = np.eye(n_classes)[y_true]
-        scores = []
-        weights = []
+        y_true_onehot = np.eye(n_classes)[y_true]  # (n, c)
+        scores: List[float] = []
+        class_weights: List[float] = []
         for i in range(n_classes):
             if len(np.unique(y_true_onehot[:, i])) == 2:
+                # y_true_onehot[:, i]: (n,); probs[:, i]: (n,)
                 precision, recall, _ = precision_recall_curve(y_true_onehot[:, i], probs[:, i])
+                # precision: (q,); recall: (q,); _: (q - 1,); q = curve points
                 scores.append(auc(recall, precision))
-                weights.append(np.sum(y_true_onehot[:, i]))
-                
+                class_weights.append(np.sum(y_true_onehot[:, i]))
+
         if not scores:
             return -100.0
-            
-        return float(np.average(scores, weights=weights))
+
+        return float(np.average(scores, weights=class_weights))
     except Exception:
         return -100.0
 
@@ -233,15 +270,17 @@ def calculate_robust_roc_auc_multilabel(y_true: np.ndarray, probs: np.ndarray) -
     """
     Robust ROC AUC for multi-label tasks (macro average).
     """
+    # y_true: (n, c); probs: (n, c)
     if np.isnan(probs).any():
-        probs = np.nan_to_num(probs, nan=0.0)
+        probs = np.nan_to_num(probs, nan=0.0)  # (n, c)
 
-    scores = []
+    scores: List[float] = []
     try:
         for i in range(y_true.shape[1]):
             if len(np.unique(y_true[:, i])) == 2:
+                # y_true[:, i]: (n,); probs[:, i]: (n,)
                 scores.append(roc_auc_score(y_true[:, i], probs[:, i]))
-        
+
         if not scores:
             return -100.0
         return float(np.mean(scores))
@@ -253,16 +292,19 @@ def calculate_robust_pr_auc_multilabel(y_true: np.ndarray, probs: np.ndarray) ->
     """
     Robust PR AUC for multi-label tasks (macro average).
     """
+    # y_true: (n, c); probs: (n, c)
     if np.isnan(probs).any():
-        probs = np.nan_to_num(probs, nan=0.0)
+        probs = np.nan_to_num(probs, nan=0.0)  # (n, c)
 
-    scores = []
+    scores: List[float] = []
     try:
         for i in range(y_true.shape[1]):
             if len(np.unique(y_true[:, i])) == 2:
+                # y_true[:, i]: (n,); probs[:, i]: (n,)
                 precision, recall, _ = precision_recall_curve(y_true[:, i], probs[:, i])
+                # precision: (q,); recall: (q,); _: (q - 1,); q = curve points
                 scores.append(auc(recall, precision))
-        
+
         if not scores:
             return -100.0
         return float(np.mean(scores))
@@ -297,18 +339,16 @@ def compute_single_label_classification_metrics(p: EvalPrediction) -> Dict[str, 
     """
     logits = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
     labels = p.label_ids[1] if isinstance(p.label_ids, tuple) else p.label_ids
+    # logits: (n, c); labels: (n,)
 
-    y_pred = logits.argmax(axis=-1).flatten()
-    y_true = labels.flatten().astype(int)
-    probs = softmax(logits)
+    y_pred = logits.argmax(axis=-1).flatten()  # (n,)
+    y_true = labels.flatten().astype(int)  # (n,)
+    probs = softmax(logits)  # (n, c)
 
-    # Calculate ROC AUC
     roc_auc = calculate_robust_roc_auc_multiclass(y_true, probs)
-    
-    # Calculate PR AUC (true AUC of Precision-Recall curve)
     pr_auc = calculate_robust_pr_auc_multiclass(y_true, probs)
-    
-    cm = confusion_matrix(y_true, y_pred)
+
+    cm = confusion_matrix(y_true, y_pred)  # (u, u); u = observed classes
     print("\nConfusion Matrix:")
     print(cm)
 
@@ -354,14 +394,15 @@ def compute_tokenwise_classification_metrics(p: EvalPrediction) -> Dict[str, flo
     """
     logits = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
     labels = p.label_ids
-    # Compute f1 score
-    y_pred = logits.argmax(axis=-1).flatten()
-    y_true = labels.flatten()
-    valid_indices = y_true != -100
-    y_pred = y_pred[valid_indices]
-    y_true = y_true[valid_indices]
+    # logits: (b, l, c); labels: (b, l)
 
-    cm = confusion_matrix(y_true, y_pred)
+    y_pred = logits.argmax(axis=-1).flatten()  # (b * l,)
+    y_true = labels.flatten()  # (b * l,)
+    valid_indices = y_true != -100  # (b * l,)
+    y_pred = y_pred[valid_indices]  # (n,); n = valid tokens
+    y_true = y_true[valid_indices]  # (n,)
+
+    cm = confusion_matrix(y_true, y_pred)  # (u, u); u = observed classes
     print("\nConfusion Matrix:")
     print(cm)
 
@@ -370,18 +411,13 @@ def compute_tokenwise_classification_metrics(p: EvalPrediction) -> Dict[str, flo
     recall = recall_score(y_true, y_pred, average='macro', zero_division=0)
     accuracy = accuracy_score(y_true, y_pred)
     mcc = matthews_corrcoef(y_true, y_pred)
-    
-    # Calculate probabilities for AUC metrics
-    probs = softmax(logits)
-    probs = probs.reshape(-1, probs.shape[-1])  # Flatten to (n_samples, n_classes)
-    probs = probs[valid_indices]  # Filter by valid indices
-    
-    # Calculate ROC AUC
+    probs = softmax(logits)  # (b, l, c)
+    probs = probs.reshape(-1, probs.shape[-1])  # (b * l, c)
+    probs = probs[valid_indices]  # (n, c)
+
     roc_auc = calculate_robust_roc_auc_multiclass(y_true, probs)
-    
-    # Calculate PR AUC (true AUC of Precision-Recall curve)
     pr_auc = calculate_robust_pr_auc_multiclass(y_true, probs)
-    
+
     return {
         'accuracy': round(accuracy, 5),
         'f1': round(f1, 5),
@@ -421,35 +457,33 @@ def compute_multi_label_classification_metrics(p: EvalPrediction) -> Dict[str, f
     """
     preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
     labels = p.label_ids[1] if isinstance(p.label_ids, tuple) else p.label_ids
+    # preds: (n, c); labels: (n, c)
 
-    # Convert to tensors efficiently, avoiding unnecessary numpy round-trip
     if not isinstance(preds, torch.Tensor):
-        preds = torch.tensor(preds)
+        preds = torch.tensor(preds)  # (n, c)
     if not isinstance(labels, torch.Tensor):
-        y_true = torch.tensor(labels, dtype=torch.int)
+        y_true = torch.tensor(labels, dtype=torch.int)  # (n, c)
     else:
-        y_true = labels.int()
+        y_true = labels.int()  # (n, c)
 
-    probs = preds.sigmoid()
-    y_pred = (probs > 0.5).int()
+    probs = preds.sigmoid()  # (n, c)
+    y_pred = (probs > 0.5).int()  # (n, c)
 
-    # Flatten before max_metrics for efficiency - max_metrics expects flattened tensors
-    probs_flat = probs.flatten()
-    y_true_flat = y_true.flatten()
+    probs_flat = probs.flatten()  # (n * c,)
+    y_true_flat = y_true.flatten()  # (n * c,)
     f1, prec, recall, thres = max_metrics(probs_flat, y_true_flat)
-    
-    y_pred_flat, y_true_flat = y_pred.flatten().numpy(), y_true.flatten().numpy()
-    
+
+    y_pred_flat = y_pred.flatten().numpy()  # (n * c,)
+    y_true_flat = y_true.flatten().numpy()  # (n * c,)
+
     accuracy = accuracy_score(y_pred_flat, y_true_flat)
     hamming = hamming_loss(y_pred_flat, y_true_flat)
     mcc = matthews_corrcoef(y_true_flat, y_pred_flat)
-    
-    # Calculate ROC AUC for multilabel case
-    # Use unflattened arrays for macro averaging
-    roc_auc = calculate_robust_roc_auc_multilabel(y_true.numpy(), probs.numpy())
-    
-    # Calculate PR AUC for multilabel case (true AUC of Precision-Recall curve)
-    pr_auc = calculate_robust_pr_auc_multilabel(y_true.numpy(), probs.numpy())
+
+    y_true_array = y_true.numpy()  # (n, c)
+    probabilities_array = probs.numpy()  # (n, c)
+    roc_auc = calculate_robust_roc_auc_multilabel(y_true_array, probabilities_array)
+    pr_auc = calculate_robust_pr_auc_multilabel(y_true_array, probabilities_array)
 
     return {
         'accuracy': round(accuracy, 5),
@@ -491,16 +525,17 @@ def compute_regression_metrics(p: EvalPrediction) -> Dict[str, float]:
     """
     preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
     labels = p.label_ids[1] if isinstance(p.label_ids, tuple) else p.label_ids
+    # preds: (...); labels: (...)
 
-    y_pred = np.array(preds).flatten()
-    y_true = np.array(labels).flatten()
+    y_pred = np.array(preds).flatten()  # (n,)
+    y_true = np.array(labels).flatten()  # (n,)
 
     if np.isnan(y_true).any():
         print("y_true Nans were cast to 0")
-        y_true = np.where(np.isnan(y_true), 0, y_true)
+        y_true = np.where(np.isnan(y_true), 0, y_true)  # (n,)
     if np.isnan(y_pred).any():
         print("y_pred Nans were cast to 0")
-        y_pred = np.where(np.isnan(y_pred), 0, y_pred)
+        y_pred = np.where(np.isnan(y_pred), 0, y_pred)  # (n,)
 
     try:
         spearman_rho, spear_pval = spearmanr(y_pred, y_true)
@@ -514,7 +549,7 @@ def compute_regression_metrics(p: EvalPrediction) -> Dict[str, float]:
     r2 = r2_score(y_true, y_pred)
     mse = mean_squared_error(y_true, y_pred)
     mae = mean_absolute_error(y_true, y_pred)
-    rmse = np.sqrt(mse)
+    rmse = np.sqrt(mse)  # ()
 
     return {
         'r_squared': round(r2, 5),
@@ -536,18 +571,17 @@ def compute_tokenwise_regression_metrics(p: EvalPrediction) -> Dict[str, float]:
     """
     preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
     labels = p.label_ids[1] if isinstance(p.label_ids, tuple) else p.label_ids
+    # preds: (...) or (..., 1); labels: (...)
 
-    y_pred = np.array(preds)
-    y_true = np.array(labels)
+    y_pred = np.array(preds)  # (...) or (..., 1)
+    y_true = np.array(labels)  # (...)
 
-    # If predictions have an extra trailing dim of size 1, squeeze it
     if y_pred.ndim == y_true.ndim + 1 and y_pred.shape[-1] == 1:
-        y_pred = np.squeeze(y_pred, axis=-1)
+        y_pred = np.squeeze(y_pred, axis=-1)  # (...)
 
-    # Flatten to align and filter by valid positions (labels != -100)
-    valid_mask = (y_true != -100)
-    y_true = y_true[valid_mask].astype(float)
-    y_pred = y_pred[valid_mask].astype(float)
+    valid_mask = y_true != -100  # (...)
+    y_true = y_true[valid_mask].astype(float)  # (n,); n = valid positions
+    y_pred = y_pred[valid_mask].astype(float)  # (n,)
 
     if y_true.size == 0:
         return {
@@ -563,10 +597,10 @@ def compute_tokenwise_regression_metrics(p: EvalPrediction) -> Dict[str, float]:
 
     if np.isnan(y_true).any():
         print("y_true Nans were cast to 0")
-        y_true = np.where(np.isnan(y_true), 0, y_true)
+        y_true = np.where(np.isnan(y_true), 0, y_true)  # (n,)
     if np.isnan(y_pred).any():
         print("y_pred Nans were cast to 0")
-        y_pred = np.where(np.isnan(y_pred), 0, y_pred)
+        y_pred = np.where(np.isnan(y_pred), 0, y_pred)  # (n,)
 
     try:
         spearman_rho, spear_pval = spearmanr(y_pred, y_true)
@@ -580,7 +614,7 @@ def compute_tokenwise_regression_metrics(p: EvalPrediction) -> Dict[str, float]:
     r2 = r2_score(y_true, y_pred)
     mse = mean_squared_error(y_true, y_pred)
     mae = mean_absolute_error(y_true, y_pred)
-    rmse = np.sqrt(mse)
+    rmse = np.sqrt(mse)  # ()
 
     return {
         'r_squared': round(float(r2), 5),
@@ -594,7 +628,10 @@ def compute_tokenwise_regression_metrics(p: EvalPrediction) -> Dict[str, float]:
     }
 
 
-def get_compute_metrics(task_type: str, tokenwise: bool = False) -> Callable:
+def get_compute_metrics(
+    task_type: str,
+    tokenwise: bool = False,
+) -> Callable[[EvalPrediction], Dict[str, float]]:
     if task_type == 'singlelabel':
         compute_metrics = compute_single_label_classification_metrics
     elif task_type == 'multilabel':
@@ -614,12 +651,12 @@ def get_compute_metrics(task_type: str, tokenwise: bool = False) -> Callable:
 
 
 def get_compute_metrics_with_balanced(
-    base_compute: Callable,
+    base_compute: Callable[[EvalPrediction], Dict[str, float]],
     weights: np.ndarray,
-    bin_borders: list,
+    bin_borders: List[float],
     n_resamples: int = 100,
     seed: int = 42,
-) -> Callable:
+) -> Callable[[EvalPrediction], Dict[str, Any]]:
     """
     Wrap a base compute_metrics callable to also emit balanced regression metrics
     (EpHod-style). Appends `balanced_*` keys. Assumes flattened predictions (after
@@ -630,30 +667,33 @@ def get_compute_metrics_with_balanced(
     except ImportError:
         from .metrics_balanced import compute_balanced_regression_metrics
 
-    weights_arr = np.asarray(weights, dtype=np.float64).flatten()
+    # weights: (...)
+    weights_arr = np.asarray(weights, dtype=np.float64).flatten()  # (n,)
 
-    def wrapper(p: EvalPrediction) -> Dict[str, float]:
+    def wrapper(p: EvalPrediction) -> Dict[str, Any]:
         base_metrics = base_compute(p)
         preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
         labels = p.label_ids[1] if isinstance(p.label_ids, tuple) else p.label_ids
-        y_pred = np.asarray(preds, dtype=np.float64)
-        y_true = np.asarray(labels, dtype=np.float64)
+        # preds: (...) or (..., 1); labels: (...)
+        y_pred = np.asarray(preds, dtype=np.float64)  # (...) or (..., 1)
+        y_true = np.asarray(labels, dtype=np.float64)  # (...)
 
         if y_pred.ndim == y_true.ndim + 1 and y_pred.shape[-1] == 1:
-            y_pred = np.squeeze(y_pred, axis=-1)
+            y_pred = np.squeeze(y_pred, axis=-1)  # (...)
 
-        y_pred = y_pred.flatten()
-        y_true = y_true.flatten()
+        y_pred = y_pred.flatten()  # (n_all,)
+        y_true = y_true.flatten()  # (n_all,)
 
-        valid_mask = y_true != -100.0
+        valid_mask = y_true != -100.0  # (n_all,)
         if valid_mask.sum() != y_true.size:
-            y_true = y_true[valid_mask]
-            y_pred = y_pred[valid_mask]
+            y_true = y_true[valid_mask]  # (n,); n = valid positions
+            y_pred = y_pred[valid_mask]  # (n,)
+        # y_true: (n,); y_pred: (n,)
 
         if np.isnan(y_true).any():
-            y_true = np.where(np.isnan(y_true), 0.0, y_true)
+            y_true = np.where(np.isnan(y_true), 0.0, y_true)  # (n,)
         if np.isnan(y_pred).any():
-            y_pred = np.where(np.isnan(y_pred), 0.0, y_pred)
+            y_pred = np.where(np.isnan(y_pred), 0.0, y_pred)  # (n,)
 
         assert y_true.shape == weights_arr.shape, (
             f'balanced metrics shape mismatch: preds={y_true.shape}, weights={weights_arr.shape}'
@@ -680,16 +720,18 @@ if __name__ == "__main__":
     print("\n--- compute_single_label_classification_metrics (Binary) ---")
     # 2 samples, 2 classes.
     # Logits: Sample 0 -> class 0 (high, low), Sample 1 -> class 1 (low, high)
-    predictions = np.array([[2.0, -1.0], [-1.0, 2.0]])
-    label_ids = np.array([0, 1])
+    predictions = np.array([[2.0, -1.0], [-1.0, 2.0]])  # (2, 2)
+    label_ids = np.array([0, 1])  # (2,)
     p = EvalPrediction(predictions=predictions, label_ids=label_ids)
     metrics = compute_single_label_classification_metrics(p)
     print(metrics)
 
     print("\n--- compute_single_label_classification_metrics (Multi-class) ---")
     # 3 samples, 3 classes.
-    predictions = np.array([[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]])
-    label_ids = np.array([0, 1, 2])
+    predictions = np.array(  # (3, 3)
+        [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]]
+    )
+    label_ids = np.array([0, 1, 2])  # (3,)
     p = EvalPrediction(predictions=predictions, label_ids=label_ids)
     metrics = compute_single_label_classification_metrics(p)
     print(metrics)
@@ -700,8 +742,10 @@ if __name__ == "__main__":
     # Token 0: pred 0, label 0
     # Token 1: pred 1, label 1
     # Token 2: pred 0, label -100 (ignored)
-    predictions = np.array([[[2.0, -1.0], [-1.0, 2.0], [2.0, -1.0]]])
-    label_ids = np.array([[0, 1, -100]])
+    predictions = np.array(  # (1, 3, 2)
+        [[[2.0, -1.0], [-1.0, 2.0], [2.0, -1.0]]]
+    )
+    label_ids = np.array([[0, 1, -100]])  # (1, 3)
     p = EvalPrediction(predictions=predictions, label_ids=label_ids)
     metrics = compute_tokenwise_classification_metrics(p)
     print(metrics)
@@ -712,16 +756,16 @@ if __name__ == "__main__":
     # Sample 0: pred [1, 0, 1], label [1, 0, 1]
     # Sample 1: pred [0, 1, 0], label [0, 1, 0]
     # Logits need to be high for 1, low for 0.
-    predictions = np.array([[5.0, -5.0, 5.0], [-5.0, 5.0, -5.0]])
-    label_ids = np.array([[1, 0, 1], [0, 1, 0]])
+    predictions = np.array([[5.0, -5.0, 5.0], [-5.0, 5.0, -5.0]])  # (2, 3)
+    label_ids = np.array([[1, 0, 1], [0, 1, 0]])  # (2, 3)
     p = EvalPrediction(predictions=predictions, label_ids=label_ids)
     metrics = compute_multi_label_classification_metrics(p)
     print(metrics)
 
     # Test compute_regression_metrics
     print("\n--- compute_regression_metrics ---")
-    predictions = np.array([1.0, 2.0, 3.0])
-    label_ids = np.array([1.1, 1.9, 3.2])
+    predictions = np.array([1.0, 2.0, 3.0])  # (3,)
+    label_ids = np.array([1.1, 1.9, 3.2])  # (3,)
     p = EvalPrediction(predictions=predictions, label_ids=label_ids)
     metrics = compute_regression_metrics(p)
     print(metrics)
@@ -730,8 +774,8 @@ if __name__ == "__main__":
     print("\n--- compute_tokenwise_regression_metrics ---")
     # 1 sample, 3 tokens
     # Token 2 is ignored (-100)
-    predictions = np.array([[1.0, 2.0, 5.0]])
-    label_ids = np.array([[1.1, 1.9, -100.0]])
+    predictions = np.array([[1.0, 2.0, 5.0]])  # (1, 3)
+    label_ids = np.array([[1.1, 1.9, -100.0]])  # (1, 3)
     p = EvalPrediction(predictions=predictions, label_ids=label_ids)
     metrics = compute_tokenwise_regression_metrics(p)
     print(metrics)

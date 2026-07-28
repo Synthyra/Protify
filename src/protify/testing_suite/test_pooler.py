@@ -10,165 +10,185 @@ except ImportError:
         from ..pooler import Pooler
 
 
-B, L, D = 2, 4, 8
+batch_size = 2  # b
+sequence_length = 4  # l
+hidden_size = 8  # d
 
 
 @pytest.fixture
-def emb():
+def emb() -> torch.Tensor:
     torch.manual_seed(0)
-    return torch.randn(B, L, D)
+    return torch.randn(batch_size, sequence_length, hidden_size)  # (b, l, d)
 
 
 @pytest.fixture
-def mask():
+def mask() -> torch.Tensor:
     # first sample: 3 real tokens, second: all 4
-    return torch.tensor([[1, 1, 1, 0], [1, 1, 1, 1]], dtype=torch.float32)
+    return torch.tensor(
+        [[1, 1, 1, 0], [1, 1, 1, 1]],
+        dtype=torch.float32,
+    )  # (b, l)
 
 
 @pytest.fixture
-def attentions():
+def attentions() -> torch.Tensor:
     torch.manual_seed(0)
-    n_layers = 2
-    return torch.randn(B, n_layers, L, L).abs()
+    num_attention_layers = 2  # a
+    return torch.randn(
+        batch_size,
+        num_attention_layers,
+        sequence_length,
+        sequence_length,
+    ).abs()  # (b, a, l, l)
 
 
-# ---- mean pooling ----
-
-def test_mean_no_mask(emb):
+def test_mean_no_mask(emb: torch.Tensor) -> None:
+    # emb: (b, l, d)
     pooler = Pooler(['mean'])
-    result = pooler.mean_pooling(emb)
-    expected = emb.mean(dim=1)
-    assert result.shape == (B, D)
-    assert torch.allclose(result, expected)
+    pooled = pooler.mean_pooling(emb)  # (b, d)
+    expected = emb.mean(dim=1)  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
+    assert torch.allclose(pooled, expected)
 
 
-def test_mean_with_mask(emb, mask):
+def test_mean_with_mask(emb: torch.Tensor, mask: torch.Tensor) -> None:
+    # emb: (b, l, d); mask: (b, l)
     pooler = Pooler(['mean'])
-    result = pooler.mean_pooling(emb, attention_mask=mask)
-    assert result.shape == (B, D)
+    pooled = pooler.mean_pooling(emb, attention_mask=mask)  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
     # Manual check for first sample: mean of first 3 tokens
-    manual = emb[0, :3, :].mean(dim=0)
-    assert torch.allclose(result[0], manual, atol=1e-6)
+    first_sequence_mean = emb[0, :3, :].mean(dim=0)  # (d,)
+    assert torch.allclose(pooled[0], first_sequence_mean, atol=1e-6)  # both (d,)
 
 
-# ---- max pooling ----
-
-def test_max_no_mask(emb):
+def test_max_no_mask(emb: torch.Tensor) -> None:
+    # emb: (b, l, d)
     pooler = Pooler(['max'])
-    result = pooler.max_pooling(emb)
-    expected = emb.max(dim=1).values
-    assert result.shape == (B, D)
-    assert torch.allclose(result, expected)
+    pooled = pooler.max_pooling(emb)  # (b, d)
+    expected = emb.max(dim=1).values  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
+    assert torch.allclose(pooled, expected)
 
 
-def test_max_with_mask(emb, mask):
+def test_max_with_mask(emb: torch.Tensor, mask: torch.Tensor) -> None:
+    # emb: (b, l, d); mask: (b, l)
     pooler = Pooler(['max'])
-    result = pooler.max_pooling(emb, attention_mask=mask)
-    assert result.shape == (B, D)
+    pooled = pooler.max_pooling(emb, attention_mask=mask)  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
 
 
-def test_max_with_mask_negative_values():
+def test_max_with_mask_negative_values() -> None:
     """Masked positions must not win when all unmasked values are negative."""
     torch.manual_seed(0)
-    emb = torch.full((1, 4, D), -5.0)
-    emb[0, 0, :] = -1.0  # only first token is "less negative"
-    mask = torch.tensor([[1, 1, 0, 0]], dtype=torch.float32)
+    embeddings = torch.full((1, 4, hidden_size), -5.0)  # (1, l=4, d)
+    embeddings[0, 0, :] = -1.0  # slice: (d,); embeddings remains (1, l, d)
+    attention_mask = torch.tensor([[1, 1, 0, 0]], dtype=torch.float32)  # (1, l)
     pooler = Pooler(['max'])
-    result = pooler.max_pooling(emb, attention_mask=mask)
+    pooled = pooler.max_pooling(embeddings, attention_mask=attention_mask)  # (1, d)
     # Max of unmasked positions should be -1.0, not 0.0 from masked
-    assert torch.allclose(result, torch.full((1, D), -1.0))
+    expected = torch.full((1, hidden_size), -1.0)  # (1, d)
+    assert torch.allclose(pooled, expected)
 
 
-# ---- norm pooling ----
-
-def test_norm_no_mask(emb):
+def test_norm_no_mask(emb: torch.Tensor) -> None:
+    # emb: (b, l, d)
     pooler = Pooler(['norm'])
-    result = pooler.norm_pooling(emb)
-    expected = emb.norm(dim=1, p=2)
-    assert result.shape == (B, D)
-    assert torch.allclose(result, expected)
+    pooled = pooler.norm_pooling(emb)  # (b, d)
+    expected = emb.norm(dim=1, p=2)  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
+    assert torch.allclose(pooled, expected)
 
 
-def test_norm_with_mask(emb, mask):
+def test_norm_with_mask(emb: torch.Tensor, mask: torch.Tensor) -> None:
+    # emb: (b, l, d); mask: (b, l)
     pooler = Pooler(['norm'])
-    result = pooler.norm_pooling(emb, attention_mask=mask)
-    assert result.shape == (B, D)
+    pooled = pooler.norm_pooling(emb, attention_mask=mask)  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
 
 
-# ---- median pooling ----
-
-def test_median_no_mask(emb):
+def test_median_no_mask(emb: torch.Tensor) -> None:
+    # emb: (b, l, d)
     pooler = Pooler(['median'])
-    result = pooler.median_pooling(emb)
-    expected = emb.median(dim=1).values
-    assert result.shape == (B, D)
-    assert torch.allclose(result, expected)
+    pooled = pooler.median_pooling(emb)  # (b, d)
+    expected = emb.median(dim=1).values  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
+    assert torch.allclose(pooled, expected)
 
 
-# ---- var pooling ----
-
-def test_var_no_mask(emb):
+def test_var_no_mask(emb: torch.Tensor) -> None:
+    # emb: (b, l, d)
     pooler = Pooler(['var'])
-    result = pooler.var_pooling(emb)
-    expected = emb.var(dim=1)
-    assert result.shape == (B, D)
-    assert torch.allclose(result, expected)
+    pooled = pooler.var_pooling(emb)  # (b, d)
+    expected = emb.var(dim=1)  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
+    assert torch.allclose(pooled, expected)
 
 
-def test_var_with_mask(emb, mask):
+def test_var_with_mask(emb: torch.Tensor, mask: torch.Tensor) -> None:
+    # emb: (b, l, d); mask: (b, l)
     pooler = Pooler(['var'])
-    result = pooler.var_pooling(emb, attention_mask=mask)
-    assert result.shape == (B, D)
+    pooled = pooler.var_pooling(emb, attention_mask=mask)  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
     # Manual variance for first sample over 3 unmasked tokens (population variance)
-    unmasked = emb[0, :3, :]  # (3, D)
-    mean = unmasked.mean(dim=0)
-    manual_var = ((unmasked - mean) ** 2).mean(dim=0)
-    assert torch.allclose(result[0], manual_var, atol=1e-6)
+    unmasked = emb[0, :3, :]  # (3, d)
+    mean = unmasked.mean(dim=0)  # (d,)
+    manual_variance = ((unmasked - mean) ** 2).mean(dim=0)  # (d,)
+    assert torch.allclose(pooled[0], manual_variance, atol=1e-6)  # both (d,)
 
 
-# ---- std pooling ----
-
-def test_std_equals_sqrt_var_with_mask(emb, mask):
+def test_std_equals_sqrt_var_with_mask(
+    emb: torch.Tensor,
+    mask: torch.Tensor,
+) -> None:
+    # emb: (b, l, d); mask: (b, l)
     pooler = Pooler(['std'])
-    std_result = pooler.std_pooling(emb, attention_mask=mask)
-    var_result = pooler.var_pooling(emb, attention_mask=mask)
-    assert torch.allclose(std_result, torch.sqrt(var_result), atol=1e-6)
+    standard_deviation = pooler.std_pooling(emb, attention_mask=mask)  # (b, d)
+    variance = pooler.var_pooling(emb, attention_mask=mask)  # (b, d)
+    expected_standard_deviation = torch.sqrt(variance)  # (b, d)
+    assert torch.allclose(standard_deviation, expected_standard_deviation, atol=1e-6)
 
 
-# ---- cls pooling ----
-
-def test_cls_returns_first_token(emb):
+def test_cls_returns_first_token(emb: torch.Tensor) -> None:
+    # emb: (b, l, d)
     pooler = Pooler(['cls'])
-    result = pooler.cls_pooling(emb)
-    assert result.shape == (B, D)
-    assert torch.allclose(result, emb[:, 0, :])
+    pooled = pooler.cls_pooling(emb)  # (b, d)
+    first_token_embeddings = emb[:, 0, :]  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
+    assert torch.allclose(pooled, first_token_embeddings)
 
 
-def test_cls_ignores_mask(emb, mask):
+def test_cls_ignores_mask(emb: torch.Tensor, mask: torch.Tensor) -> None:
+    # emb: (b, l, d); mask: (b, l)
     pooler = Pooler(['cls'])
-    result_no_mask = pooler.cls_pooling(emb)
-    result_with_mask = pooler.cls_pooling(emb, attention_mask=mask)
-    assert torch.allclose(result_no_mask, result_with_mask)
+    pooled_without_mask = pooler.cls_pooling(emb)  # (b, d)
+    pooled_with_mask = pooler.cls_pooling(emb, attention_mask=mask)  # (b, d)
+    assert torch.allclose(pooled_without_mask, pooled_with_mask)
 
 
-# ---- parti pooling ----
-
-def test_parti_shape(emb, attentions, mask):
+def test_parti_shape(
+    emb: torch.Tensor,
+    attentions: torch.Tensor,
+    mask: torch.Tensor,
+) -> None:
+    # emb: (b, l, d); attentions: (b, a, l, l); mask: (b, l)
     pooler = Pooler(['parti'])
-    result = pooler._pool_parti(emb, attentions, attention_mask=mask)
-    assert result.shape == (B, D)
+    pooled = pooler._pool_parti(emb, attentions, attention_mask=mask)  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
 
 
-# ---- __call__ ----
-
-def test_call_single_type(emb):
+def test_call_single_type(emb: torch.Tensor) -> None:
+    # emb: (b, l, d)
     pooler = Pooler(['mean'])
-    result = pooler(emb)
-    assert result.shape == (B, D)
+    pooled = pooler(emb)  # (b, d)
+    assert pooled.shape == (batch_size, hidden_size)
 
 
-def test_call_multiple_types_concat(emb, mask):
+def test_call_multiple_types_concat(
+    emb: torch.Tensor,
+    mask: torch.Tensor,
+) -> None:
+    # emb: (b, l, d); mask: (b, l)
     types = ['mean', 'max', 'cls']
     pooler = Pooler(types)
-    result = pooler(emb, attention_mask=mask)
-    assert result.shape == (B, len(types) * D)
+    pooled = pooler(emb, attention_mask=mask)  # (b, 3d)
+    assert pooled.shape == (batch_size, len(types) * hidden_size)

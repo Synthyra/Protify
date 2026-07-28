@@ -1,6 +1,5 @@
-from pathlib import Path
-
 import pytest
+from pathlib import Path
 from datasets import Dataset
 
 try:
@@ -39,8 +38,10 @@ def test_local_split_alias_synthesizes_missing_test(tmp_path: Path) -> None:
     _write_csv_split(tmp_path / "validation.csv", 3)
 
     data_args = DataArguments(data_names=[], data_dirs=[str(tmp_path)])
-    datasets, all_seqs = DataMixin(data_args).get_data()
-    train_set, valid_set, test_set, num_labels, label_type, ppi = datasets[tmp_path.name]
+    datasets_by_name, all_seqs = DataMixin(data_args).get_data()
+    train_set, valid_set, test_set, num_labels, label_type, ppi = datasets_by_name[
+        tmp_path.name
+    ]
 
     assert len(train_set) + len(test_set) == 20
     assert len(valid_set) == 3
@@ -68,7 +69,10 @@ def test_split_alias_synthesizes_missing_valid() -> None:
         ),
     }
 
-    train_set, valid_set, test_set = mixin._select_train_valid_test_splits(dataset, "alias_dataset")
+    train_set, valid_set, test_set = mixin._select_train_valid_test_splits(
+        dataset,
+        "alias_dataset",
+    )
 
     assert len(train_set) + len(valid_set) == 20
     assert len(valid_set) > 0
@@ -81,8 +85,10 @@ def test_local_fasta_split_files_with_labels(tmp_path: Path) -> None:
     _write_fasta_split(tmp_path / "testing.fa", 2)
 
     data_args = DataArguments(data_names=[], data_dirs=[str(tmp_path)])
-    datasets, all_seqs = DataMixin(data_args).get_data()
-    train_set, valid_set, test_set, num_labels, label_type, ppi = datasets[tmp_path.name]
+    datasets_by_name, all_seqs = DataMixin(data_args).get_data()
+    train_set, valid_set, test_set, num_labels, label_type, ppi = datasets_by_name[
+        tmp_path.name
+    ]
 
     assert train_set.column_names == ["seqs", "labels"]
     assert len(train_set) == 12

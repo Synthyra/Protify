@@ -1,6 +1,6 @@
-import torch
-import numpy as np
 import networkx as nx
+import numpy as np
+import torch
 from typing import Callable, Dict, List, Optional
 
 
@@ -12,7 +12,7 @@ class Pooler:
             "with --probe_pooling_types bom, and do not include 'bom' in --embedding_pooling_types."
         )
         self.pooling_types = pooling_types
-        self.pooling_options: Dict[str, Callable] = {
+        self.pooling_options: Dict[str, Callable[..., torch.Tensor]] = {
             'mean': self.mean_pooling,
             'max': self.max_pooling,
             'norm': self.norm_pooling,
@@ -24,116 +24,184 @@ class Pooler:
         }
 
     def _create_pooled_matrices_across_layers(self, attentions: torch.Tensor) -> torch.Tensor:
-        maxed_attentions = torch.max(attentions, dim=1)[0]
-        return maxed_attentions
+        # attentions: (b, r, l, l); r = attention matrices or layers
+        maxed_attentions = torch.max(attentions, dim=1)[0]  # (b, l, l)
+        return maxed_attentions  # (b, l, l)
 
-    def _page_rank(self, attention_matrix: np.ndarray, personalization: Optional[dict] = None, nstart: Optional[dict] = None, prune_type: str = "top_k_outdegree") -> Dict[int, float]:
-        # Run PageRank on the attention matrix converted to a graph.
-        # Raises exceptions if the graph doesn't match the token sequence or has no edges.
-        # Returns the PageRank scores for each token node.
-        G = self._convert_to_graph(attention_matrix)
-        if G.number_of_nodes() != attention_matrix.shape[0]:
+    def _page_rank(
+        self,
+        attention_matrix: np.ndarray,
+        personalization: Optional[Dict[int, float]] = None,
+        nstart: Optional[Dict[int, float]] = None,
+        prune_type: str = "top_k_outdegree",
+    ) -> Dict[int, float]:
+        # attention_matrix: (l, l). The compatibility-only prune_type is intentionally unused.
+        graph = self._convert_to_graph(attention_matrix)
+        if graph.number_of_nodes() != attention_matrix.shape[0]:
             raise Exception(
-                f"The number of nodes in the graph should be equal to the number of tokens in sequence! You have {G.number_of_nodes()} nodes for {attention_matrix.shape[0]} tokens.")
-        if G.number_of_edges() == 0:
-            raise Exception(f"You don't seem to have any attention edges left in the graph.")
+                "The number of nodes in the graph should be equal to the number of tokens in sequence! "
+                f"You have {graph.number_of_nodes()} nodes for {attention_matrix.shape[0]} tokens."
+            )
+        if graph.number_of_edges() == 0:
+            raise Exception("You don't seem to have any attention edges left in the graph.")
 
-        return nx.pagerank(G, alpha=0.85, tol=1e-06, weight='weight', personalization=personalization, nstart=nstart, max_iter=100)
+        return nx.pagerank(
+            graph,
+            alpha=0.85,
+            tol=1e-06,
+            weight='weight',
+            personalization=personalization,
+            nstart=nstart,
+            max_iter=100,
+        )
 
     def _convert_to_graph(self, matrix: np.ndarray) -> nx.DiGraph:
-        # Convert a matrix (e.g., attention scores) to a directed graph using networkx.
-        # Each element in the matrix represents a directed edge with a weight.
-        G = nx.from_numpy_array(matrix, create_using=nx.DiGraph)
-        return G
+        # matrix: (l, l)
+        graph = nx.from_numpy_array(matrix, create_using=nx.DiGraph)
+        return graph
 
-    def _calculate_importance_weights(self, dict_importance: Dict[int, float], attention_mask: Optional[torch.Tensor] = None) -> np.ndarray:
-        # Remove keys where attention_mask is 0
+    def _calculate_importance_weights(
+        self,
+        dict_importance: Dict[int, float],
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> np.ndarray:
+        # attention_mask: (l,); l_valid = number of retained nodes
         if attention_mask is not None:
             for k in list(dict_importance.keys()):
                 if attention_mask[k] == 0:
                     del dict_importance[k]
 
-        #dict_importance[0] # remove cls
-        #dict_importance[-1] # remove eos
         total = sum(dict_importance.values())
-        return np.array([v / total for _, v in dict_importance.items()])
+        return np.array([v / total for _, v in dict_importance.items()])  # (l_valid,)
 
-    def _pool_parti(self, emb: torch.Tensor, attentions: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor: # (b, L, d) -> (b, d)
-        maxed_attentions = self._create_pooled_matrices_across_layers(attentions).numpy()
-        # emb is (b, L, d), maxed_attentions is (b, L, L)
-        emb_pooled = []
+    def _pool_parti(
+        self,
+        emb: torch.Tensor,
+        attentions: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # emb: (b, l, d); attentions: (b, r, l, l); attention_mask: (b, l)
+        # r = attention matrices or layers; l_valid = unmasked tokens in one sample
+        # The historical NumPy conversion requires CPU tensors without gradients.
+        maxed_attentions = self._create_pooled_matrices_across_layers(attentions).numpy()  # (b, l, l)
+        emb_pooled: List[np.ndarray] = []
         for e, a, mask in zip(emb, maxed_attentions, attention_mask):
+            # e: (l, d); a: (l, l); mask: (l,)
             dict_importance = self._page_rank(a)
-            importance_weights = self._calculate_importance_weights(dict_importance, mask)
-            num_tokens = int(mask.sum().item())
-            emb_pooled.append(np.average(e[:num_tokens], weights=importance_weights, axis=0))
-        pooled = torch.tensor(np.array(emb_pooled))
-        return pooled
+            importance_weights = self._calculate_importance_weights(dict_importance, mask)  # (l_valid,)
+            num_tokens = int(mask.sum().item())  # l_valid
+            pooled_embedding = np.average(  # (d,)
+                e[:num_tokens],  # (l_valid, d)
+                weights=importance_weights,
+                axis=0,
+            )
+            emb_pooled.append(pooled_embedding)
+        pooled = torch.tensor(np.array(emb_pooled))  # (b, d)
+        return pooled  # (b, d)
 
-    def mean_pooling(self, emb: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor: # (b, L, d) -> (b, d)
+    def mean_pooling(
+        self,
+        emb: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        # emb: (b, l, d); attention_mask: (b, l)
         if attention_mask is None:
-            return emb.mean(dim=1)
-        else:
-            attention_mask = attention_mask.unsqueeze(-1)
-            return (emb * attention_mask).sum(dim=1) / attention_mask.sum(dim=1)
+            return emb.mean(dim=1)  # (b, d)
 
-    def max_pooling(self, emb: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor: # (b, L, d) -> (b, d)
-        if attention_mask is None:
-            return emb.max(dim=1).values
-        else:
-            mask = attention_mask.unsqueeze(-1).bool()
-            return emb.masked_fill(~mask, float('-inf')).max(dim=1).values
+        attention_mask = attention_mask.unsqueeze(-1)  # (b, l, 1)
+        return (emb * attention_mask).sum(dim=1) / attention_mask.sum(dim=1)  # (b, d)
 
-    def norm_pooling(self, emb: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor: # (b, L, d) -> (b, d)
+    def max_pooling(
+        self,
+        emb: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        # emb: (b, l, d); attention_mask: (b, l)
         if attention_mask is None:
-            return emb.norm(dim=1, p=2)
-        else:
-            attention_mask = attention_mask.unsqueeze(-1)
-            return (emb * attention_mask).norm(dim=1, p=2)
+            return emb.max(dim=1).values  # (b, d)
 
-    def median_pooling(self, emb: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor: # (b, L, d) -> (b, d)
-        if attention_mask is None:
-            return emb.median(dim=1).values
-        else:
-            mask = attention_mask.bool()
-            results = []
-            for i in range(emb.shape[0]):
-                valid = emb[i, mask[i]]
-                results.append(valid.median(dim=0).values)
-            return torch.stack(results)
-    
-    def std_pooling(self, emb: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor: # (b, L, d) -> (b, d)
-        if attention_mask is None:
-            return emb.std(dim=1)
-        else:
-            # Compute variance correctly over non-masked positions, then take sqrt
-            var = self.var_pooling(emb, attention_mask, **kwargs)
-            return torch.sqrt(var)
-    
-    def var_pooling(self, emb: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor: # (b, L, d) -> (b, d)
-        if attention_mask is None:
-            return emb.var(dim=1)
-        else:
-            # Correctly compute variance over only non-masked positions
-            attention_mask = attention_mask.unsqueeze(-1)  # (b, L, 1)
-            # Compute mean over non-masked positions
-            mean = (emb * attention_mask).sum(dim=1) / attention_mask.sum(dim=1)  # (b, d)
-            mean = mean.unsqueeze(1)  # (b, 1, d)
-            # Compute squared differences from mean, only over non-masked positions
-            squared_diff = (emb - mean) ** 2  # (b, L, d)
-            # Sum squared differences over non-masked positions and divide by count
-            var = (squared_diff * attention_mask).sum(dim=1) / attention_mask.sum(dim=1)  # (b, d)
-            return var
+        mask = attention_mask.unsqueeze(-1).bool()  # (b, l, 1)
+        return emb.masked_fill(~mask, float('-inf')).max(dim=1).values  # (b, d)
 
-    def cls_pooling(self, emb: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, **kwargs) -> torch.Tensor: # (b, L, d) -> (b, d)
-        return emb[:, 0, :]
+    def norm_pooling(
+        self,
+        emb: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        # emb: (b, l, d); attention_mask: (b, l)
+        if attention_mask is None:
+            return emb.norm(dim=1, p=2)  # (b, d)
+
+        attention_mask = attention_mask.unsqueeze(-1)  # (b, l, 1)
+        return (emb * attention_mask).norm(dim=1, p=2)  # (b, d)
+
+    def median_pooling(
+        self,
+        emb: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        # emb: (b, l, d); attention_mask: (b, l)
+        if attention_mask is None:
+            return emb.median(dim=1).values  # (b, d)
+
+        mask = attention_mask.bool()  # (b, l); l_i = valid tokens in sample i
+        results: List[torch.Tensor] = []
+        for i in range(emb.shape[0]):
+            valid = emb[i, mask[i]]  # (l_i, d)
+            results.append(valid.median(dim=0).values)  # (d,)
+        return torch.stack(results)  # (b, d)
+
+    def std_pooling(
+        self,
+        emb: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        # emb: (b, l, d); attention_mask: (b, l)
+        if attention_mask is None:
+            return emb.std(dim=1)  # (b, d)
+
+        var = self.var_pooling(emb, attention_mask, **kwargs)  # (b, d)
+        return torch.sqrt(var)  # (b, d)
+
+    def var_pooling(
+        self,
+        emb: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        # emb: (b, l, d); attention_mask: (b, l)
+        if attention_mask is None:
+            return emb.var(dim=1)  # (b, d)
+
+        attention_mask = attention_mask.unsqueeze(-1)  # (b, l, 1)
+        mean = (emb * attention_mask).sum(dim=1) / attention_mask.sum(dim=1)  # (b, d)
+        mean = mean.unsqueeze(1)  # (b, 1, d)
+        squared_diff = (emb - mean) ** 2  # (b, l, d)
+        var = (squared_diff * attention_mask).sum(dim=1) / attention_mask.sum(dim=1)  # (b, d)
+        return var  # (b, d)
+
+    def cls_pooling(
+        self,
+        emb: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        # emb: (b, l, d)
+        return emb[:, 0, :]  # (b, d)
 
     def __call__(
-            self,
-            emb: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            attentions: Optional[torch.Tensor] = None
-        ) -> torch.Tensor: # [mean, max]
+        self,
+        emb: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        attentions: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # emb: (b, l, d); attention_mask: (b, l); attentions: (b, r, l, l)
+        # r = attention matrices or layers; p = number of configured pooling operations
         if attention_mask is not None:
             assert attention_mask.sum(dim=-1).min() > 0, (
                 "Pooler received samples with all-zero attention masks. "
@@ -141,21 +209,25 @@ class Pooler:
             )
         final_emb: List[torch.Tensor] = []
         for pooling_type in self.pooling_types:
-            final_emb.append(self.pooling_options[pooling_type](emb=emb, attention_mask=attention_mask, attentions=attentions)) # (b, d)
-        return torch.cat(final_emb, dim=-1) # (b, n_pooling_types * d)
-    
+            pooled_embedding = self.pooling_options[pooling_type](
+                emb=emb,
+                attention_mask=attention_mask,
+                attentions=attentions,
+            )  # (b, d)
+            final_emb.append(pooled_embedding)
+        return torch.cat(final_emb, dim=-1)  # (b, p * d)
+
 
 if __name__ == "__main__":
-    # py -m pooler
     pooler = Pooler(pooling_types=['max', 'parti'])
-    
-    batch_size = 8
-    seq_len = 64
-    hidden_size = 128
-    num_layers = 12
-    emb = torch.randn(batch_size, seq_len, hidden_size)
-    attentions = torch.randn(batch_size, num_layers, seq_len, seq_len)
-    attention_mask = torch.ones(batch_size, seq_len)
-    
-    y = pooler(emb=emb, attention_mask=attention_mask, attentions=attentions)
+
+    batch_size = 8  # b
+    seq_len = 64  # l
+    hidden_size = 128  # d
+    num_layers = 12  # r
+    emb = torch.randn(batch_size, seq_len, hidden_size)  # (b, l, d)
+    attentions = torch.randn(batch_size, num_layers, seq_len, seq_len)  # (b, r, l, l)
+    attention_mask = torch.ones(batch_size, seq_len)  # (b, l)
+
+    y = pooler(emb=emb, attention_mask=attention_mask, attentions=attentions)  # (b, 2 * d)
     print(y.shape)

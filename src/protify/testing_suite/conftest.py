@@ -2,8 +2,8 @@ import os
 import sys
 
 import numpy as np
-import torch
 import pytest
+import torch
 
 
 collect_ignore = ["embedding_test.py"]
@@ -37,48 +37,51 @@ def _normalize_fastplms_imports() -> None:
                     del sys.modules[module_name]
 
 
-def pytest_configure(config):
+def pytest_configure(config: pytest.Config) -> None:
     _normalize_fastplms_imports()
     config.addinivalue_line("markers", "gpu: requires CUDA GPU")
     config.addinivalue_line("markers", "slow: slow tests (>10s)")
 
 
-def pytest_runtest_setup(item):
+def pytest_runtest_setup(item: pytest.Item) -> None:
     _normalize_fastplms_imports()
 
 
 @pytest.fixture
-def tiny_embeddings():
+def tiny_embeddings() -> torch.Tensor:
     """(batch=2, seq_len=4, hidden=16) random embeddings."""
     torch.manual_seed(0)
-    return torch.randn(2, 4, 16)
+    return torch.randn(2, 4, 16)  # (b=2, l=4, d=16)
 
 
 @pytest.fixture
-def attention_mask_2d():
+def attention_mask_2d() -> torch.Tensor:
     """Bool mask: first sample has 3 real tokens, second has 4."""
-    return torch.tensor([[1, 1, 1, 0], [1, 1, 1, 1]], dtype=torch.bool)
+    return torch.tensor(  # (b=2, l=4)
+        [[1, 1, 1, 0], [1, 1, 1, 1]],
+        dtype=torch.bool,
+    )
 
 
 @pytest.fixture
-def binary_labels_np():
+def binary_labels_np() -> np.ndarray:
     rng = np.random.default_rng(42)
-    return rng.integers(0, 2, size=50)
+    return rng.integers(0, 2, size=50)  # (n=50,)
 
 
 @pytest.fixture
-def multiclass_labels_np():
+def multiclass_labels_np() -> np.ndarray:
     rng = np.random.default_rng(42)
-    return rng.integers(0, 3, size=50)
+    return rng.integers(0, 3, size=50)  # (n=50,)
 
 
 @pytest.fixture
-def regression_labels_np():
+def regression_labels_np() -> np.ndarray:
     rng = np.random.default_rng(42)
-    return rng.standard_normal(50)
+    return rng.standard_normal(50)  # (n=50,)
 
 
 @pytest.fixture
-def multilabel_labels_np():
+def multilabel_labels_np() -> np.ndarray:
     rng = np.random.default_rng(42)
-    return rng.integers(0, 2, size=(50, 4))
+    return rng.integers(0, 2, size=(50, 4))  # (n=50, c=4)
