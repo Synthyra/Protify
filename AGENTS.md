@@ -17,6 +17,56 @@ This is the standalone Synthyra Protify checkout. Keep its public training, eval
 - `src/protify/fastplms/` is a vendored repository with its own guidance. Do not mix FastPLMs changes into a Protify task.
 - `--parallel_probe_runs` applies only to compatible pooled, sequence-level linear probes. Matrix or tokenwise probes, transformer probes, Lyra probes, PPI run-specific datasets, and full fine-tuning use the sequential fallback.
 
+## Python Coding Standard
+
+Write direct, readable Python for human maintainers. Prefer domain language and visible data flow over cleverness, speculative generality, or abstraction for its own sake.
+
+Apply this priority order when guidance conflicts:
+
+1. Follow the user's explicit scope and requested behavior.
+2. Preserve correctness, security, public interfaces, data schemas, tested behavior, and scientific conventions.
+3. Follow repository instructions and enforced formatter, linter, and type-checker configuration.
+4. Apply the preferences below.
+5. Minimize unrelated diff churn.
+
+Treat cleanup and refactoring as behavior-preserving unless behavior changes are explicitly requested. Observable behavior includes exceptions, import side effects, CLI output, serialization, random-number use, dtype, device, tensor shape, and documented performance guarantees. Do not silently fix unrelated bugs or expand an ambiguous cleanup into a repository-wide rewrite. Exclude generated, vendored, migration, build, and external code unless it is explicitly in scope.
+
+### Validation and Workflow
+
+- Read the relevant repository guidance, configuration, implementation, and focused tests before editing.
+- Establish a behavioral baseline before structural changes and run the same focused tests afterward. Record pre-existing failures and compare like with like; never weaken tests to make a refactor pass.
+- Keep validation proportional. Use formatter, linter, type checker, compile checks, or focused CPU-only tests for mechanical changes; require meaningful behavioral tests for structural changes.
+- Do not trigger downloads, CUDA, large datasets, remote machines, or slow integration suites unless requested.
+- Make safe mechanical improvements first. Make structural changes only when they materially improve ownership, cohesion, or visible data flow. Review the final diff for behavior drift, stale imports, unnecessary movement, and formatter conflicts.
+
+### Imports, Types, and Control Flow
+
+- Keep the module docstring first and `from __future__` imports immediately after it. Then group direct `import` statements before ordinary `from ... import ...` statements. Within those blocks, place standard-library names before third-party names and keep repository-local imports in a distinct final section. Leave two blank lines after the complete import block.
+- Preserve guarded, optional, registration, and initialization-sensitive import ordering. Do not fight an enforced formatter.
+- Give each function one narrow, typed responsibility. Prefer precise domain types and parameterized containers; use `Any` only at genuinely dynamic boundaries.
+- Respect the minimum Python version and runtime annotation behavior. Do not alter framework-discovered fields, import cycles, or serialization schemas merely to add types.
+- Use domain-specific names instead of vague names such as `data`, `result`, `info`, or `manager` when a clearer term exists.
+- Prefer explicit sequential control flow. Separate distinct guards, loops, exception handling, and logical phases with blank lines when that improves scanning.
+- Raise ordinary exceptions for invalid external input and use assertions only for internal invariants or programmer assumptions.
+- Avoid broad `except Exception`, silent fallback cascades, unsupported compatibility shims, wrappers that merely rename one call, and one-use helpers that do not name a real concept or isolate a testable phase.
+- Keep argument parser declarations on one line when they remain comfortable to read.
+
+### Comments and Numerical Code
+
+- Comment intent, assumptions, units, biological conventions, tensor shapes, non-obvious mechanics, and design rationale. Remove comments and docstrings that merely narrate syntax or repeat a precise name and type.
+- For NumPy, PyTorch, JAX, and similar code, maintain a complete, accurate shape trace through tensor-valued inputs, assignments, transformations, layer calls, reductions, mutations, and returns.
+- Use lowercase shape symbols such as `b` (batch), `l` (sequence length), `d` (hidden width), `h` (heads), `c` (classes), and `n` (generic count). Define nonstandard or dynamic symbols near first use, use `()` for scalars, and use an ellipsis when rank cannot be proven. Never invent a fixed shape.
+- Put shape comments on the same line as the operation when practical. Treat stale shape comments as correctness defects.
+- Use uppercase mathematical tensor names such as `X`, `Q`, `K`, `V`, and `W_q`; keep descriptive tensor names such as `hidden_states`, `attention_mask`, and `logits` lowercase. Preserve established domain notation when clearer.
+
+### Modules and Interfaces
+
+- Give each module one primary responsibility. Split by ownership and dependency direction, not by line count, and keep reusable helpers near the feature that owns them. Do not create catch-all `utils.py` modules.
+- Keep extracted modules' public surfaces small and intentional. Avoid circular imports and implicit shared state.
+- Use a class when state and behavior form a meaningful domain object or workflow. Prefer a function, typed value, or dataclass for simple transformations and records.
+- Keep entry points thin: parse arguments, construct configuration and collaborators, then invoke a short sequence whose names expose the workflow.
+- Extract abstractions only when they remove real complexity, reduce meaningful duplication, name a cohesive concept, or isolate a separately testable phase.
+
 ## Canonical Commands
 
 Build and run the broad CPU suite from the repository root:
