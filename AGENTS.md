@@ -98,3 +98,7 @@ docker run --rm --gpus all --ipc=host -v ${PWD}:/workspace -e PYTHONPATH=/worksp
   -w /workspace/src/protify protify-env:latest python -m pytest \
   testing_suite/test_parallel_probe_plan.py testing_suite/test_parallel_linear_probe.py -v
 ```
+
+Treat the Python coding standard imported above as mandatory repository guidance for implementation, refactoring, and review. Preserve behavior and scope first; apply its readability preferences to all first-party Python touched by the task.
+
+Maintain agent instructions only in AGENTS.md. Treat AGENTS.md as the canonical, cumulative source of repository guidance; do not create or expand separate CLAUDE.md guidance. Preserve existing information when updating this file.
