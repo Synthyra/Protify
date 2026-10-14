@@ -1,6 +1,6 @@
+import importlib.util
 import os
 import sys
-
 import numpy as np
 import pytest
 import torch
@@ -15,6 +15,10 @@ def _normalize_fastplms_imports() -> None:
     )
     fastplms_root = os.path.join(fastplms_repository, "src")
     fastplms_package = os.path.join(fastplms_root, "fastplms")
+    # The research foundry keeps one FastPLMs, at models/fastplms, importable as `fastplms`.
+    # A GitHub checkout keeps it as a submodule, which wins when present.
+    if not os.path.isdir(fastplms_package) and importlib.util.find_spec("fastplms") is not None:
+        return
     assert os.path.isfile(os.path.join(fastplms_package, "__init__.py")), (
         f"FastPLMs 1.0 package not found: {fastplms_package}. "
         "Run `git submodule update --init --recursive`."
@@ -41,6 +45,10 @@ def pytest_configure(config: pytest.Config) -> None:
     _normalize_fastplms_imports()
     config.addinivalue_line("markers", "gpu: requires CUDA GPU")
     config.addinivalue_line("markers", "slow: slow tests (>10s)")
+    config.addinivalue_line(
+        "markers",
+        "checkpoint: loads a published checkpoint from the local Hugging Face cache, offline, and fails on what is not cached",
+    )
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:

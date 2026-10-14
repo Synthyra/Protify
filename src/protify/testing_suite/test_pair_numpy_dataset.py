@@ -6,18 +6,12 @@ depend on the random state, which these tests pin down.
 """
 
 import random
-
 import numpy as np
 import pytest
 import torch
 
-try:
-    from src.protify.data.data_mixin import DataMixin
-except ImportError:
-    try:
-        from protify.data.data_mixin import DataMixin
-    except ImportError:
-        from ..data.data_mixin import DataMixin
+from protify.data.data_mixin import DataMixin
+from protify.testing_suite.embedding_store_builder import build_store_for
 
 
 POOLING_TYPES = ['max']
@@ -29,7 +23,7 @@ SEQ_B = 'CCCC'
 
 @pytest.fixture
 def mixin(tmp_path):
-    """A DataMixin whose only embedding source is a two-protein .pth cache."""
+    """A DataMixin whose only embedding source is a two-protein feature store."""
     from protify.embedder import EmbeddingArguments
 
     # One distinguishing value per protein, so a swap is visible in the concatenated row.
@@ -37,7 +31,7 @@ def mixin(tmp_path):
         SEQ_A: torch.tensor([1.0, 2.0]),  # (d,), d = 2
         SEQ_B: torch.tensor([30.0, 40.0]),  # (d,)
     }
-    # The real config object names the file, so the fixture cannot drift from the cache
+    # The real config object names the store, so the fixture cannot drift from the cache
     # identity the reader builds.
     embedding_args = EmbeddingArguments(
         embedding_save_dir=str(tmp_path),
@@ -45,7 +39,7 @@ def mixin(tmp_path):
         embedding_hidden_state_index=HIDDEN_STATE_INDEX,
         matrix_embed=False,
     )
-    torch.save(embeddings, tmp_path / embedding_args.cache_filename('test-model'))
+    build_store_for(embedding_args, 'test-model', embeddings)
 
     mixin = DataMixin()
     mixin._sql = False
@@ -108,3 +102,70 @@ def test_flipping_defaults_to_off(mixin):
 
     forward = np.array([1.0, 2.0, 30.0, 40.0])  # (2 * d,)
     assert np.array_equal(X_train, np.tile(forward, (X_train.shape[0], 1)))
+
+
+def test_minmax_builds_the_same_row_from_either_ordering(mixin):
+    """The estimator path's pair join, pinned where it is actually built.
+
+    Under `minmax` a pair row is the two proteins sorted feature by feature, so listing B
+    first cannot change it. This is what lets the augmentation be switched off rather than
+    doubling the training split.
+    """
+    mixin._pair_feature_mode = 'minmax'
+    seqs_a, seqs_b = [SEQ_A] * 8, [SEQ_B] * 8
+
+    forward, _, _ = mixin.build_pair_vector_numpy_dataset_from_embeddings(
+        'test-model', seqs_a, seqs_b, seqs_a, seqs_b, seqs_a, seqs_b,
+    )  # (n, 2 * d)
+    reversed_order, _, _ = mixin.build_pair_vector_numpy_dataset_from_embeddings(
+        'test-model', seqs_b, seqs_a, seqs_b, seqs_a, seqs_b, seqs_a,
+    )  # (n, 2 * d)
+
+    sorted_row = np.array([1.0, 2.0, 30.0, 40.0])  # (2 * d,); min block then max block
+    assert np.array_equal(forward, np.tile(sorted_row, (forward.shape[0], 1)))
+    assert np.array_equal(forward, reversed_order)
+
+
+def test_minmax_leaves_the_row_count_alone_when_flipping_is_requested(mixin):
+    """`--random_pair_flipping` under a symmetric mode must not double or perturb anything."""
+    mixin._pair_feature_mode = 'minmax'
+    seqs_a, seqs_b = [SEQ_A] * 8, [SEQ_B] * 8
+
+    random.seed(0)
+    flipped, _, _ = mixin.build_pair_vector_numpy_dataset_from_embeddings(
+        'test-model', seqs_a, seqs_b, seqs_a, seqs_b, seqs_a, seqs_b, flip_train_pairs=True,
+    )  # (n, 2 * d)
+    unflipped, _, _ = mixin.build_pair_vector_numpy_dataset_from_embeddings(
+        'test-model', seqs_a, seqs_b, seqs_a, seqs_b, seqs_a, seqs_b, flip_train_pairs=False,
+    )  # (n, 2 * d)
+
+    assert flipped.shape == unflipped.shape
+    assert np.array_equal(flipped, unflipped)
+
+
+def test_a_mostly_zero_pair_split_comes_back_compressed(mixin, tmp_path):
+    """The layout follows the data, so a sparse codebook does not have to be materialized."""
+    from scipy import sparse
+    from protify.embedder import EmbeddingArguments
+
+    width = 40  # d
+    sparse_a, sparse_b = torch.zeros(width), torch.zeros(width)  # each (d,)
+    sparse_a[3] = 1.0
+    sparse_b[11] = 2.0
+    embedding_args = EmbeddingArguments(
+        embedding_save_dir=str(tmp_path),
+        embedding_pooling_types=POOLING_TYPES,
+        embedding_hidden_state_index=HIDDEN_STATE_INDEX,
+        matrix_embed=False,
+    )
+    build_store_for(embedding_args, 'sparse-model', {SEQ_A: sparse_a, SEQ_B: sparse_b})
+    mixin.embedding_args = embedding_args
+
+    seqs_a, seqs_b = [SEQ_A] * 8, [SEQ_B] * 8
+    X_train, X_valid, X_test = mixin.build_pair_vector_numpy_dataset_from_embeddings(
+        'sparse-model', seqs_a, seqs_b, seqs_a, seqs_b, seqs_a, seqs_b,
+    )  # (n, 2 * d) each
+
+    assert all(sparse.issparse(split) for split in (X_train, X_valid, X_test))
+    expected = np.concatenate([sparse_a.numpy(), sparse_b.numpy()])  # (2 * d,)
+    np.testing.assert_allclose(X_train.toarray(), np.tile(expected, (8, 1)))

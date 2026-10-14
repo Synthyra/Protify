@@ -4,13 +4,7 @@ from typing import Any
 from torch import nn
 from transformers import PreTrainedModel, PretrainedConfig
 
-try:
-    from ..pooler import Pooler
-except ImportError:
-    try:
-        from protify.pooler import Pooler
-    except ImportError:
-        from pooler import Pooler
+from ..pooler import Pooler
 
 
 class HybridProbeConfig(PretrainedConfig):
@@ -20,13 +14,13 @@ class HybridProbeConfig(PretrainedConfig):
         self,
         tokenwise: bool = False,
         matrix_embed: bool = False,
-        pooling_types: list[str] = ['mean', 'cls'],
+        pooling_types: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.tokenwise = tokenwise
         self.matrix_embed = matrix_embed
-        self.pooling_types = pooling_types
+        self.pooling_types = ['mean', 'cls'] if pooling_types is None else pooling_types
 
 
 class HybridProbe(PreTrainedModel):
@@ -47,7 +41,7 @@ class HybridProbe(PreTrainedModel):
         attention_mask: torch.Tensor | None = None,
         labels: torch.Tensor | None = None,
     ) -> Any:
-        # input_ids: (b, l); attention_mask: (b, l) or None. Label shape is task-dependent.
+        # input_ids: (b, l), attention_mask: (b, l) or None, labels: (b,), (b, c), (b, l) or (b, l, c) by the task.
         hidden_states = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,

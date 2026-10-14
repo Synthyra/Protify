@@ -1,194 +1,106 @@
+"""Probe training losses.
+
+`get_loss_fct`, `SoftBCEWithLogitsLoss`, and `SoftBCELoss` are `foundry.layers.losses`'s, the one
+implementation every probe trains on. `compute_probe_loss` is Protify's own.
+"""
+
+import copy
 import torch
-import torch.nn.functional as F
 
 from torch import nn
 
-try:
-    from ..utils import print_message
-except ImportError:
-    try:
-        from protify.utils import print_message
-    except ImportError:
-        from utils import print_message
+from foundry.layers.losses import SoftBCELoss, SoftBCEWithLogitsLoss, get_loss_fct
 
 
-def get_loss_fct(task_type: str, tokenwise: bool = False) -> nn.Module:
-    """Return the configured loss module for a probe task."""
-    if task_type == 'singlelabel':
-        loss_fct = nn.CrossEntropyLoss()
-    elif task_type == 'multilabel':
-        loss_fct = nn.BCEWithLogitsLoss()
-    elif tokenwise and task_type != 'regression':
-        loss_fct = nn.CrossEntropyLoss()
-    elif task_type == 'regression' and not tokenwise:
-        loss_fct = nn.MSELoss()
-    elif task_type == 'sigmoid_regression':
-        loss_fct = SoftBCELoss()
-    else:
-        print_message(f'Specified wrong classification type {task_type}')
-    return loss_fct
+__all__ = ["SoftBCELoss", "SoftBCEWithLogitsLoss", "compute_probe_loss", "get_loss_fct"]
 
 
-# Adapted from segmentation-models-pytorch's soft BCE implementation:
-# https://smp.readthedocs.io/en/latest/_modules/segmentation_models_pytorch/losses/soft_bce.html
-class SoftBCEWithLogitsLoss(nn.Module):
-    __constants__ = [
-        "weight",
-        "pos_weight",
-        "reduction",
-        "ignore_index",
-        "smooth_factor",
-    ]
+def compute_probe_loss(
+    loss_fct: nn.Module,
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    task_type: str,
+    num_labels: int,
+    label_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Reshape logits and labels the way a task's loss expects, then reduce.
 
-    def __init__(
-        self,
-        weight: torch.Tensor | None = None,
-        ignore_index: float | None = -100.0,
-        reduction: str = "mean",
-        smooth_factor: float | None = None,
-        pos_weight: torch.Tensor | None = None,
-    ) -> None:
-        """Add ignore-index and optional smoothing to BCE-with-logits."""
-        super().__init__()
-        # weight and pos_weight follow torch BCE broadcasting rules when no
-        # ignore index is used. Masking requires tensors shaped like y_true.
-        self.ignore_index = ignore_index
-        self.reduction = reduction
-        self.smooth_factor = smooth_factor
-        self.register_buffer("weight", weight)
-        self.register_buffer("pos_weight", pos_weight)
+    Each loss module carries its own view convention: the regression losses read one
+    flat vector, multilabel reads (b, c) against float targets, and cross-entropy reads
+    (b, c) against class indices. `sigmoid_regression` arrives already squashed, since
+    SoftBCELoss reads probabilities rather than logits.
+    """
+    # logits: (b, c); labels, label_mask: (b,), (b, 1), or (b, c)
+    if label_mask is not None:
+        return _masked_probe_loss(loss_fct, logits, labels, task_type, num_labels, label_mask)  # ()
+    if task_type in ('regression', 'sigmoid_regression'):
+        return loss_fct(logits.view(-1), labels.view(-1).float())  # ()
 
-    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
-        # y_pred and y_true: (...) with matching, loss-compatible shapes.
-        if self.smooth_factor is not None:
-            soft_targets = (
-                (1 - y_true) * self.smooth_factor
-                + y_true * (1 - self.smooth_factor)
-            )  # (...)
-        else:
-            soft_targets = y_true  # (...)
+    batch_size = logits.size(0)
+    if task_type == 'multilabel':
+        return loss_fct(
+            logits.view(batch_size, -1),  # (b, c)
+            labels.view(batch_size, -1).float(),  # (b, c)
+        )  # ()
 
-        # Exclude ignored targets before BCE so they cannot contribute gradients.
-        if self.ignore_index is not None:
-            not_ignored_mask = y_true != self.ignore_index  # (...)
-            if not torch.any(not_ignored_mask):
-                return torch.zeros((), device=y_pred.device, dtype=y_pred.dtype)  # ()
-
-            y_pred = y_pred[not_ignored_mask]  # (n_valid,)
-            soft_targets = soft_targets[not_ignored_mask]  # (n_valid,)
-            weight = (
-                self.weight[not_ignored_mask]
-                if self.weight is not None
-                else None
-            )  # (n_valid,) or None
-            pos_weight = (
-                self.pos_weight[not_ignored_mask]
-                if self.pos_weight is not None
-                else None
-            )  # (n_valid,) or None
-            loss = F.binary_cross_entropy_with_logits(
-                y_pred,
-                soft_targets,
-                weight,
-                pos_weight=pos_weight,
-                reduction="none",
-            )  # (n_valid,)
-        else:
-            loss = F.binary_cross_entropy_with_logits(
-                y_pred,
-                soft_targets,
-                self.weight,
-                pos_weight=self.pos_weight,
-                reduction="none",
-            )  # (...)
-
-        if self.reduction == "mean":
-            loss = loss.mean()  # ()
-
-        if self.reduction == "sum":
-            loss = loss.sum()  # ()
-
-        # () for mean/sum (and the all-ignored early return); reduction="none"
-        # is (n_valid,) with masking and otherwise preserves (...).
-        return loss
+    return loss_fct(
+        logits.view(-1, num_labels),  # (b, c)
+        labels.view(-1).long(),  # (b,)
+    )  # ()
 
 
-class SoftBCELoss(nn.Module):
-    __constants__ = [
-        "weight",
-        "pos_weight",
-        "reduction",
-        "ignore_index",
-        "smooth_factor",
-    ]
+def validate_label_mask(labels: torch.Tensor, label_mask: torch.Tensor) -> None:
+    """An explicit mask is boolean, shape-exact, and observes finite targets."""
+    # labels, label_mask: (...), identical shapes
+    if label_mask.dtype != torch.bool or label_mask.shape != labels.shape:
+        raise ValueError("label_mask must be boolean with exactly the labels shape")
+    if label_mask.device != labels.device:
+        raise ValueError("label_mask and labels must be on the same device")
+    if not torch.isfinite(labels[label_mask]).all():
+        raise ValueError("observed labels must be finite")
 
-    def __init__(
-        self,
-        weight: torch.Tensor | None = None,
-        ignore_index: float | None = -100.0,
-        reduction: str = "mean",
-        smooth_factor: float | None = None,
-        pos_weight: torch.Tensor | None = None,
-    ) -> None:
-        """Add ignore-index and optional smoothing to probability-space BCE."""
-        super().__init__()
-        # weight follows torch BCE broadcasting rules when no ignore index is
-        # used. Masking requires a tensor shaped like y_true. pos_weight is
-        # retained for API compatibility.
-        self.ignore_index = ignore_index
-        self.reduction = reduction
-        self.smooth_factor = smooth_factor
-        self.register_buffer("weight", weight)
-        self.register_buffer("pos_weight", pos_weight)
 
-    def forward(self, y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
-        # y_pred and y_true: (...) with matching, loss-compatible shapes.
-        if self.smooth_factor is not None:
-            soft_targets = (
-                (1 - y_true) * self.smooth_factor
-                + y_true * (1 - self.smooth_factor)
-            )  # (...)
-        else:
-            soft_targets = y_true  # (...)
+def _masked_probe_loss(
+    loss_fct: nn.Module,
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    task_type: str,
+    num_labels: int,
+    label_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Apply the existing criterion only to observed targets, including an empty batch.
 
-        # Exclude ignored targets before BCE so they cannot contribute gradients.
-        if self.ignore_index is not None:
-            not_ignored_mask = y_true != self.ignore_index  # (...)
-            if not torch.any(not_ignored_mask):
-                return torch.zeros((), device=y_pred.device, dtype=y_pred.dtype)  # ()
-
-            y_pred = y_pred[not_ignored_mask]  # (n_valid,)
-            soft_targets = soft_targets[not_ignored_mask]  # (n_valid,)
-            weight = (
-                self.weight[not_ignored_mask]
-                if self.weight is not None
-                else None
-            )  # (n_valid,) or None
-
-            # PyTorch BCE expects probabilities (after sigmoid) and does not
-            # support pos_weight. We ignore pos_weight here on purpose.
-            loss = F.binary_cross_entropy(
-                y_pred,
-                soft_targets,
-                weight=weight,
-                reduction="none",
-            )  # (n_valid,)
-        else:
-            # PyTorch BCE expects probabilities (after sigmoid) and does not
-            # support pos_weight. We ignore pos_weight here on purpose.
-            loss = F.binary_cross_entropy(
-                y_pred,
-                soft_targets,
-                weight=self.weight,
-                reduction="none",
-            )  # (...)
-
-        if self.reduction == "mean":
-            loss = loss.mean()  # ()
-
-        if self.reduction == "sum":
-            loss = loss.sum()  # ()
-
-        # () for mean/sum (and the all-ignored early return); reduction="none"
-        # is (n_valid,) with masking and otherwise preserves (...).
-        return loss
+    Elementwise criteria keep their full shape so per-label weights still broadcast to the
+    intended columns. A shallow criterion copy changes only reduction and ignored sentinels;
+    the caller's module and weight buffers are not mutated.
+    """
+    # logits: (b, c); labels, label_mask: (b,), (b, 1), or (b, c); m = observed targets
+    validate_label_mask(labels, label_mask)
+    if task_type == "singlelabel":
+        kept = label_mask.reshape(-1)  # (b,)
+        selected_logits = logits.reshape(-1, num_labels)[kept]  # (m, c)
+        selected_labels = labels.reshape(-1)[kept]  # (m,)
+        if not kept.any():
+            return selected_logits.sum()  # (), differentiable zero
+        if ((selected_labels != selected_labels.long()) | (selected_labels < 0) | (selected_labels >= num_labels)).any():
+            raise ValueError("observed class labels must be integer indices within the output vocabulary")
+        return loss_fct(selected_logits, selected_labels.long())  # ()
+    if task_type not in {"multilabel", "regression", "sigmoid_regression"}:
+        raise ValueError(f"label masks are unsupported for task type {task_type!r}")
+    if logits.numel() != labels.numel():
+        raise ValueError("elementwise labels and logits must contain the same number of targets")
+    reduction = getattr(loss_fct, "reduction", None)
+    if reduction not in {"mean", "sum"}:
+        raise ValueError("masked probe loss requires a mean or sum criterion")
+    criterion = copy.copy(loss_fct)
+    criterion.reduction = "none"
+    if isinstance(criterion, (SoftBCELoss, SoftBCEWithLogitsLoss)):
+        criterion.ignore_index = None
+    safe_labels = torch.where(label_mask, labels, 0)  # labels shape
+    safe_logits = torch.where(label_mask.reshape_as(logits), logits, 0)  # (b, c)
+    losses = compute_probe_loss(criterion, safe_logits, safe_labels, task_type, num_labels)  # labels shape or (b,)
+    if losses.numel() != label_mask.numel():
+        raise ValueError("criterion must return one loss per target before masked reduction")
+    observed_losses = losses.reshape(-1)[label_mask.reshape(-1)]  # (m,)
+    total = observed_losses.sum()  # (), differentiable even when m = 0
+    return total if reduction == "sum" else total / max(observed_losses.numel(), 1)  # ()

@@ -19,19 +19,19 @@
 # For additional terms and clarifications, please refer to our License FAQ at:
 # <https://multimolecule.danling.org/about/license-faq>.
 
-
 from __future__ import annotations
 
-
+import os
 import torch
 import torch.nn as nn
-import os
-from torch import Tensor
-from functools import lru_cache
-from itertools import product
-from typing import Any, Sequence, Tuple, List
-from pathlib import Path
+
 from collections import OrderedDict
+from collections.abc import Iterator, Sequence
+from functools import cache
+from itertools import product
+from pathlib import Path
+from typing import Any
+from torch import Tensor
 from transformers.tokenization_utils import PreTrainedTokenizer
 
 
@@ -81,13 +81,15 @@ SPECIAL_TOKENS_MAP = {
     },
 }
 
-STANDARD_ALPHABET = list("ACGUNRYSWKMBDHV.X*-I")
+# CaLM reads coding DNA: `multimolecule/calm` declares multimolecule's DNA tokenizer, and its
+# vocabulary holds the codons over A, C, G, T, and N.
+STANDARD_ALPHABET = list("ACGTNRYSWKMBDHV.X*-I")
 
-IUPAC_ALPHABET = list("ACGUNRYSWKMBDHV.")
+IUPAC_ALPHABET = list("ACGTNRYSWKMBDHV.")
 
-STREAMLINE_ALPHABET = list("ACGUN")
+STREAMLINE_ALPHABET = list("ACGTN")
 
-NUCLEOBASE_ALPHABET = list("ACGU")
+NUCLEOBASE_ALPHABET = list("ACGT")
 
 ALPHABETS = {
     "standard": STANDARD_ALPHABET,
@@ -98,25 +100,25 @@ ALPHABETS = {
 
 VOCAB_MAPPING = {
     "R": "AG",
-    "Y": "CU",
+    "Y": "CT",
     "S": "CG",
-    "W": "AU",
-    "K": "GU",
+    "W": "AT",
+    "K": "GT",
     "M": "AC",
-    "B": "CGU",
-    "D": "AGU",
-    "H": "ACU",
+    "B": "CGT",
+    "D": "AGT",
+    "H": "ACT",
     "V": "ACG",
-    "X": "ACGU",
+    "X": "ACGT",
 }
 
 TOKENIZER_CONFIG = {
-    "tokenizer_class": "RnaTokenizer",
+    "tokenizer_class": "DnaTokenizer",
     "clean_up_tokenization_spaces": True,
 }
 
 
-def get_alphabet(alphabet: List[str] | str | None = None, nmers: int = 1, **kwargs) -> Alphabet:
+def get_alphabet(alphabet: list[str] | str | None = None, nmers: int = 1, **kwargs: Any) -> Alphabet:
     if alphabet is None:
         alphabet = STANDARD_ALPHABET if nmers <= 1 else STREAMLINE_ALPHABET
     elif isinstance(alphabet, str):
@@ -124,15 +126,15 @@ def get_alphabet(alphabet: List[str] | str | None = None, nmers: int = 1, **kwar
     return Alphabet(alphabet, nmers=nmers, **kwargs)
 
 
-def get_vocab_mapping():
+def get_vocab_mapping() -> dict[str, str]:
     return VOCAB_MAPPING
 
 
-def get_special_tokens_map():
+def get_special_tokens_map() -> dict[str, dict[str, Any]]:
     return SPECIAL_TOKENS_MAP
 
 
-def get_tokenizer_config(add_special_tokens: bool = False):
+def get_tokenizer_config(add_special_tokens: bool = False) -> dict[str, Any]:
     config = TOKENIZER_CONFIG
     if add_special_tokens:
         config.setdefault("added_tokens_decoder", {})
@@ -142,18 +144,18 @@ def get_tokenizer_config(add_special_tokens: bool = False):
 
 
 class Alphabet:
-    prepend_tokens: Tuple[str, ...] = ("<pad>", "<cls>", "<eos>", "<unk>", "<mask>", "<null>")
-    append_tokens: Tuple[str, ...] = ()
-    tokens: Tuple[str, ...]
+    prepend_tokens: tuple[str, ...] = ("<pad>", "<cls>", "<eos>", "<unk>", "<mask>", "<null>")
+    append_tokens: tuple[str, ...] = ()
+    tokens: tuple[str, ...]
     nmers: int
 
     def __init__(
         self,
         tokens: Sequence[str],
-        prepend_tokens: Tuple[str, ...] | None = None,
-        append_tokens: Tuple[str, ...] | None = None,
+        prepend_tokens: tuple[str, ...] | None = None,
+        append_tokens: tuple[str, ...] | None = None,
         nmers: int = 1,
-    ):
+    ) -> None:
         if isinstance(tokens, Alphabet):
             tokens = tokens.tokens
         self.tokens = tuple(tokens)
@@ -164,23 +166,23 @@ class Alphabet:
         self.nmers = nmers
 
     @property
-    def vocabulary(self) -> Tuple[str, ...]:
+    def vocabulary(self) -> tuple[str, ...]:
         return self._vocabulary(self.prepend_tokens, self.tokens, self.nmers, self.append_tokens)
 
     @staticmethod
-    @lru_cache(maxsize=None)
+    @cache
     def _vocabulary(
-        prepend_tokens: Tuple[str, ...], tokens: Tuple[str, ...], nmers: int, append_tokens: Tuple[str, ...]
-    ) -> Tuple[str, ...]:
+        prepend_tokens: tuple[str, ...], tokens: tuple[str, ...], nmers: int, append_tokens: tuple[str, ...]
+    ) -> tuple[str, ...]:
         return prepend_tokens + generate_kmer_vocabulary(tokens, nmers) + append_tokens
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[str]:
         return iter(self.vocabulary)
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.vocabulary)
 
-    def __contains__(self, item: str):
+    def __contains__(self, item: str) -> bool:
         return item in self.vocabulary
 
     def __repr__(self) -> str:
@@ -193,9 +195,9 @@ class Alphabet:
 
 
 def _merge_extra_special_tokens(
-    additional_special_tokens: List | Tuple | None,
+    additional_special_tokens: list[str] | tuple[str, ...] | None,
     kwargs: dict[str, Any],
-) -> List | Tuple | None:
+) -> list[str] | tuple[str, ...] | None:
     if "extra_special_tokens" not in kwargs:
         return additional_special_tokens
 
@@ -223,7 +225,7 @@ def _merge_extra_special_tokens(
     return merged_special_tokens
 
 
-def generate_kmer_vocabulary(vocabulary: Tuple[str, ...], nmers: int = 1) -> Tuple[str, ...]:
+def generate_kmer_vocabulary(vocabulary: tuple[str, ...], nmers: int = 1) -> tuple[str, ...]:
     """
     Generates a kmer vocabulary given an original vocabulary and the size of kmer.
 
@@ -299,7 +301,7 @@ class Tokenizer(PreTrainedTokenizer):
 
     def __init__(
         self,
-        alphabet: Alphabet | List[str] | None = None,
+        alphabet: Alphabet | list[str] | None = None,
         bos_token: str | None = ...,  # type: ignore[assignment]
         cls_token: str | None = ...,  # type: ignore[assignment]
         pad_token: str | None = ...,  # type: ignore[assignment]
@@ -308,11 +310,11 @@ class Tokenizer(PreTrainedTokenizer):
         unk_token: str | None = ...,  # type: ignore[assignment]
         mask_token: str | None = ...,  # type: ignore[assignment]
         null_token: str | None = ...,  # type: ignore[assignment]
-        additional_special_tokens: List | Tuple | None = None,
+        additional_special_tokens: list[str] | tuple[str, ...] | None = None,
         do_upper_case: bool = True,
         vocab_file: str | None = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         if alphabet is None and vocab_file is None:
             raise ValueError("You must specify either alphabet or vocab_file")
 
@@ -362,7 +364,7 @@ class Tokenizer(PreTrainedTokenizer):
 
         # CaLM tokenization is character-level, so vocab tokens do not need trie-based splitting.
 
-    def _tokenize(self, text: str, **kwargs):
+    def _tokenize(self, text: str, **kwargs: Any) -> list[str]:
         if self.do_upper_case:
             text = text.upper()
         return list(text)
@@ -386,8 +388,8 @@ class Tokenizer(PreTrainedTokenizer):
         return self._convert_id_to_token(index)
 
     def build_inputs_with_special_tokens(
-        self, token_ids_0: List[int], token_ids_1: List[int] | None = None
-    ) -> List[int]:
+        self, token_ids_0: list[int], token_ids_1: list[int] | None = None
+    ) -> list[int]:
         bos = [self.bos_token_id]  # points to cls
         sep = [self.sep_token_id]  # points to eos
         eos = [self.eos_token_id]  # eos is eos
@@ -404,8 +406,8 @@ class Tokenizer(PreTrainedTokenizer):
         return bos + token_ids_0 + sep + token_ids_1 + eos
 
     def get_special_tokens_mask(
-        self, token_ids_0: List[int], token_ids_1: List[int] | None = None, already_has_special_tokens: bool = False
-    ) -> List[int]:
+        self, token_ids_0: list[int], token_ids_1: list[int] | None = None, already_has_special_tokens: bool = False
+    ) -> list[int]:
         """
         Retrieves sequence ids from a token list that has no special tokens added. This method is called when adding
         special tokens using the tokenizer `prepare_for_model` or `encode_plus` methods.
@@ -441,19 +443,19 @@ class Tokenizer(PreTrainedTokenizer):
         return mask
 
     @staticmethod
-    def load_vocabulary(vocab_file: str | Path) -> List[str]:
+    def load_vocabulary(vocab_file: str | Path) -> list[str]:
         with open(vocab_file, encoding="utf-8") as reader:
             vocabulary = reader.read().splitlines()
         return vocabulary
 
-    def save_vocabulary(self, save_directory: str, filename_prefix: str | None = None):
+    def save_vocabulary(self, save_directory: str, filename_prefix: str | None = None) -> tuple[str]:
         vocab_file = os.path.join(save_directory, (filename_prefix + "-" if filename_prefix else "") + "vocab.txt")
         with open(vocab_file, "w") as f:
             f.write("\n".join(self.all_tokens))
         return (vocab_file,)
 
     @staticmethod
-    def identify_special_token(alphabet: Alphabet | List[str], token) -> str | None:
+    def identify_special_token(alphabet: Alphabet | list[str], token: str) -> str | None:
         tokens = [i for i in alphabet if token in i.lower()]
         if len(tokens) == 1:
             return tokens[0]
@@ -461,7 +463,7 @@ class Tokenizer(PreTrainedTokenizer):
             return None
         raise ValueError(f"Token {token} is ambiguous, could be {tokens}")
 
-    def get_vocab(self):
+    def get_vocab(self) -> dict[str, int]:
         return dict(self.vocab, **self.added_tokens_encoder)
 
     @property
@@ -469,7 +471,7 @@ class Tokenizer(PreTrainedTokenizer):
         return self._token_to_id.copy()
 
     @property
-    def all_tokens(self) -> List[str]:
+    def all_tokens(self) -> list[str]:
         return list(self.get_vocab().keys())
 
     @property
@@ -477,60 +479,48 @@ class Tokenizer(PreTrainedTokenizer):
         return len(self.all_tokens)
 
 
-class RnaTokenizer(Tokenizer):
+class DnaTokenizer(Tokenizer):
     """
-    Tokenizer for RNA sequences.
+    Tokenizer for DNA sequences, multimolecule's `DnaTokenizer`, which `multimolecule/calm` declares.
 
     Args:
         alphabet: alphabet to use for tokenization.
 
-            - If is `None`, the standard RNA alphabet will be used.
+            - If is `None`, the standard DNA alphabet will be used.
             - If is a `string`, it should correspond to the name of a predefined alphabet. The options include
                 + `standard`
-                + `extended`
+                + `iupac`
                 + `streamline`
                 + `nucleobase`
             - If is an alphabet or a list of characters, that specific alphabet will be used.
         nmers: Size of kmer to tokenize.
         codon: Whether to tokenize into codons.
-        replace_T_with_U: Whether to replace T with U.
+        replace_U_with_T: Whether to replace U with T, so an mRNA reads as its cDNA.
         do_upper_case: Whether to convert input to uppercase.
 
     Examples:
-        >>> from multimolecule import RnaTokenizer
-        >>> tokenizer = RnaTokenizer()
-        >>> tokenizer('<pad><cls><eos><unk><mask><null>ACGUNRYSWKMBDHV.X*-I')["input_ids"]
-        [1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 2]
-        >>> tokenizer('acgu')["input_ids"]
-        [1, 6, 7, 8, 9, 2]
-        >>> tokenizer('acgt')["input_ids"]
-        [1, 6, 7, 8, 9, 2]
-        >>> tokenizer = RnaTokenizer(replace_T_with_U=False)
-        >>> tokenizer('acgt')["input_ids"]
-        [1, 6, 7, 8, 3, 2]
-        >>> tokenizer = RnaTokenizer(nmers=3)
-        >>> tokenizer('uagcuuauc')["input_ids"]
-        [1, 83, 17, 64, 49, 96, 84, 22, 2]
-        >>> tokenizer = RnaTokenizer(codon=True)
-        >>> tokenizer('uagcuuauc')["input_ids"]
-        [1, 83, 49, 22, 2]
-        >>> tokenizer('uagcuuauca')["input_ids"]
+        >>> tokenizer = DnaTokenizer()
+        >>> tokenizer('atgtggtaa')["input_ids"]
+        [1, 23, 93, 81, 2]
+        >>> tokenizer('auguggtaa')["input_ids"]
+        [1, 23, 93, 81, 2]
+        >>> tokenizer('atgtggta')["input_ids"]
         Traceback (most recent call last):
-        ValueError: length of input sequence must be a multiple of 3 for codon tokenization, but got 10
+        ValueError: length of input sequence must be a multiple of 3 for codon tokenization, but got 8
     """
 
     model_input_names = ["input_ids", "attention_mask"]
 
     def __init__(
         self,
-        alphabet: Alphabet | str | List[str] | None = None,
+        alphabet: Alphabet | str | list[str] | None = None,
         nmers: int = 1,
         codon: bool = True,
-        replace_T_with_U: bool = True,
+        replace_U_with_T: bool = True,  # noqa: naming serialized tokenizer config key
         do_upper_case: bool = True,
-        additional_special_tokens: List | Tuple | None = None,
-        **kwargs,
-    ):
+        additional_special_tokens: list[str] | tuple[str, ...] | None = None,
+        **kwargs: Any,
+    ) -> None:
         if codon and (nmers > 1 and nmers != 3):
             raise ValueError("Codon and nmers cannot be used together.")
         if codon:
@@ -542,20 +532,20 @@ class RnaTokenizer(Tokenizer):
             alphabet=alphabet,
             nmers=nmers,
             codon=codon,
-            replace_T_with_U=replace_T_with_U,
+            replace_U_with_T=replace_U_with_T,
             do_upper_case=do_upper_case,
             additional_special_tokens=additional_special_tokens,
             **kwargs,
         )
-        self.replace_T_with_U = replace_T_with_U
+        self.replace_U_with_T = replace_U_with_T
         self.nmers = nmers
         self.codon = codon
 
-    def _tokenize(self, text: str, **kwargs):
+    def _tokenize(self, text: str, **kwargs: Any) -> list[str]:
         if self.do_upper_case:
             text = text.upper()
-        if self.replace_T_with_U:
-            text = text.replace("T", "U")
+        if self.replace_U_with_T:
+            text = text.replace("U", "T")
         if self.codon:
             if len(text) % 3 != 0:
                 raise ValueError(
@@ -574,6 +564,10 @@ class RotaryEmbedding(nn.Module):
 
     Query and keys are transformed by rotation
     matrices which depend on their relative positions.
+
+    Each rotation turns an adjacent channel pair, 2i and 2i + 1, as the original CaLM does and as
+    multimolecule's `RotaryEmbedding(interleaved=True)` does for CaLM. Turning channel halves, i
+    and i + d_h / 2, is a different position encoding, under which CaLM's weights give other outputs.
 
     Tip: **Cache**
         The inverse frequency buffer is cached and updated only when the sequence length changes or the device changes.
@@ -604,7 +598,7 @@ class RotaryEmbedding(nn.Module):
         base: float = 10000.0,
         scale: float = 1.0,
         dtype: torch.dtype = torch.float32,
-    ):
+    ) -> None:
         """
         Initialize rotary position embeddings.
 
@@ -616,11 +610,23 @@ class RotaryEmbedding(nn.Module):
             dtype: Data type for computations. Defaults to torch.float32.
         """
         super().__init__()
-        inv_freq = 1.0 / (base ** (torch.arange(0, embedding_dim, 2, dtype=dtype) / embedding_dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self.embedding_dim = embedding_dim  # d_h
+        self.base = base
+        self.frequency_dtype = dtype
+        self.register_buffer("inv_freq", self.compute_inv_freq(), persistent=False)  # (d_h / 2,)
         self.scale = scale
 
-    def forward(self, q: Tensor, k: Tensor, offset: int = 0, seq_length: int | None = None) -> Tuple[Tensor, Tensor]:
+    def compute_inv_freq(self, device: torch.device | None = None) -> Tensor:
+        """
+        Compute the inverse frequency of each rotated channel pair.
+
+        No checkpoint holds `inv_freq`, so `CaLmPreTrainedModel._init_weights` refills it from here
+        after `from_pretrained`.
+        """
+        channels = torch.arange(0, self.embedding_dim, 2, device=device, dtype=self.frequency_dtype)  # (d_h / 2,)
+        return 1.0 / (self.base ** (channels / self.embedding_dim))  # (d_h / 2,)
+
+    def forward(self, q: Tensor, k: Tensor, offset: int = 0, seq_length: int | None = None) -> tuple[Tensor, Tensor]:
         """
         Apply rotary position embeddings to query and key tensors.
 
@@ -635,6 +641,7 @@ class RotaryEmbedding(nn.Module):
         Returns:
             Tuple of (rotated_query, rotated_key) tensors with the same shapes as inputs.
         """
+        # q: (b, h, l, d_h), k: (b, h, l, d_h)
         if offset > 0 and seq_length is None:
             raise ValueError("seq_length must be provided when offset > 0")
 
@@ -642,11 +649,11 @@ class RotaryEmbedding(nn.Module):
             seq_length = k.shape[-2]
 
         self._update_cos_sin_tables(k, seq_len_dim=-2, seq_length=seq_length)
-        return self.apply_rotary_pos_emb(q, offset=offset), self.apply_rotary_pos_emb(k, offset=offset)
+        return self.apply_rotary_pos_emb(q, offset=offset), self.apply_rotary_pos_emb(k, offset=offset)  # (b, h, l, d_h), (b, h, l, d_h)
 
     def _update_cos_sin_tables(
         self, x: Tensor, seq_len_dim: int = 2, seq_length: int | None = None
-    ) -> Tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor]:
         """
         Update cached cos/sin tables for rotary embeddings.
 
@@ -655,6 +662,7 @@ class RotaryEmbedding(nn.Module):
             seq_len_dim: Dimension containing sequence length (default: -2)
             seq_length: Full sequence length to cache. If None, uses x.shape[seq_len_dim]
         """
+        # x: (b, h, l, d_h)
         if seq_length is None:
             seq_length = x.shape[seq_len_dim]
 
@@ -663,15 +671,16 @@ class RotaryEmbedding(nn.Module):
             inv_freq = self.inv_freq
             if not isinstance(inv_freq, Tensor):
                 raise RuntimeError("inv_freq buffer is not a Tensor")
-            t = torch.arange(seq_length, device=x.device, dtype=inv_freq.dtype)
+            t = torch.arange(seq_length, device=x.device, dtype=inv_freq.dtype)  # (l,)
             # Apply scaling: divide frequencies by scale to extend context length
-            freqs = torch.outer(t, inv_freq) / self.scale
-            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-            self._cos_cached = emb.cos()[None, None, :, :]
-            self._sin_cached = emb.sin()[None, None, :, :]
+            freqs = torch.outer(t, inv_freq) / self.scale  # (l, d_h / 2)
+            # Both channels of a pair turn by the pair's angle.
+            emb = freqs.repeat_interleave(2, dim=-1).to(x.device)  # (l, d_h)
+            self._cos_cached = emb.cos()[None, None, :, :]  # (1, 1, l, d_h)
+            self._sin_cached = emb.sin()[None, None, :, :]  # (1, 1, l, d_h)
         # At this point, _cos_cached and _sin_cached are guaranteed to be Tensor
         assert self._cos_cached is not None and self._sin_cached is not None
-        return self._cos_cached, self._sin_cached
+        return self._cos_cached, self._sin_cached  # (1, 1, l, d_h), (1, 1, l, d_h)
 
     def apply_rotary_pos_emb(self, x: Tensor, offset: int = 0) -> Tensor:
         """
@@ -688,11 +697,13 @@ class RotaryEmbedding(nn.Module):
         if self._cos_cached is None or self._sin_cached is None:
             raise RuntimeError("Cos/sin tables not initialized. Call forward() or _update_cos_sin_tables() first.")
 
-        cos = self._cos_cached[:, :, offset : offset + x.shape[-2], :]
-        sin = self._sin_cached[:, :, offset : offset + x.shape[-2], :]
-        return (x * cos) + (self.rotate_half(x) * sin)
+        # x: (b, h, l, d_h)
+        cos = self._cos_cached[:, :, offset : offset + x.shape[-2], :]  # (1, 1, l, d_h)
+        sin = self._sin_cached[:, :, offset : offset + x.shape[-2], :]  # (1, 1, l, d_h)
+        return (x * cos) + (self.rotate_half(x) * sin)  # (b, h, l, d_h)
 
     @staticmethod
     def rotate_half(x: Tensor) -> Tensor:
-        x1, x2 = x.chunk(2, dim=-1)
-        return torch.cat((-x2, x1), dim=-1)
+        """Turn each channel pair (x_2i, x_2i+1) a quarter turn, to (-x_2i+1, x_2i)."""
+        # x: (..., d_h)
+        return torch.stack((-x[..., 1::2], x[..., ::2]), dim=-1).flatten(-2)  # (..., d_h)

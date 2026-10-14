@@ -2,29 +2,19 @@ import argparse
 import json
 import time
 import torch
+
 from collections.abc import Sequence
 from torch.utils.data import DataLoader, TensorDataset
 
-try:
-    from probes.mlp_probe import MLPProbe, MLPProbeConfig
-    from probes.parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
-    from probes.parallel_probe_batches import ParallelRunDataset
-    from probes.parallel_probe_plan import (
-        ParallelProbeExecutionPlan,
-        build_seed_run_specs,
-        estimate_parallel_probe_plan,
-        plan_parallel_probe_runs,
-    )
-except ImportError:
-    from protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
-    from protify.probes.parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
-    from protify.probes.parallel_probe_batches import ParallelRunDataset
-    from protify.probes.parallel_probe_plan import (
-        ParallelProbeExecutionPlan,
-        build_seed_run_specs,
-        estimate_parallel_probe_plan,
-        plan_parallel_probe_runs,
-    )
+from ..probes.mlp_probe import MLPProbe, MLPProbeConfig
+from ..probes.parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
+from ..probes.parallel_probe_batches import ParallelRunDataset
+from ..probes.parallel_probe_plan import (
+    ParallelProbeExecutionPlan,
+    build_seed_run_specs,
+    estimate_parallel_probe_plan,
+    plan_parallel_probe_runs,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,7 +28,7 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help=(
             "Synthetic label count used only to generate random benchmark labels. "
-            "Real python -m main probe runs infer num_labels from the dataset."
+            "Real python -m protify.main probe runs infer num_labels from the dataset."
         ),
     )
     parser.add_argument("--num_runs", type=int, default=8)
@@ -261,11 +251,11 @@ def plan_only_result(
     args: argparse.Namespace,
     plan: ParallelProbeExecutionPlan,
 ) -> dict[str, object]:
-    result = benchmark_config_dict(args)
-    result["plan_only"] = True
-    result["plan"] = plan_summary_dict(plan, args)
-    result["comparison"] = benchmark_comparison_contract(args, plan)
-    return result
+    report = benchmark_config_dict(args)
+    report["plan_only"] = True
+    report["plan"] = plan_summary_dict(plan, args)
+    report["comparison"] = benchmark_comparison_contract(args, plan)
+    return report
 
 
 def parallel_seed_groups(args: argparse.Namespace) -> tuple[tuple[int, ...], ...]:
@@ -306,12 +296,12 @@ def move_batch(
     batch: Sequence[torch.Tensor],
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # Embeddings are (b, d) or (b, r, d). Labels are (b,), (b, 1),
+    # batch: (embeddings, labels). Embeddings are (b, d) or (b, r, d). Labels are (b,), (b, 1),
     # (b, r), or (b, r, 1), depending on task and batch mode.
     embeddings, labels = batch
     moved_embeddings = embeddings.to(device, non_blocking=True)  # (b, d) or (b, r, d)
     moved_labels = labels.to(device, non_blocking=True)  # (b,), (b, 1), (b, r), or (b, r, 1)
-    return moved_embeddings, moved_labels
+    return moved_embeddings, moved_labels  # (b, d) or (b, r, d), (b,) to (b, r, 1)
 
 
 def train_sequential(
@@ -413,8 +403,8 @@ def main() -> None:
     else:
         parallel_peak_memory = 0
 
-    result = benchmark_config_dict(args)
-    result.update({
+    report = benchmark_config_dict(args)
+    report.update({
         "device": str(device),
         "plan_only": False,
         "sequential_seconds": sequential_seconds,
@@ -429,7 +419,7 @@ def main() -> None:
         "plan": plan_summary_dict(plan, args),
         "comparison": benchmark_comparison_contract(args, plan),
     })
-    print(json.dumps(result, indent=2))
+    print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":

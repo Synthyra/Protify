@@ -1,20 +1,11 @@
 import pytest
 import torch
+
 from torch.utils.data import TensorDataset
 
-try:
-    from src.protify import probes as probes_package
-    from src.protify.data.data_collators import EmbedsLabelsCollator
-    from src.protify.probes.parallel_probe_batches import ParallelRunDataset
-except ImportError:
-    try:
-        from protify import probes as probes_package
-        from protify.data.data_collators import EmbedsLabelsCollator
-        from protify.probes.parallel_probe_batches import ParallelRunDataset
-    except ImportError:
-        from .. import probes as probes_package
-        from ..data.data_collators import EmbedsLabelsCollator
-        from ..probes.parallel_probe_batches import ParallelRunDataset
+from protify import probes as probes_package
+from protify.data.data_collators import EmbedsLabelsCollator
+from protify.probes.parallel_probe_batches import ParallelRunDataset
 
 
 def _base_dataset() -> TensorDataset:
@@ -42,7 +33,7 @@ class TensorBackedEmbeddingDataset:
         self.item_call_count += 1
         embedding = self.embeddings[idx].float().squeeze(0)  # (d=2,)
         label = torch.tensor(self.labels[idx], dtype=torch.long)  # ()
-        return embedding, label
+        return embedding, label  # (2,), ()
 
 
 def test_parallel_run_dataset_package_export() -> None:

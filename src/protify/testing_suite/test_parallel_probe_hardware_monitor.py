@@ -1,14 +1,7 @@
 import json
-
 import pytest
 
-try:
-    from src.protify.scripts import monitor_parallel_probe_hardware as monitor
-except ImportError:
-    try:
-        from protify.scripts import monitor_parallel_probe_hardware as monitor
-    except ImportError:
-        from ..scripts import monitor_parallel_probe_hardware as monitor
+from protify.scripts import monitor_parallel_probe_hardware as monitor
 
 
 def test_hardware_monitor_builds_nvidia_smi_command() -> None:
@@ -85,7 +78,7 @@ def test_hardware_monitor_dry_run_plan_strips_command_separator(tmp_path) -> Non
             "--",
             "python",
             "-m",
-            "main",
+            "protify.main",
             "--parallel_probe_runs",
         ]
     )
@@ -94,7 +87,7 @@ def test_hardware_monitor_dry_run_plan_strips_command_separator(tmp_path) -> Non
 
     assert plan["mode"] == "dry_run"
     assert plan["nvidia_smi_command"][1] == "--id=1"
-    assert plan["wrapped_command"] == ["python", "-m", "main", "--parallel_probe_runs"]
+    assert plan["wrapped_command"] == ["python", "-m", "protify.main", "--parallel_probe_runs"]
     assert plan["output_jsonl"] == str(output_path)
     assert plan["summary_json"] == str(summary_path)
     assert plan["interval_seconds"] == pytest.approx(0.5)

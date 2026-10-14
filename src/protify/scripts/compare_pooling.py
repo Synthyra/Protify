@@ -1,16 +1,18 @@
 """Grid-run Protify over pooling configurations and plot cross-pooling comparisons.
 
-Each --pooling_types token is one pooling configuration. Dashes concatenate:
+Each --pooling_types token is one pooling configuration, passed as both
+--embedding_pooling_types and --probe_pooling_types. A Lyra probe takes one pooling type,
+so compare it on single-type tokens only. Dashes concatenate:
     mean       -> --embedding_pooling_types mean
     mean-var   -> --embedding_pooling_types mean var
     max        -> --embedding_pooling_types max
     cls        -> --embedding_pooling_types cls
 
-One docker invocation of `py -m main` per pooling configuration; main.py grids
+One docker invocation of `python -m protify.main` per pooling configuration; main.py grids
 models x datasets internally. Results TSVs and logs are collected, aggregated
 into a long-form DataFrame, and rendered as bar/heatmap/rank plots.
 
-Any flags not recognized by this script are forwarded verbatim to `py -m main`,
+Any flags not recognized by this script are forwarded verbatim to `python -m protify.main`,
 so you can set --probe_type, --hybrid_probe, --lr, --trainer, --token_probe, etc.
 
 Example (run from repo root):
@@ -31,11 +33,11 @@ import platform
 import subprocess
 import sys
 import time
-from pathlib import Path
-
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+
+from pathlib import Path
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -46,7 +48,7 @@ LOGS_DIR = PROTIFY_DIR / 'logs'
 PLOTS_DIR = REPO_ROOT / 'plots'
 
 sys.path.insert(0, str(PROTIFY_DIR))
-from visualization.utils import MODEL_NAMES, DATASET_NAMES, CLS_PREFS, REG_PREFS
+from ..visualization.plot_labels import MODEL_NAMES, DATASET_NAMES, CLS_PREFS, REG_PREFS
 
 
 def _timestamp() -> str:
@@ -65,7 +67,7 @@ def detect_docker() -> list[str]:
 
 def build_docker_prefix(image: str) -> list[str]:
     cmd = detect_docker() + ['run', '--rm', '--gpus', 'all']
-    cmd += ['-v', f'{REPO_ROOT}:/workspace', '-w', '/workspace/src/protify', image, 'python', '-m', 'main']
+    cmd += ['-v', f'{REPO_ROOT}:/workspace', '-w', '/workspace/src/protify', image, 'python', '-m', 'protify.main']
     return cmd
 
 
@@ -75,7 +77,7 @@ def expand_pooling(spec: str) -> list[str]:
     return parts
 
 
-def snapshot_tsvs() -> set:
+def snapshot_tsvs() -> set[str]:
     return set(glob.glob(str(RESULTS_DIR / '*.tsv')))
 
 
@@ -168,7 +170,6 @@ def plot_bars(df: pd.DataFrame, out_dir: Path) -> None:
         if sub_m.empty:
             ax.set_visible(False)
             continue
-        pivot_models = [pretty_model(m) for m in sub_m['model'].unique()]
         sub_m = sub_m.assign(model_disp=sub_m['model'].map(pretty_model))
         sns.barplot(data=sub_m, x='pooling', y='value', hue='model_disp', ax=ax)
         ax.set_title(f'{pretty_dataset(dataset)}  ({metric_label})')
@@ -257,7 +258,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='Unrecognized flags are forwarded verbatim to `py -m main` '
+        epilog='Unrecognized flags are forwarded verbatim to `python -m protify.main` '
                '(e.g. --probe_type transformer --hybrid_probe --lr 1e-4 --trainer hf).',
     )
     parser.add_argument('--model_names', nargs='+', required=True)
@@ -279,7 +280,7 @@ def main() -> None:
         manifest = json.loads(Path(args.manifest).read_text())
     else:
         if passthrough:
-            print(f'[info] forwarding to py -m main: {passthrough}')
+            print(f'[info] forwarding to python -m protify.main: {passthrough}')
         prefix = build_docker_prefix(args.image)
         manifest = []
         for spec in args.pooling_types:

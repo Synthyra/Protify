@@ -17,6 +17,8 @@ Probes that use these components:
 - **Transformer probe:** Uses `Transformer`, `LayerNorm`, and `intermediate_correction_fn` (from mlp).
 - **Linear probe:** Uses only `intermediate_correction_fn` from mlp (for classifier sizing).
 
+The attention, rotary, transformer-stack, and SwiGLU code is `foundry.layers`' (`probe_attention`, `attention_backends`, `probe_transformer`, `feedforward`). These modules re-export it under the paths below, so every probe built on them runs one implementation, and a fix belongs in `foundry.layers`. Protify's own code here is `TransformerConfig`, `TransformerPreTrainedModel`, and `TransformerForMaskedLM`.
+
 ---
 
 ## attention.py
@@ -25,7 +27,6 @@ Probes that use these components:
 - **apply_rotary_emb_torch(x, cos, sin, interleaved):** Applies rotary embeddings to a tensor.
 - **RotaryEmbedding(dim, base, interleaved, scaling_factor):** Module that caches cos/sin for a max sequence length.
 - **MultiHeadAttention(hidden_size, n_heads, rotary, attention_backend, use_bias):** Multi-head attention with optional rotary. Dispatches to flex_attention_func, kernels_attention_func, or sdpa_attention_func from attention_utils. Supports 2D and 4D attention masks and optional BlockMask for flex. Can return attention weights and s_max. (Note: configs that wrap this module now expose `head_size` as the primary knob and derive `n_heads = hidden_size // head_size`. Passing `n_heads` to the *configs* is deprecated; the primitive itself still accepts `n_heads` directly.)
-- **AttentionLogitsSequence,** **AttentionLogitsToken:** Cross-attention modules for sequence-level and token-level classification from attention over learned parameters.
 - **Linear,** **LayerNorm:** Re-exports of `nn.Linear` and `nn.LayerNorm` for use across probes.
 
 ---
@@ -34,15 +35,14 @@ Probes that use these components:
 
 - **AttentionBackend:** Enum (KERNELS, FLEX, SDPA) for the attention implementation.
 - **resolve_attention_backend(name):** Returns the backend to use.
-- **_repeat_kv(keys, values, n_rep):** For grouped-query style repetition.
 - **sdpa_attention_func(...):** PyTorch SDPA-based attention.
 - **flex_attention_func(...):** Flex attention (e.g. torch.nn.functional.flex_attention when available).
 - **kernels_attention_func(...):** Custom kernel-based attention path.
 - **build_attention_masks(...):** Builds 2D and 4D masks (and BlockMask for flex) from attention_mask.
-- **pad_input,** **_unpad_input:** Padding and unpadding for block-sparse or kernel paths.
+- **pad_input:** Returns unpadded rows to the padded batch for the kernel path.
 - **IndexFirstAxis,** **IndexPutFirstAxis:** Helpers for indexing in attention kernels.
 
-These are used by `MultiHeadAttention` and by the transformer block when calling the chosen attention function.
+These are used by `MultiHeadAttention` and by the transformer block when calling the chosen attention function. The kernels backend keeps the kernel it loads in `foundry.layers.attention_backends` (`FLASH_KERNEL` and its variant and dtypes), so read or reset it there.
 
 ---
 
@@ -52,6 +52,7 @@ These are used by `MultiHeadAttention` and by the transformer block when calling
 - **TransformerOutput:** Dataclass extending ModelOutput (loss, logits, last_hidden_state, hidden_states, attentions, s_max).
 - **Transformer(hidden_size, n_heads, n_layers, expansion_ratio, dropout, rotary, use_bias, attention_backend):** Stack of TransformerBlocks. Forward accepts hidden_states, attention_mask_2d/4d, flex_block_mask, output_attentions, output_s_max.
 - **TransformerForMaskedLM:** Wrapper for masked LM; not used by the standard probes.
+- **TransformerPreTrainedModel:** Base of the transformer probes and `TransformerForMaskedLM`. Its `_init_weights` rebuilds the rotary tables, which no checkpoint holds, after `from_pretrained`.
 
 The **transformer probe** uses `Transformer` as the backbone above embeddings with a pooler + linear classifier.
 

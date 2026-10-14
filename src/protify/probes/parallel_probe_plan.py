@@ -1,17 +1,11 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
 
-try:
-    from ..model_components.mlp import intermediate_correction_fn
-except ImportError:
-    try:
-        from protify.model_components.mlp import intermediate_correction_fn
-    except ImportError:
-        from model_components.mlp import intermediate_correction_fn
 from .get_probe import normalize_probe_type
+from ..model_components.mlp import intermediate_correction_fn
 
 
-ParallelProbeCompatibilityKey = Tuple[object, ...]
+ParallelProbeCompatibilityKey = tuple[object, ...]
 
 
 @dataclass(frozen=True)
@@ -54,7 +48,7 @@ class ParallelProbeRunSpec:
             and not self.full_finetuning
         )
 
-    def ineligibility_reasons(self) -> Tuple[str, ...]:
+    def ineligibility_reasons(self) -> tuple[str, ...]:
         reasons = []
         if self.probe_type != 'mlp':
             reasons.append('probe_type')
@@ -96,7 +90,7 @@ class ParallelProbeRunSpec:
 class ParallelProbeGroup:
     """A group of runs that can share one vectorized Trainer pass."""
 
-    runs: Tuple[ParallelProbeRunSpec, ...]
+    runs: tuple[ParallelProbeRunSpec, ...]
     eligible: bool
 
     def __post_init__(self) -> None:
@@ -124,11 +118,11 @@ class ParallelProbeGroup:
         return len(self.runs)
 
     @property
-    def run_ids(self) -> Tuple[str, ...]:
+    def run_ids(self) -> tuple[str, ...]:
         return tuple(run.run_id for run in self.runs)
 
     @property
-    def run_seeds(self) -> Tuple[int, ...]:
+    def run_seeds(self) -> tuple[int, ...]:
         return tuple(run.seed for run in self.runs)
 
     @property
@@ -146,7 +140,7 @@ class ParallelProbeGroup:
         return 'sequential_fallback'
 
     @property
-    def fallback_reasons(self) -> Tuple[str, ...]:
+    def fallback_reasons(self) -> tuple[str, ...]:
         if self.can_vectorize:
             return ()
         if self.eligible:
@@ -158,18 +152,18 @@ class ParallelProbeGroup:
 class ParallelProbeExecutionPlan:
     """A pure execution plan for a model/data/probe run universe."""
 
-    groups: Tuple[ParallelProbeGroup, ...]
+    groups: tuple[ParallelProbeGroup, ...]
 
     @property
     def total_runs(self) -> int:
         return sum(group.num_runs for group in self.groups)
 
     @property
-    def vectorized_groups(self) -> Tuple[ParallelProbeGroup, ...]:
+    def vectorized_groups(self) -> tuple[ParallelProbeGroup, ...]:
         return tuple(group for group in self.groups if group.can_vectorize)
 
     @property
-    def sequential_groups(self) -> Tuple[ParallelProbeGroup, ...]:
+    def sequential_groups(self) -> tuple[ParallelProbeGroup, ...]:
         return tuple(group for group in self.groups if not group.can_vectorize)
 
     @property
@@ -194,19 +188,19 @@ class ParallelProbeExecutionPlan:
             return 1.0
         return float(self.total_runs) / float(self.trainer_invocations)
 
-    def execution_groups(self, prefer_largest_parallel: bool = True) -> Tuple[ParallelProbeGroup, ...]:
+    def execution_groups(self, prefer_largest_parallel: bool = True) -> tuple[ParallelProbeGroup, ...]:
         if not prefer_largest_parallel:
             return self.groups
         indexed_groups = tuple(enumerate(self.groups))
 
-        def sort_key(item: Tuple[int, ParallelProbeGroup]) -> Tuple[int, int, int]:
+        def sort_key(item: tuple[int, ParallelProbeGroup]) -> tuple[int, int, int]:
             index, group = item
             vectorized_rank = 0 if group.can_vectorize else 1
             return (vectorized_rank, -group.num_runs, index)
 
         return tuple(group for _index, group in sorted(indexed_groups, key=sort_key))
 
-    def summary_rows(self) -> Tuple[Tuple[str, int, Tuple[str, ...], Tuple[str, ...]], ...]:
+    def summary_rows(self) -> tuple[tuple[str, int, tuple[str, ...], tuple[str, ...]], ...]:
         rows = []
         for group in self.groups:
             rows.append(
@@ -229,7 +223,7 @@ class ParallelProbeGroupEstimate:
 
     execution_kind: str
     num_runs: int
-    run_ids: Tuple[str, ...]
+    run_ids: tuple[str, ...]
     parameter_count_known: bool
     single_probe_parameter_count: int
     group_parameter_count: int
@@ -252,7 +246,7 @@ class ParallelProbeGroupEstimate:
 class ParallelProbePlanEstimate:
     """Static resource estimate for a full parallel-probe execution plan."""
 
-    group_estimates: Tuple[ParallelProbeGroupEstimate, ...]
+    group_estimates: tuple[ParallelProbeGroupEstimate, ...]
     dtype_bytes: int
     optimizer_state_multiplier: int
     training_flop_multiplier: int = 3
@@ -319,7 +313,7 @@ class ParallelProbePlanEstimate:
             return 0
         return max(estimate.group_training_flops_per_batch for estimate in self.group_estimates)
 
-    def summary_dict(self) -> Dict[str, object]:
+    def summary_dict(self) -> dict[str, object]:
         return {
             "total_parameter_count": self.total_parameter_count,
             "total_training_state_bytes": self.total_training_state_bytes,
@@ -347,17 +341,17 @@ class ParallelProbePlanEstimate:
 class ParallelProbeExecutionWave:
     """A static co-scheduling wave of planned Trainer invocations."""
 
-    group_indices: Tuple[int, ...]
-    group_run_counts: Tuple[int, ...]
-    group_execution_kinds: Tuple[str, ...]
-    group_run_ids: Tuple[Tuple[str, ...], ...]
+    group_indices: tuple[int, ...]
+    group_run_counts: tuple[int, ...]
+    group_execution_kinds: tuple[str, ...]
+    group_run_ids: tuple[tuple[str, ...], ...]
     total_runs: int
     trainer_invocations: int
     concurrent_estimated_peak_bytes: int
     forward_flops_per_batch: int
     training_flops_per_batch: int
 
-    def summary_dict(self) -> Dict[str, object]:
+    def summary_dict(self) -> dict[str, object]:
         return {
             "group_indices": list(self.group_indices),
             "group_run_counts": list(self.group_run_counts),
@@ -375,9 +369,9 @@ class ParallelProbeExecutionWave:
 class ParallelProbeWaveSchedule:
     """A static packing plan for co-scheduling parallel-probe groups."""
 
-    waves: Tuple[ParallelProbeExecutionWave, ...]
-    max_wave_peak_bytes: Optional[int] = None
-    max_groups_per_wave: Optional[int] = 1
+    waves: tuple[ParallelProbeExecutionWave, ...]
+    max_wave_peak_bytes: int | None = None
+    max_groups_per_wave: int | None = 1
     target_training_flops_per_wave: int = 0
 
     @property
@@ -426,7 +420,7 @@ class ParallelProbeWaveSchedule:
             if wave.concurrent_estimated_peak_bytes > self.max_wave_peak_bytes
         )
 
-    def summary_dict(self) -> Dict[str, object]:
+    def summary_dict(self) -> dict[str, object]:
         return {
             "total_waves": self.total_waves,
             "total_groups": self.total_groups,
@@ -639,7 +633,7 @@ def estimate_parallel_probe_plan(
 
 
 def _build_execution_wave(
-        items: Tuple[Tuple[int, ParallelProbeGroupEstimate], ...],
+        items: tuple[tuple[int, ParallelProbeGroupEstimate], ...],
     ) -> ParallelProbeExecutionWave:
     assert len(items) > 0, "Execution waves require at least one group estimate."
     group_indices = tuple(index for index, _estimate in items)
@@ -661,8 +655,8 @@ def _build_execution_wave(
 
 def schedule_parallel_probe_execution_waves(
         plan_estimate: ParallelProbePlanEstimate,
-        max_wave_peak_bytes: Optional[int] = None,
-        max_groups_per_wave: Optional[int] = 1,
+        max_wave_peak_bytes: int | None = None,
+        max_groups_per_wave: int | None = 1,
         target_training_flops_per_wave: int = 0,
         prefer_largest_first: bool = True,
     ) -> ParallelProbeWaveSchedule:
@@ -695,8 +689,8 @@ def schedule_parallel_probe_execution_waves(
     else:
         ordered_estimates = indexed_estimates
 
-    waves: List[List[Tuple[int, ParallelProbeGroupEstimate]]] = []
-    wave_peak_bytes: List[int] = []
+    waves: list[list[tuple[int, ParallelProbeGroupEstimate]]] = []
+    wave_peak_bytes: list[int] = []
     for item in ordered_estimates:
         _group_index, estimate = item
         placed = False
@@ -804,7 +798,7 @@ def build_seed_run_specs(
         matrix_embed: bool = False,
         full_finetuning: bool = False,
         save_model: bool = False,
-    ) -> Tuple[ParallelProbeRunSpec, ...]:
+    ) -> tuple[ParallelProbeRunSpec, ...]:
     assert num_runs > 0, "num_runs must be positive."
     specs = []
     for run_idx in range(num_runs):
@@ -839,9 +833,9 @@ def build_seed_run_specs(
 
 
 def _chunk_bucket(
-        items: List[Tuple[int, ParallelProbeRunSpec]],
-        max_parallel_group_size: Optional[int],
-    ) -> Tuple[Tuple[int, Tuple[ParallelProbeRunSpec, ...]], ...]:
+        items: list[tuple[int, ParallelProbeRunSpec]],
+        max_parallel_group_size: int | None,
+    ) -> tuple[tuple[int, tuple[ParallelProbeRunSpec, ...]], ...]:
     if max_parallel_group_size is None:
         return ((items[0][0], tuple(spec for _index, spec in items)),)
 
@@ -855,9 +849,9 @@ def _chunk_bucket(
 
 def group_parallel_probe_runs(
         run_specs: Iterable[ParallelProbeRunSpec],
-        max_parallel_group_size: Optional[int] = None,
-        max_parallel_group_size_by_key: Optional[Dict[ParallelProbeCompatibilityKey, int]] = None,
-    ) -> Tuple[ParallelProbeGroup, ...]:
+        max_parallel_group_size: int | None = None,
+        max_parallel_group_size_by_key: dict[ParallelProbeCompatibilityKey, int] | None = None,
+    ) -> tuple[ParallelProbeGroup, ...]:
     if max_parallel_group_size is not None:
         assert max_parallel_group_size > 0, "max_parallel_group_size must be positive when provided."
     if max_parallel_group_size_by_key is not None:
@@ -865,9 +859,9 @@ def group_parallel_probe_runs(
             assert keyed_max_group_size > 0, (
                 f"max_parallel_group_size_by_key value for {key} must be positive when provided."
             )
-    buckets: Dict[ParallelProbeCompatibilityKey, List[Tuple[int, ParallelProbeRunSpec]]] = {}
-    bucket_order: List[ParallelProbeCompatibilityKey] = []
-    group_candidates: List[Tuple[int, ParallelProbeGroup]] = []
+    buckets: dict[ParallelProbeCompatibilityKey, list[tuple[int, ParallelProbeRunSpec]]] = {}
+    bucket_order: list[ParallelProbeCompatibilityKey] = []
+    group_candidates: list[tuple[int, ParallelProbeGroup]] = []
 
     for index, spec in enumerate(run_specs):
         if spec.is_parallel_linear_eligible():
@@ -896,8 +890,8 @@ def group_parallel_probe_runs(
 
 def plan_parallel_probe_runs(
         run_specs: Iterable[ParallelProbeRunSpec],
-        max_parallel_group_size: Optional[int] = None,
-        max_parallel_group_size_by_key: Optional[Dict[ParallelProbeCompatibilityKey, int]] = None,
+        max_parallel_group_size: int | None = None,
+        max_parallel_group_size_by_key: dict[ParallelProbeCompatibilityKey, int] | None = None,
     ) -> ParallelProbeExecutionPlan:
     plan = ParallelProbeExecutionPlan(
         groups=group_parallel_probe_runs(

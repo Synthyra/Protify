@@ -1,9 +1,10 @@
 import torch
 import torch.nn as nn
+
 from typing import Any
 from transformers import AutoModel, AutoModelForMaskedLM, AutoTokenizer
 
-from .utils import select_hidden_state
+from .hidden_state_selection import select_hidden_state
 
 
 # Custom checkpoints must be loadable through AutoModel with their remote implementation.
@@ -55,7 +56,7 @@ def build_custom_model(
         model = CustomModelForEmbedding(model_path, dtype=dtype).eval()
     try:
         tokenizer = model.tokenizer
-    except:
+    except AttributeError:
         tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     return model, tokenizer
 

@@ -21,7 +21,7 @@ Two kinds of visualization are used:
 2. For each row (dataset), regression vs classification is decided via `is_regression(metrics)` (reg: spearman, pearson, r_squared, rmse, mse; cls: accuracy, f1, mcc, auc, etc.).
 3. **pick_metric(metrics, REG_PREFS or CLS_PREFS):** Chooses one metric per task type (e.g. regression: spearman then r_squared then pearson; classification: f1 then mcc then accuracy).
 4. **get_metric_value_with_std** per model: parses value (float or "mean±std") and builds mean, std, and display string.
-5. Datasets are ordered by `DATASET_NAMES` (from [utils.py](../src/protify/visualization/utils.py)), then any others appended. Models are sorted by average score (ascending). Normalized plots use per-dataset min-max normalization and optional reordering.
+5. Datasets are ordered by `DATASET_NAMES` (from [plot_labels.py](../src/protify/visualization/plot_labels.py)), then any others appended. Models are sorted by average score (ascending). Normalized plots use per-dataset min-max normalization and optional reordering.
 6. Output directory is `outdir / tsv.stem`. Six PNGs are written (e.g. 450 dpi in the implementation).
 
 ---
@@ -76,7 +76,7 @@ All under `outdir / tsv.stem`:
 To generate the six comparison plots from an existing TSV without running a full pipeline:
 
 ```bash
-py -m src.protify.visualization.plot_result --input path/to/results.tsv --output_dir plots --no_std
+python -m protify.visualization.plot_result --input path/to/results.tsv --output_dir plots --no_std
 ```
 
 `--no_std` omits standard deviation from heatmap annotations.
@@ -92,7 +92,7 @@ Plots are generated automatically when `main()` finishes (if results TSV exists)
 ### Standalone from TSV
 
 ```bash
-py -m src.protify.visualization.plot_result --input results/my_id.tsv --output_dir plots
+python -m protify.visualization.plot_result --input results/my_id.tsv --output_dir plots
 ```
 
 ---

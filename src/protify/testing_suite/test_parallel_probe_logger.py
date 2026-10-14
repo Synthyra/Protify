@@ -1,14 +1,9 @@
 import csv
 import json
+
 from types import SimpleNamespace
 
-try:
-    from src.protify.logger import MetricsLogger
-except ImportError:
-    try:
-        from protify.logger import MetricsLogger
-    except ImportError:
-        from ..logger import MetricsLogger
+from protify.logger import MetricsLogger
 
 
 def test_parallel_probe_seconds_per_run_survives_metric_time_filter(tmp_path) -> None:
@@ -83,7 +78,7 @@ def test_probe_result_identity_fields_are_written_to_results_tsv(tmp_path) -> No
     assert stored["task_type"] == "singlelabel"
     assert stored["num_labels"] == 3
 
-    with open(logger.results_file, "r", newline="", encoding="utf-8") as handle:
+    with open(logger.results_file, newline="", encoding="utf-8") as handle:
         rows = list(csv.reader(handle, delimiter="\t"))
     metrics = json.loads(rows[1][1])
     assert metrics["probe_type"] == "mlp"

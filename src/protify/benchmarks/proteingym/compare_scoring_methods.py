@@ -1,26 +1,24 @@
-import pandas as pd
-import numpy as np
 import os
-import torch
 import time
-from typing import List, Optional
+import numpy as np
+import pandas as pd
+import torch
+
 from scipy.stats import spearmanr
-from .scorer import ProteinGymScorer
+
 from .data_loader import load_proteingym_dms
 from .dms_ids import ALL_SUBSTITUTION_DMS_IDS
+from .scorer import ProteinGymScorer
+from ...base_models.get_base_models import get_base_model
 
-try:
-    from base_models.get_base_models import get_base_model
-except ImportError:
-    from ...base_models.get_base_models import get_base_model
 
 def compare_scoring_methods(
-    model_names: List[str],
-    device: Optional[str] = None,
-    methods: Optional[List[str]] = None,
-    dms_ids: Optional[List[str]] = None,
+    model_names: list[str],
+    device: str | None = None,
+    methods: list[str] | None = None,
+    dms_ids: list[str] | None = None,
     progress: bool = True,
-    output_csv: Optional[str] = None,
+    output_csv: str | None = None,
     batch_size: int = 32,
     scoring_window: str = "optimal"
 ) -> pd.DataFrame:
@@ -175,7 +173,7 @@ def compare_scoring_methods(
             print(f"{'='*60}")
             print(model_summary_df.to_string(index=False))
             
-        except Exception as e:
+        except Exception as e:  # noqa: broad-except a failed model reports and gets an empty summary so the comparison continues
             print(f"Error processing model {model_name}: {e}")
             # Create empty summary for failed model
             failed_summary = pd.DataFrame([{

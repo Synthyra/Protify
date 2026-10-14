@@ -13,13 +13,14 @@ Exposes:
 """
 
 import warnings
-
 import numpy as np
-from typing import Any, Dict, List, Optional
 
+from typing import Any
 from scipy.ndimage import convolve1d, gaussian_filter1d
 from scipy.stats import pearsonr, spearmanr
 from sklearn import metrics
+
+from .metrics import UNDEFINED_METRIC
 
 
 SUPPORTED_METHODS = (
@@ -32,7 +33,7 @@ SUPPORTED_METHODS = (
 )
 
 
-def _default_bin_borders(y: np.ndarray) -> List[float]:
+def _default_bin_borders(y: np.ndarray) -> list[float]:
     """Data-driven bin borders at 1/3 and 2/3 quantiles of the training labels."""
     # y: (...)
     lo = float(np.quantile(y, 1.0 / 3.0))
@@ -43,7 +44,7 @@ def _default_bin_borders(y: np.ndarray) -> List[float]:
 
 def label_distribution_smoothing(
     y: np.ndarray,
-    bins: Optional[int] = None,
+    bins: int | None = None,
     ks: int = 5,
     sigma: float = 2.0,
     normalize: bool = True,
@@ -100,7 +101,7 @@ def label_distribution_smoothing(
 def compute_sample_weights(
     y: np.ndarray,
     method: str = 'bin_inv',
-    bin_borders: Optional[List[float]] = None,
+    bin_borders: list[float] | None = None,
     lds_bins: int = 100,
     lds_ks: int = 5,
     lds_sigma: float = 2.0,
@@ -129,7 +130,7 @@ def compute_sample_weights(
         y_binned = np.digitize(y, bin_borders)  # (n,)
         bin_classes, bin_freqs = np.unique(y_binned, return_counts=True)
         # bin_classes: (u,); bin_freqs: (u,); u = occupied bins
-        inv_freq = dict(zip(bin_classes.tolist(), (1.0 / bin_freqs).tolist()))
+        inv_freq = dict(zip(bin_classes.tolist(), (1.0 / bin_freqs).tolist(), strict=True))
         weights = np.array(  # (n,)
             [inv_freq[int(v)] for v in y_binned],
             dtype=np.float64,
@@ -161,7 +162,7 @@ def apply_weights_from_reference(
     y_new: np.ndarray,
     y_ref: np.ndarray,
     method: str,
-    bin_borders: Optional[List[float]] = None,
+    bin_borders: list[float] | None = None,
     lds_bins: int = 100,
     lds_ks: int = 5,
     lds_sigma: float = 2.0,
@@ -191,12 +192,12 @@ def apply_weights_from_reference(
         new_binned = np.digitize(y_new, bin_borders)  # (n_new,)
         bin_classes, bin_freqs = np.unique(ref_binned, return_counts=True)
         # bin_classes: (u,); bin_freqs: (u,); u = occupied reference bins
-        inv_freq = dict(zip(bin_classes.tolist(), (1.0 / bin_freqs).tolist()))
+        inv_freq = dict(zip(bin_classes.tolist(), (1.0 / bin_freqs).tolist(), strict=True))
         # Unseen bins receive the rarest, and therefore largest, reference weight.
         fallback_weight = float(np.max(list(inv_freq.values())))
         weights = np.array(  # (n_new,)
             [
-                inv_freq[int(v)] if int(v) in inv_freq else fallback_weight
+                inv_freq.get(int(v), fallback_weight)
                 for v in new_binned
             ],
             dtype=np.float64,
@@ -251,10 +252,10 @@ def compute_balanced_regression_metrics(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     weights: np.ndarray,
-    bin_borders: List[float],
+    bin_borders: list[float],
     n_resamples: int = 100,
     seed: int = 42,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Full EpHod balanced-metric suite.
 
@@ -275,8 +276,8 @@ def compute_balanced_regression_metrics(
     sampling_probabilities = weights / float(np.sum(weights))  # (n,)
     n = len(y_true)
 
-    rhos: List[float] = []
-    rs: List[float] = []
+    rhos: list[float] = []
+    rs: list[float] = []
     for _ in range(n_resamples):
         resample_indices = rng.choice(  # (n,)
             n,
@@ -287,15 +288,15 @@ def compute_balanced_regression_metrics(
         resampled_true = y_true[resample_indices]  # (n,)
         resampled_pred = y_pred[resample_indices]  # (n,)
         if np.std(resampled_true) == 0.0 or np.std(resampled_pred) == 0.0:
-            rhos.append(-100.0)
-            rs.append(-100.0)
+            # A constant resample has no correlation to average. Counting it as the sentinel
+            # once pulled the reported mean toward -100.
             continue
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             rhos.append(float(spearmanr(resampled_true, resampled_pred)[0]))
             rs.append(float(pearsonr(resampled_true, resampled_pred)[0]))
 
-    rhos_arr = np.array(rhos)  # (r,); r = n_resamples
+    rhos_arr = np.array(rhos)  # (r,); r = resamples with a defined correlation
     rs_arr = np.array(rs)  # (r,)
 
     rmse = float(metrics.mean_squared_error(y_true, y_pred, sample_weight=weights)) ** 0.5
@@ -303,44 +304,39 @@ def compute_balanced_regression_metrics(
 
     y_true_b = np.digitize(y_true, bin_borders)  # (n,)
     y_pred_b = np.digitize(y_pred, bin_borders)  # (n,)
+    mcc = float(metrics.matthews_corrcoef(y_true_b, y_pred_b, sample_weight=weights))
 
-    try:
-        mcc = float(metrics.matthews_corrcoef(y_true_b, y_pred_b, sample_weight=weights))
-    except Exception:
-        mcc = -100.0
-
-    f1_per_bin: List[float] = []
-    auc_per_bin: List[float] = []
+    f1_per_bin: list[float] = []
+    auc_per_bin: list[float] = []
     for val in sorted(set(y_true_b.tolist())):
         yt_sel = (y_true_b == val).astype(int)  # (n,)
         yp_sel = (y_pred_b == val).astype(int)  # (n,)
-        try:
-            f1_per_bin.append(float(metrics.f1_score(yt_sel, yp_sel, sample_weight=weights)))
-        except Exception:
-            f1_per_bin.append(-100.0)
+        f1_per_bin.append(float(metrics.f1_score(yt_sel, yp_sel, sample_weight=weights, zero_division=0)))
         if len(np.unique(yt_sel)) < 2:
-            auc_per_bin.append(-100.0)
+            auc_per_bin.append(UNDEFINED_METRIC)
         else:
-            try:
-                auc_per_bin.append(float(metrics.roc_auc_score(yt_sel, yp_sel, sample_weight=weights)))
-            except Exception:
-                auc_per_bin.append(-100.0)
+            auc_per_bin.append(float(metrics.roc_auc_score(yt_sel, yp_sel, sample_weight=weights)))
 
-    valid_aucs = [a for a in auc_per_bin if a != -100.0]
-    valid_f1s = [f for f in f1_per_bin if f != -100.0]
+    valid_aucs = [a for a in auc_per_bin if a != UNDEFINED_METRIC]
+
+    def mean_or_undefined(values: np.ndarray | list[float]) -> float:
+        return round(float(np.mean(values)), 5) if len(values) else UNDEFINED_METRIC
+
+    def std_or_undefined(values: np.ndarray) -> float:
+        return round(float(np.std(values)), 5) if len(values) else UNDEFINED_METRIC
 
     return {
-        'weighted_pearson_rho': round(float(np.mean(rs_arr)), 5),
-        'weighted_pearson_rho_std': round(float(np.std(rs_arr)), 5),
-        'weighted_spearman_rho': round(float(np.mean(rhos_arr)), 5),
-        'weighted_spearman_rho_std': round(float(np.std(rhos_arr)), 5),
+        'weighted_pearson_rho': mean_or_undefined(rs_arr),
+        'weighted_pearson_rho_std': std_or_undefined(rs_arr),
+        'weighted_spearman_rho': mean_or_undefined(rhos_arr),
+        'weighted_spearman_rho_std': std_or_undefined(rhos_arr),
         'weighted_rmse': round(rmse, 5),
         'weighted_r_squared': round(r2, 5),
         'binned_mcc': round(mcc, 5),
         'binned_f1_per_bin': [round(f, 5) for f in f1_per_bin],
-        'binned_f1_mean': round(float(np.mean(valid_f1s)), 5) if valid_f1s else -100.0,
+        'binned_f1_mean': mean_or_undefined(f1_per_bin),
         'binned_roc_auc_per_bin': [round(a, 5) for a in auc_per_bin],
-        'binned_roc_auc_mean': round(float(np.mean(valid_aucs)), 5) if valid_aucs else -100.0,
+        'binned_roc_auc_mean': mean_or_undefined(valid_aucs),
         'bin_borders': list(bin_borders),
         'n_bins': len(bin_borders) + 1,
         'n_resamples': int(n_resamples),

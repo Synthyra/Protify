@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Any, Sequence
+
+from collections.abc import Sequence
+from typing import Any
 from torch.nn.utils.rnn import pad_sequence
 
 
@@ -51,7 +53,7 @@ class CharTokenizer:
         chars = []
         for idx in ids:
             if (skip_pad and idx == self.pad_token_id) or (
-                skip_special and (idx == self.cls_token_id or idx == self.eos_token_id)
+                skip_special and idx in (self.cls_token_id, self.eos_token_id)
             ):
                 continue
             chars.append(self.id2char.get(int(idx), "?"))
@@ -75,7 +77,7 @@ class CharTokenizer:
         attention_mask = (input_ids != self.pad_token_id).to(torch.long)  # (b, l_max)
 
         if return_tensors == "pt":
-            return {"input_ids": input_ids, "attention_mask": attention_mask}
+            return {"input_ids": input_ids, "attention_mask": attention_mask}  # each (b, l_max)
         raise ValueError(f"Unsupported tensor type: {return_tensors}")
 
 

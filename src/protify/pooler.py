@@ -1,18 +1,19 @@
 import networkx as nx
 import numpy as np
 import torch
-from typing import Callable, Dict, List, Optional
+
+from collections.abc import Callable
 
 
 class Pooler:
-    def __init__(self, pooling_types: List[str]) -> None:
+    def __init__(self, pooling_types: list[str]) -> None:
         assert 'bom' not in pooling_types, (
             "'bom' pooling is only supported by the Transformer probe "
             "(implemented in probes/transformer_probe.py). Pass --probe_type transformer "
             "with --probe_pooling_types bom, and do not include 'bom' in --embedding_pooling_types."
         )
         self.pooling_types = pooling_types
-        self.pooling_options: Dict[str, Callable[..., torch.Tensor]] = {
+        self.pooling_options: dict[str, Callable[..., torch.Tensor]] = {
             'mean': self.mean_pooling,
             'max': self.max_pooling,
             'norm': self.norm_pooling,
@@ -45,10 +46,10 @@ class Pooler:
     def _page_rank(
         self,
         attention_matrix: np.ndarray,
-        personalization: Optional[Dict[int, float]] = None,
-        nstart: Optional[Dict[int, float]] = None,
+        personalization: dict[int, float] | None = None,
+        nstart: dict[int, float] | None = None,
         prune_type: str = "top_k_outdegree",
-    ) -> Dict[int, float]:
+    ) -> dict[int, float]:
         # attention_matrix: (l, l). The compatibility-only prune_type is intentionally unused.
         graph = self._convert_to_graph(attention_matrix)
         if graph.number_of_nodes() != attention_matrix.shape[0]:
@@ -76,8 +77,8 @@ class Pooler:
 
     def _calculate_importance_weights(
         self,
-        dict_importance: Dict[int, float],
-        attention_mask: Optional[torch.Tensor] = None,
+        dict_importance: dict[int, float],
+        attention_mask: torch.Tensor | None = None,
     ) -> np.ndarray:
         # attention_mask: (l,); l_valid = number of retained nodes
         if attention_mask is not None:
@@ -92,15 +93,15 @@ class Pooler:
         self,
         emb: torch.Tensor,
         attentions: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         # emb: (b, l, d); attentions: (b, r, l, l); attention_mask: (b, l)
         # r = attention matrices or layers; l_valid = unmasked tokens in one sample
         # The historical NumPy conversion requires CPU tensors without gradients.
         maxed_attentions = self._create_pooled_matrices_across_layers(attentions).numpy()  # (b, l, l)
-        emb_pooled: List[np.ndarray] = []
-        for e, a, mask in zip(emb, maxed_attentions, attention_mask):
+        emb_pooled: list[np.ndarray] = []
+        for e, a, mask in zip(emb, maxed_attentions, attention_mask, strict=True):
             # e: (l, d); a: (l, l); mask: (l,)
             dict_importance = self._page_rank(a)
             importance_weights = self._calculate_importance_weights(dict_importance, mask)  # (l_valid,)
@@ -117,7 +118,7 @@ class Pooler:
     def mean_pooling(
         self,
         emb: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         # emb: (b, l, d); attention_mask: (b, l)
@@ -130,7 +131,7 @@ class Pooler:
     def max_pooling(
         self,
         emb: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         # emb: (b, l, d); attention_mask: (b, l)
@@ -143,7 +144,7 @@ class Pooler:
     def norm_pooling(
         self,
         emb: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         # emb: (b, l, d); attention_mask: (b, l)
@@ -156,7 +157,7 @@ class Pooler:
     def median_pooling(
         self,
         emb: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         # emb: (b, l, d); attention_mask: (b, l)
@@ -164,7 +165,7 @@ class Pooler:
             return emb.median(dim=1).values  # (b, d)
 
         mask = attention_mask.bool()  # (b, l); l_i = valid tokens in sample i
-        results: List[torch.Tensor] = []
+        results: list[torch.Tensor] = []
         for i in range(emb.shape[0]):
             valid = emb[i, mask[i]]  # (l_i, d)
             results.append(valid.median(dim=0).values)  # (d,)
@@ -173,7 +174,7 @@ class Pooler:
     def std_pooling(
         self,
         emb: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         # emb: (b, l, d); attention_mask: (b, l)
@@ -188,7 +189,7 @@ class Pooler:
     def var_pooling(
         self,
         emb: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         # emb: (b, l, d); attention_mask: (b, l)
@@ -208,18 +209,19 @@ class Pooler:
     def cls_pooling(
         self,
         emb: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         # emb: (b, l, d)
+        # attention_mask: (b, l), unused by the CLS row
         return emb[:, 0, :]  # (b, d)
 
     def eos_pooling(
         self,
         emb: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        input_ids: Optional[torch.Tensor] = None,
-        eos_token_id: Optional[int] = None,
+        attention_mask: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+        eos_token_id: int | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         """Pool an explicit boundary token, or the final active token when none is named.
@@ -277,10 +279,10 @@ class Pooler:
     def __call__(
         self,
         emb: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        attentions: Optional[torch.Tensor] = None,
-        input_ids: Optional[torch.Tensor] = None,
-        eos_token_id: Optional[int] = None,
+        attention_mask: torch.Tensor | None = None,
+        attentions: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+        eos_token_id: int | None = None,
     ) -> torch.Tensor:
         # emb: (b, l, d); attention_mask: (b, l); attentions: (b, r, l, l); input_ids: (b, l)
         # r = attention matrices or layers; p = number of configured pooling operations
@@ -290,7 +292,7 @@ class Pooler:
                     "Pooler received samples with all-zero attention masks. "
                     "This causes NaN from division by zero. Filter empty inputs before pooling."
                 )
-        final_emb: List[torch.Tensor] = []
+        final_emb: list[torch.Tensor] = []
         for pooling_type in self.pooling_types:
             pooled_embedding = self.pooling_options[pooling_type](
                 emb=emb,

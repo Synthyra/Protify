@@ -8,15 +8,20 @@ random number generators used in the platform (torch, numpy, scikit-learn, rando
 import os
 import random
 import time
-
 import numpy as np
-from typing import Optional
+
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    import torch
+
 
 # Global variable to store the current seed
-_GLOBAL_SEED: Optional[int] = None
+_GLOBAL_SEED: int | None = None
 
 
-def get_global_seed() -> Optional[int]:
+def get_global_seed() -> int | None:
     """Return the current global seed, or None when no seed has been set."""
     return _GLOBAL_SEED
 
@@ -42,7 +47,7 @@ def seed_worker(worker_id: int) -> None:
     random.seed(worker_seed)
 
 
-def dataloader_generator(seed: Optional[int]):
+def dataloader_generator(seed: int | None) -> "torch.Generator":
     """Build the seeded generator passed to ``DataLoader(generator=...)``."""
     import torch
 
@@ -54,7 +59,7 @@ def dataloader_generator(seed: Optional[int]):
     return generator
 
 
-def set_global_seed(seed: Optional[int] = None) -> int:
+def set_global_seed(seed: int | None = None) -> int:
     """
     Set the global random seed for all random number generators.
     
@@ -100,7 +105,7 @@ def set_determinism() -> None:
     if hasattr(torch, "use_deterministic_algorithms"):
         try:
             torch.use_deterministic_algorithms(True, warn_only=False)
-        except Exception as error:
+        except Exception as error:  # noqa: broad-except an old or restricted torch build refuses deterministic algorithms; the message says so and the run goes on
             print(f"torch.use_deterministic_algorithms is not available: {error}")
             print(f"torch version: {torch.__version__}")
             print("Make sure you are using the correct version of torch")

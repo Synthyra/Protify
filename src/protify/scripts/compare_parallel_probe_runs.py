@@ -2,9 +2,14 @@ import argparse
 import csv
 import json
 import math
+
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any
+
+
+JsonObject = dict[str, Any]
 
 
 DEFAULT_METRIC_KEYS = (
@@ -51,14 +56,14 @@ class MetricsRecord:
     source_path: str
     dataset: str
     model: str
-    metrics: Dict[str, object]
+    metrics: dict[str, object]
 
     @property
-    def key(self) -> Tuple[str, str]:
+    def key(self) -> tuple[str, str]:
         return (self.dataset, self.model)
 
 
-def parse_args(argv=None):
+def parse_args(argv: Sequence[str] | None=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Compare future sequential and parallel probe result files without "
@@ -91,7 +96,7 @@ def parse_args(argv=None):
     return validate_args(parser.parse_args(argv))
 
 
-def validate_args(args):
+def validate_args(args: argparse.Namespace) -> argparse.Namespace:
     assert len(args.sequential_results) > 0, "At least one sequential result path is required."
     assert len(args.parallel_results) > 0, "At least one parallel result path is required."
     assert args.metric_abs_tolerance >= 0.0, "metric_abs_tolerance must be non-negative."
@@ -132,7 +137,7 @@ def validate_args(args):
     return args
 
 
-def parse_metric_number(value) -> Optional[float]:
+def parse_metric_number(value: object) -> float | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
@@ -157,7 +162,7 @@ def parse_metric_number(value) -> Optional[float]:
     return None
 
 
-def normalized_identity_value(value):
+def normalized_identity_value(value: object) -> int | float | str:
     number = parse_metric_number(value)
     if number is not None:
         if float(number).is_integer():
@@ -168,13 +173,13 @@ def normalized_identity_value(value):
     return str(value)
 
 
-def metric_number(metrics: Dict[str, object], key: str) -> Optional[float]:
+def metric_number(metrics: dict[str, object], key: str) -> float | None:
     if key not in metrics:
         return None
     return parse_metric_number(metrics[key])
 
 
-def first_metric_number(metrics: Dict[str, object], keys: Tuple[str, ...]) -> Optional[float]:
+def first_metric_number(metrics: dict[str, object], keys: tuple[str, ...]) -> float | None:
     for key in keys:
         value = metric_number(metrics, key)
         if value is not None:
@@ -182,7 +187,7 @@ def first_metric_number(metrics: Dict[str, object], keys: Tuple[str, ...]) -> Op
     return None
 
 
-def infer_num_runs(sequential_metrics: Dict[str, object], parallel_metrics: Dict[str, object]) -> int:
+def infer_num_runs(sequential_metrics: dict[str, object], parallel_metrics: dict[str, object]) -> int:
     parallel_run_count = first_metric_number(
         parallel_metrics,
         (
@@ -205,7 +210,7 @@ def infer_num_runs(sequential_metrics: Dict[str, object], parallel_metrics: Dict
     return 1
 
 
-def timing_summary(sequential_metrics: Dict[str, object], parallel_metrics: Dict[str, object]):
+def timing_summary(sequential_metrics: dict[str, object], parallel_metrics: dict[str, object]) -> JsonObject:
     num_runs = infer_num_runs(sequential_metrics, parallel_metrics)
     sequential_per_run = first_metric_number(
         sequential_metrics,
@@ -284,7 +289,7 @@ def timing_summary(sequential_metrics: Dict[str, object], parallel_metrics: Dict
     }
 
 
-def _runtime_record_number(record, key: str) -> Optional[float]:
+def _runtime_record_number(record: object, key: str) -> float | None:
     if not isinstance(record, dict):
         return None
     if key not in record:
@@ -292,7 +297,7 @@ def _runtime_record_number(record, key: str) -> Optional[float]:
     return parse_metric_number(record[key])
 
 
-def _runtime_record_text(record, key: str):
+def _runtime_record_text(record: object, key: str) -> str | None:
     if not isinstance(record, dict):
         return None
     if key not in record:
@@ -303,7 +308,7 @@ def _runtime_record_text(record, key: str):
     return str(value)
 
 
-def parallel_group_runtime_summary(parallel_metrics: Dict[str, object]):
+def parallel_group_runtime_summary(parallel_metrics: dict[str, object]) -> JsonObject:
     if "parallel_probe_group_runtime_records" not in parallel_metrics:
         return {
             "available": False,
@@ -367,7 +372,7 @@ def parallel_group_runtime_summary(parallel_metrics: Dict[str, object]):
             "group_number": _runtime_record_number(slowest_record, "group_number"),
             "execution_kind": _runtime_record_text(slowest_record, "execution_kind"),
             "num_runs": _runtime_record_number(slowest_record, "num_runs"),
-            "run_seeds": slowest_record["run_seeds"] if "run_seeds" in slowest_record else None,
+            "run_seeds": slowest_record.get("run_seeds"),
             "train_runtime_seconds": _runtime_record_number(slowest_record, "train_runtime_seconds"),
             "seconds_per_run": slowest_seconds_per_run,
             "estimated_peak_bytes": _runtime_record_number(slowest_record, "estimated_peak_bytes"),
@@ -389,27 +394,24 @@ def parallel_group_runtime_summary(parallel_metrics: Dict[str, object]):
     }
 
 
-def load_launch_manifest_payload(path_text: str):
+def load_launch_manifest_payload(path_text: str) -> tuple[JsonObject, JsonObject]:
     path = Path(path_text)
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     assert isinstance(payload, dict), "Launch manifest JSON must contain an object."
-    if "launch_manifest" in payload:
-        manifest = payload["launch_manifest"]
-    else:
-        manifest = payload
+    manifest = payload.get("launch_manifest", payload)
     assert isinstance(manifest, dict), "launch_manifest must be an object."
     assert "groups" in manifest, "launch_manifest must include groups."
     assert isinstance(manifest["groups"], list), "launch_manifest groups must be a list."
     return payload, manifest
 
 
-def load_launch_manifest(path_text: str):
+def load_launch_manifest(path_text: str) -> JsonObject:
     payload, manifest = load_launch_manifest_payload(path_text)
     return manifest
 
 
-def load_runner_report(path_text: str):
+def load_runner_report(path_text: str) -> JsonObject:
     path = Path(path_text)
     with path.open("r", encoding="utf-8") as handle:
         report = json.load(handle)
@@ -423,35 +425,35 @@ def load_runner_report(path_text: str):
     return report
 
 
-def _runner_plan_count(plan, key: str) -> int:
+def _runner_plan_count(plan: JsonObject, key: str) -> int:
     assert key in plan, f"Runner report plan must include {key}."
     value = plan[key]
     assert isinstance(value, int), f"Runner report plan {key} must be an integer."
     return value
 
 
-def _runner_plan_list(plan, key: str):
+def _runner_plan_list(plan: JsonObject, key: str) -> list[Any]:
     assert key in plan, f"Runner report plan must include {key}."
     value = plan[key]
     assert isinstance(value, list), f"Runner report plan {key} must be a list."
     return value
 
 
-def _runner_execution_count(execution, key: str) -> int:
+def _runner_execution_count(execution: JsonObject, key: str) -> int:
     assert key in execution, f"Runner report execution must include {key}."
     value = execution[key]
     assert isinstance(value, int), f"Runner report execution {key} must be an integer."
     return value
 
 
-def _runner_execution_waves(execution):
+def _runner_execution_waves(execution: JsonObject) -> list[Any]:
     assert "waves" in execution, "Runner report execution must include waves."
     waves = execution["waves"]
     assert isinstance(waves, list), "Runner report execution waves must be a list."
     return waves
 
 
-def runner_report_summary(paths):
+def runner_report_summary(paths: Sequence[str] | None) -> JsonObject:
     summary = {
         "provided": paths is not None,
         "report_count": 0,
@@ -650,7 +652,7 @@ def runner_report_summary(paths):
     return summary
 
 
-def runner_manifest_coverage(runner_reports, manifest_details):
+def runner_manifest_coverage(runner_reports: JsonObject, manifest_details: JsonObject) -> JsonObject:
     expected_pairs = tuple(
         (pair[0], pair[1]) for pair in manifest_details["runner_command_variant_pairs"]
     )
@@ -699,7 +701,7 @@ def runner_manifest_coverage(runner_reports, manifest_details):
     }
 
 
-def command_available(group, command_key: str) -> bool:
+def command_available(group: JsonObject, command_key: str) -> bool:
     if command_key not in group:
         return False
     command = group[command_key]
@@ -707,16 +709,15 @@ def command_available(group, command_key: str) -> bool:
     return len(command) > 0
 
 
-def _manifest_expected_invocations_from_commands(manifest):
+def _manifest_expected_invocations_from_commands(manifest: JsonObject) -> tuple[int, int, float | None]:
     sequential_invocations = 0
     parallel_invocations = 0
     for group in manifest["groups"]:
         assert isinstance(group, dict), "Each launch manifest group must be an object."
         if command_available(group, "sequential_command"):
             sequential_invocations += 1
-        if command_available(group, "parallel_command"):
-            parallel_invocations += 1
-        elif command_available(group, "sequential_command"):
+        # A group with no parallel command still runs once, as its sequential command.
+        if command_available(group, "parallel_command") or command_available(group, "sequential_command"):
             parallel_invocations += 1
     if sequential_invocations == 0 or parallel_invocations == 0:
         speedup_ceiling = None
@@ -725,7 +726,7 @@ def _manifest_expected_invocations_from_commands(manifest):
     return sequential_invocations, parallel_invocations, speedup_ceiling
 
 
-def manifest_probe_result_identity(group):
+def manifest_probe_result_identity(group: JsonObject) -> tuple[Any, ...] | None:
     identity = [group["data_name"], group["model_name"]]
     for key in PROBE_IDENTITY_KEYS:
         if key not in group:
@@ -734,7 +735,7 @@ def manifest_probe_result_identity(group):
     return tuple(identity)
 
 
-def manifest_speedup_expectation(payload, manifest):
+def manifest_speedup_expectation(payload: JsonObject, manifest: JsonObject) -> JsonObject:
     sequential_invocations = None
     parallel_invocations = None
     speedup_ceiling = None
@@ -769,7 +770,7 @@ def manifest_speedup_expectation(payload, manifest):
     }
 
 
-def launch_manifest_details(path_text: str):
+def launch_manifest_details(path_text: str) -> JsonObject:
     payload, manifest = load_launch_manifest_payload(path_text)
     group_map = {}
     manifest_result_key_set = set()
@@ -815,12 +816,12 @@ def launch_manifest_details(path_text: str):
     }
 
 
-def launch_manifest_group_map(path_text: str):
+def launch_manifest_group_map(path_text: str) -> dict[str, JsonObject]:
     details = launch_manifest_details(path_text)
     return details["group_map"]
 
 
-def telemetry_coverage_report(expected_command_ids, records):
+def telemetry_coverage_report(expected_command_ids: Sequence[str], records: Sequence[JsonObject]) -> JsonObject:
     observed_command_ids = [record["command_id"] for record in records]
     expected_set = set(expected_command_ids)
     observed_set = set(observed_command_ids)
@@ -856,7 +857,7 @@ def telemetry_coverage_report(expected_command_ids, records):
     }
 
 
-def telemetry_identity_from_path(path: Path):
+def telemetry_identity_from_path(path: Path) -> tuple[str, str]:
     name = path.name
     assert name.endswith(".json"), f"Telemetry summary path must end in .json: {path}"
     trimmed = name[:-5]
@@ -872,7 +873,7 @@ def telemetry_identity_from_path(path: Path):
     return command_id, variant
 
 
-def load_telemetry_summary(path_text: str):
+def load_telemetry_summary(path_text: str) -> JsonObject:
     path = Path(path_text)
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -880,7 +881,7 @@ def load_telemetry_summary(path_text: str):
     return payload
 
 
-def numeric_summary_value(summary: Dict[str, object], key: str) -> Optional[float]:
+def numeric_summary_value(summary: dict[str, object], key: str) -> float | None:
     if key not in summary:
         return None
     value = summary[key]
@@ -891,7 +892,7 @@ def numeric_summary_value(summary: Dict[str, object], key: str) -> Optional[floa
     return None
 
 
-def telemetry_records_for(paths, manifest_group_map, expected_variant: str):
+def telemetry_records_for(paths: Sequence[str] | None, manifest_group_map: dict[str, JsonObject], expected_variant: str) -> list[JsonObject]:
     records = []
     if paths is None:
         return records
@@ -919,7 +920,7 @@ def telemetry_records_for(paths, manifest_group_map, expected_variant: str):
     return records
 
 
-def weighted_mean_from_records(records, key: str):
+def weighted_mean_from_records(records: Sequence[JsonObject], key: str) -> float | None:
     numerator = 0.0
     denominator = 0.0
     for record in records:
@@ -939,7 +940,7 @@ def weighted_mean_from_records(records, key: str):
     return numerator / denominator
 
 
-def max_from_records(records, key: str):
+def max_from_records(records: Sequence[JsonObject], key: str) -> float | None:
     values = []
     for record in records:
         value = numeric_summary_value(record["summary"], key)
@@ -950,7 +951,7 @@ def max_from_records(records, key: str):
     return max(values)
 
 
-def sum_from_records(records, key: str):
+def sum_from_records(records: Sequence[JsonObject], key: str) -> float | None:
     total = 0.0
     found = False
     for record in records:
@@ -963,7 +964,7 @@ def sum_from_records(records, key: str):
     return total
 
 
-def aggregate_telemetry_records(records):
+def aggregate_telemetry_records(records: Sequence[JsonObject]) -> dict[tuple[Any, Any], JsonObject]:
     grouped = {}
     for record in records:
         key = (record["dataset"], record["model"])
@@ -998,29 +999,23 @@ def aggregate_telemetry_records(records):
     return aggregated
 
 
-def telemetry_ratio(parallel_value, sequential_value):
+def telemetry_ratio(parallel_value: float | None, sequential_value: float | None) -> float | None:
     if sequential_value is None or parallel_value is None or sequential_value == 0.0:
         return None
     return parallel_value / sequential_value
 
 
-def telemetry_delta(parallel_value, sequential_value):
+def telemetry_delta(parallel_value: float | None, sequential_value: float | None) -> float | None:
     if sequential_value is None or parallel_value is None:
         return None
     return parallel_value - sequential_value
 
 
-def telemetry_comparison_for_pair(key, sequential_telemetry, parallel_telemetry):
+def telemetry_comparison_for_pair(key: tuple[Any, Any], sequential_telemetry: dict[tuple[Any, Any], JsonObject], parallel_telemetry: dict[tuple[Any, Any], JsonObject]) -> JsonObject | None:
     if key not in sequential_telemetry and key not in parallel_telemetry:
         return None
-    if key in sequential_telemetry:
-        sequential_summary = sequential_telemetry[key]
-    else:
-        sequential_summary = None
-    if key in parallel_telemetry:
-        parallel_summary = parallel_telemetry[key]
-    else:
-        parallel_summary = None
+    sequential_summary = sequential_telemetry.get(key)
+    parallel_summary = parallel_telemetry.get(key)
     metric_keys = (
         "gpu_utilization_percent_mean",
         "gpu_utilization_percent_max",
@@ -1060,7 +1055,7 @@ def telemetry_comparison_for_pair(key, sequential_telemetry, parallel_telemetry)
     }
 
 
-def metric_key_set(args, sequential_metrics: Dict[str, object], parallel_metrics: Dict[str, object]):
+def metric_key_set(args: argparse.Namespace, sequential_metrics: dict[str, object], parallel_metrics: dict[str, object]) -> tuple[str, ...]:
     if args.metric_keys is not None:
         return tuple(args.metric_keys)
     keys = []
@@ -1070,7 +1065,7 @@ def metric_key_set(args, sequential_metrics: Dict[str, object], parallel_metrics
     return tuple(keys)
 
 
-def compare_metrics(args, sequential_metrics: Dict[str, object], parallel_metrics: Dict[str, object]):
+def compare_metrics(args: argparse.Namespace, sequential_metrics: dict[str, object], parallel_metrics: dict[str, object]) -> list[JsonObject]:
     comparisons = []
     for key in metric_key_set(args, sequential_metrics, parallel_metrics):
         sequential_value = metric_number(sequential_metrics, key)
@@ -1107,7 +1102,7 @@ def compare_metrics(args, sequential_metrics: Dict[str, object], parallel_metric
     return comparisons
 
 
-def ensemble_metric_key_pairs(sequential_metrics: Dict[str, object], parallel_metrics: Dict[str, object]):
+def ensemble_metric_key_pairs(sequential_metrics: dict[str, object], parallel_metrics: dict[str, object]) -> tuple[tuple[str, str, str], ...]:
     pairs = []
     for suffix in DEFAULT_ENSEMBLE_METRIC_SUFFIXES:
         sequential_key = f"sequential_probe_ensemble_{suffix}"
@@ -1117,7 +1112,7 @@ def ensemble_metric_key_pairs(sequential_metrics: Dict[str, object], parallel_me
     return tuple(pairs)
 
 
-def compare_ensemble_metrics(args, sequential_metrics: Dict[str, object], parallel_metrics: Dict[str, object]):
+def compare_ensemble_metrics(args: argparse.Namespace, sequential_metrics: dict[str, object], parallel_metrics: dict[str, object]) -> list[JsonObject]:
     comparisons = []
     for suffix, sequential_key, parallel_key in ensemble_metric_key_pairs(sequential_metrics, parallel_metrics):
         sequential_value = metric_number(sequential_metrics, sequential_key)
@@ -1158,8 +1153,8 @@ def compare_ensemble_metrics(args, sequential_metrics: Dict[str, object], parall
     return comparisons
 
 
-def parse_tsv_records(path: Path) -> List[MetricsRecord]:
-    records: List[MetricsRecord] = []
+def parse_tsv_records(path: Path) -> list[MetricsRecord]:
+    records: list[MetricsRecord] = []
     with path.open("r", newline="", encoding="utf-8") as handle:
         reader = csv.reader(handle, delimiter="\t")
         rows = list(reader)
@@ -1192,7 +1187,7 @@ def parse_tsv_records(path: Path) -> List[MetricsRecord]:
     return records
 
 
-def _record_from_dict(path: Path, item: Dict[str, object], index: int) -> MetricsRecord:
+def _record_from_dict(path: Path, item: dict[str, object], index: int) -> MetricsRecord:
     dataset = f"record-{index}"
     model = "model"
     if "dataset" in item and isinstance(item["dataset"], str):
@@ -1219,7 +1214,7 @@ def _record_from_dict(path: Path, item: Dict[str, object], index: int) -> Metric
     )
 
 
-def parse_json_records(path: Path) -> List[MetricsRecord]:
+def parse_json_records(path: Path) -> list[MetricsRecord]:
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if isinstance(payload, list):
@@ -1240,8 +1235,8 @@ def parse_json_records(path: Path) -> List[MetricsRecord]:
     return [_record_from_dict(path, payload, 0)]
 
 
-def load_result_records(paths: List[str]) -> List[MetricsRecord]:
-    records: List[MetricsRecord] = []
+def load_result_records(paths: list[str]) -> list[MetricsRecord]:
+    records: list[MetricsRecord] = []
     for path_text in paths:
         path = Path(path_text)
         suffix = path.suffix.lower()
@@ -1254,14 +1249,14 @@ def load_result_records(paths: List[str]) -> List[MetricsRecord]:
     return records
 
 
-def record_map(records: List[MetricsRecord]) -> Dict[Tuple[object, ...], MetricsRecord]:
-    mapped: Dict[Tuple[str, ...], MetricsRecord] = {}
+def record_map(records: list[MetricsRecord]) -> dict[tuple[object, ...], MetricsRecord]:
+    mapped: dict[tuple[str, ...], MetricsRecord] = {}
     for record in records:
         mapped[result_record_identity(record)] = record
     return mapped
 
 
-def record_probe_result_identity(record: MetricsRecord):
+def record_probe_result_identity(record: MetricsRecord) -> tuple[Any, ...] | None:
     identity = [record.dataset, record.model]
     for key in PROBE_IDENTITY_KEYS:
         if key not in record.metrics:
@@ -1270,7 +1265,7 @@ def record_probe_result_identity(record: MetricsRecord):
     return tuple(identity)
 
 
-def result_record_identity(record: MetricsRecord):
+def result_record_identity(record: MetricsRecord) -> tuple[Any, ...]:
     probe_identity = record_probe_result_identity(record)
     if probe_identity is not None:
         return probe_identity
@@ -1278,12 +1273,12 @@ def result_record_identity(record: MetricsRecord):
 
 
 def compare_record_pair(
-        args,
+        args: argparse.Namespace,
         sequential_record: MetricsRecord,
         parallel_record: MetricsRecord,
-        sequential_telemetry,
-        parallel_telemetry,
-    ):
+        sequential_telemetry: dict[tuple[Any, Any], JsonObject],
+        parallel_telemetry: dict[tuple[Any, Any], JsonObject],
+    ) -> JsonObject:
     timing = timing_summary(sequential_record.metrics, parallel_record.metrics)
     group_runtime = parallel_group_runtime_summary(parallel_record.metrics)
     metrics = compare_metrics(args, sequential_record.metrics, parallel_record.metrics)
@@ -1348,11 +1343,11 @@ def compare_record_pair(
 def validation_requirement(
         name: str,
         status: str,
-        observed_value=None,
-        threshold_value=None,
-        comparator: Optional[str] = None,
-        detail: Optional[str] = None,
-    ):
+        observed_value: Any=None,
+        threshold_value: Any=None,
+        comparator: str | None = None,
+        detail: str | None = None,
+    ) -> JsonObject:
     assert status in ("pass", "fail", "missing", "not_required"), (
         f"Unsupported validation requirement status: {status}"
     )
@@ -1366,7 +1361,7 @@ def validation_requirement(
     }
 
 
-def mean_pair_timing(pair_reports, timing_key: str):
+def mean_pair_timing(pair_reports: Sequence[JsonObject], timing_key: str) -> float | None:
     values = []
     for pair_report in pair_reports:
         value = pair_report["timing"][timing_key]
@@ -1377,7 +1372,7 @@ def mean_pair_timing(pair_reports, timing_key: str):
     return sum(values) / float(len(values))
 
 
-def mean_pair_telemetry(pair_reports, variant: str, telemetry_key: str):
+def mean_pair_telemetry(pair_reports: Sequence[JsonObject], variant: str, telemetry_key: str) -> float | None:
     values = []
     for pair_report in pair_reports:
         telemetry_comparison = pair_report["telemetry_comparison"]
@@ -1396,7 +1391,7 @@ def mean_pair_telemetry(pair_reports, variant: str, telemetry_key: str):
     return sum(values) / float(len(values))
 
 
-def aggregate_parallel_group_runtime(pair_reports):
+def aggregate_parallel_group_runtime(pair_reports: Sequence[JsonObject]) -> JsonObject:
     available_pairs = []
     total_runtime = 0.0
     runtime_available = False
@@ -1450,7 +1445,7 @@ def aggregate_parallel_group_runtime(pair_reports):
     }
 
 
-def telemetry_coverage_requirement(telemetry_coverage):
+def telemetry_coverage_requirement(telemetry_coverage: JsonObject) -> JsonObject:
     sequential_complete = telemetry_coverage["sequential"]["complete"]
     parallel_complete = telemetry_coverage["parallel"]["complete"]
     if sequential_complete is None or parallel_complete is None:
@@ -1480,7 +1475,7 @@ def telemetry_coverage_requirement(telemetry_coverage):
     )
 
 
-def manifest_result_coverage_requirement(summary):
+def manifest_result_coverage_requirement(summary: JsonObject) -> JsonObject:
     if not summary["manifest_result_expectation_available"]:
         return validation_requirement(
             "manifest_result_coverage",
@@ -1507,7 +1502,7 @@ def manifest_result_coverage_requirement(summary):
     )
 
 
-def manifest_probe_result_coverage_requirement(summary):
+def manifest_probe_result_coverage_requirement(summary: JsonObject) -> JsonObject:
     if not summary["manifest_probe_result_expectation_available"]:
         return validation_requirement(
             "manifest_probe_result_coverage",
@@ -1553,7 +1548,7 @@ def manifest_probe_result_coverage_requirement(summary):
     )
 
 
-def runner_reports_requirement(summary):
+def runner_reports_requirement(summary: JsonObject) -> JsonObject:
     runner_reports = summary["runner_reports"]
     if not runner_reports["provided"]:
         return validation_requirement(
@@ -1613,7 +1608,7 @@ def runner_reports_requirement(summary):
     )
 
 
-def build_validation_verdict(args, summary, pair_reports):
+def build_validation_verdict(args: argparse.Namespace, summary: JsonObject, pair_reports: Sequence[JsonObject]) -> JsonObject:
     requirements = []
     missing_result_pair_count = (
         len(summary["missing_parallel_keys"])
@@ -1935,7 +1930,7 @@ def build_validation_verdict(args, summary, pair_reports):
     }
 
 
-def build_comparison_report(args):
+def build_comparison_report(args: argparse.Namespace) -> JsonObject:
     sequential_records = load_result_records(args.sequential_results)
     parallel_records = load_result_records(args.parallel_results)
     runner_reports = runner_report_summary(args.runner_reports)
@@ -1995,7 +1990,7 @@ def build_comparison_report(args):
     parallel_by_key = record_map(parallel_records)
     matched_keys = tuple(
         sorted(
-            key for key in sequential_by_key.keys()
+            key for key in sequential_by_key
             if key in parallel_by_key
         )
     )
@@ -2135,7 +2130,7 @@ def build_comparison_report(args):
     }
 
 
-def write_report(report, output_path: str, json_indent: int) -> None:
+def write_report(report: JsonObject, output_path: str, json_indent: int) -> None:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:

@@ -1,44 +1,51 @@
-try:
-    from . import entrypoint_setup
-except ImportError:
-    import entrypoint_setup
+from . import entrypoint_setup
+
+
+# Hugging Face reads its settings when it loads, so they are set before anything below imports it.
+entrypoint_setup.configure_process()
 
 import os
 import tkinter as tk
-import argparse
 import base64
 import json
 import queue
-import subprocess
-import sys
+import torch
 import traceback
 import webbrowser
+from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from tkinter import ttk, messagebox, filedialog
 from concurrent.futures import ThreadPoolExecutor
 
-from base_models.get_base_models import (
+from .base_models.get_base_models import (
     BaseModelArguments,
     resolve_data_max_length,
     standard_models,
 )
-from base_models.supported_models import gui_models
-from data.supported_datasets import supported_datasets, standard_data_benchmark, internal_datasets
-from embedder import EmbeddingArguments
-from probes.estimator_probe import is_estimator_probe
-from probes.get_probe import ProbeArguments
-from probes.trainers import TrainerArguments
-from main import MainProcess
-from data.data_mixin import DataArguments
-from cloud_backend import get_or_create_cloud_backend
-from utils import print_message, print_done, print_title, expand_dms_ids_all
-from visualization.plot_result import create_plots
-from benchmarks.proteingym.compare_scoring_methods import compare_scoring_methods
-from hyperopt_utils import HyperoptModule
+from .base_models.supported_models import gui_models
+from .data.supported_datasets import supported_datasets, standard_data_benchmark, internal_datasets
+from .embedder import EmbeddingArguments
+from .probes.estimator_probe import is_estimator_probe
+from .probes.get_probe import ProbeArguments
+from .probes.trainers import TrainerArguments
+from .main import DEFAULT_SWEEP_METRIC_CLS, DEFAULT_SWEEP_METRIC_REG, MainProcess, build_parser
+from .data.data_mixin import DataArguments
+from .cloud_backend import CloudBackend, get_or_create_cloud_backend
+from .console_output import print_message, print_done, print_title
+from .benchmarks.proteingym.dms_ids import expand_dms_ids_all
+from .visualization.plot_result import create_plots
+from .benchmarks.proteingym.compare_scoring_methods import compare_scoring_methods
+from .hyperopt_utils import HyperoptModule
+
+
+# The logos ship inside the package, so the GUI finds them from any working directory.
+PACKAGE_DIRECTORY = Path(__file__).resolve().parent
 
 
 class BackgroundTask:
-    def __init__(self, target, *args, **kwargs):
+    def __init__(self, target: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
         self.target = target
         self.args = args
         self.kwargs = kwargs
@@ -46,10 +53,10 @@ class BackgroundTask:
         self.error = None
         self._complete = False
         
-    def run(self):
+    def run(self) -> None:
         try:
             self.result = self.target(*self.args, **self.kwargs)
-        except Exception as e:
+        except Exception as e:  # noqa: broad-except  a worker thread keeps any failure for the GUI to show
             self.error = e
             print_message(f"Error in background task: {str(e)}")
             traceback.print_exc()
@@ -57,18 +64,20 @@ class BackgroundTask:
             self._complete = True
     
     @property
-    def complete(self):
+    def complete(self) -> bool:
         return self._complete
 
 
 class GUI(MainProcess):
-    def __init__(self, master):
-        super().__init__(argparse.Namespace(), GUI=True)  # Initialize MainProcess with empty namespace
+    def __init__(self, master: tk.Tk) -> None:
+        # Every setting starts at its command-line default, so a run the GUI starts reads every
+        # argument the pipeline does, including those the GUI has no widget for.
+        super().__init__(build_parser().parse_args([]), GUI=True)
         self.master = master
         self.master.title("Settings GUI")
         self.master.geometry("600x800")
 
-        icon = tk.PhotoImage(file="protify_logo.png")
+        icon = tk.PhotoImage(file=str(PACKAGE_DIRECTORY / "protify_logo.png"))
         # Set the window icon
         self.master.iconphoto(True, icon)
 
@@ -130,7 +139,7 @@ class GUI(MainProcess):
         self.build_replay_tab()
         self.build_viz_tab()
 
-    def check_task_queue(self):
+    def check_task_queue(self) -> None:
         """Periodically check for completed background tasks"""
         if self.current_task and self.current_task.complete:
             if self.current_task.error:
@@ -144,17 +153,17 @@ class GUI(MainProcess):
         # Schedule next check
         self.master.after(100, self.check_task_queue)
     
-    def run_in_background(self, target, *args, **kwargs):
+    def run_in_background(self, target: Callable[..., Any], *args: Any, **kwargs: Any) -> BackgroundTask:
         """Queue a task to run in background"""
         task = BackgroundTask(target, *args, **kwargs)
         self.task_queue.put(task)
         return task
 
-    def _open_url(self, url):
+    def _open_url(self, url: str) -> None:
         """Open a URL in the default web browser"""
         webbrowser.open_new_tab(url)
         
-    def build_info_tab(self):
+    def build_info_tab(self) -> None:
         # Create a frame for IDs
         id_frame = ttk.LabelFrame(self.info_tab, text="Identification")
         id_frame.pack(fill="x", padx=10, pady=5)
@@ -258,7 +267,7 @@ class GUI(MainProcess):
         
         # Add logo and website link at the bottom of the info tab
         try:
-            original_logo = tk.PhotoImage(file="synthyra_logo.png")
+            original_logo = tk.PhotoImage(file=str(PACKAGE_DIRECTORY / "synthyra_logo.png"))
             # Make logo even smaller (subsample by factor of 3)
             logo = original_logo.subsample(3, 3)
             
@@ -287,10 +296,10 @@ class GUI(MainProcess):
             
             visit_btn.pack(side=tk.LEFT, padx=(10, 20), pady=10)
             
-        except Exception as e:
+        except tk.TclError as e:
             print_message(f"Error setting up logo and link: {str(e)}")
 
-    def build_model_tab(self):
+    def build_model_tab(self) -> None:
         ttk.Label(self.model_tab, text="Model Names:").grid(row=0, column=0, padx=10, pady=5, sticky="nw")
 
         self.model_listbox = tk.Listbox(self.model_tab, selectmode="extended", height=24)
@@ -319,7 +328,7 @@ class GUI(MainProcess):
         run_button = ttk.Button(self.model_tab, text="Select Models", command=self._select_models)
         run_button.grid(row=99, column=0, columnspan=2, pady=(10, 10))
 
-    def build_data_tab(self):
+    def build_data_tab(self) -> None:
         ttk.Label(self.data_tab, text="Max Sequence Length:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["max_length"] = tk.IntVar(value=2048)
         spin_max_length = ttk.Spinbox(self.data_tab, from_=1, to=32768, textvariable=self.settings_vars["max_length"])
@@ -398,7 +407,7 @@ class GUI(MainProcess):
         run_button = ttk.Button(self.data_tab, text="Get Data", command=self._get_data)
         run_button.grid(row=99, column=0, columnspan=2, pady=(10, 10))
 
-    def build_embed_tab(self):
+    def build_embed_tab(self) -> None:
         # batch_size
         ttk.Label(self.embed_tab, text="Batch Size:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["batch_size"] = tk.IntVar(value=4)
@@ -458,12 +467,12 @@ class GUI(MainProcess):
         self.settings_vars["sql"] = tk.BooleanVar(value=False)
         check_sql = ttk.Checkbutton(self.embed_tab, variable=self.settings_vars["sql"])
         check_sql.grid(row=9, column=1, padx=10, pady=5, sticky="w")
-        self.add_help_button(self.embed_tab, 9, 2, "Whether to use SQL database for storing embeddings instead of files.")
+        self.add_help_button(self.embed_tab, 9, 2, "Stream embeddings from the feature store at train time instead of holding them in RAM. The store is the same either way.")
 
         run_button = ttk.Button(self.embed_tab, text="Embed sequences to disk", command=self._get_embeddings)
         run_button.grid(row=99, column=0, columnspan=2, pady=(10, 10))
 
-    def build_probe_tab(self):
+    def build_probe_tab(self) -> None:
         # Probe Type
         ttk.Label(self.probe_tab, text="Probe Type:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["probe_type"] = tk.StringVar(value="mlp")
@@ -543,10 +552,10 @@ class GUI(MainProcess):
 
         # Pooling Types
         ttk.Label(self.probe_tab, text="Pooling Types (comma-separated):").grid(row=12, column=0, padx=10, pady=5, sticky="w")
-        self.settings_vars["probe_pooling_types"] = tk.StringVar(value="mean, var")
+        self.settings_vars["probe_pooling_types"] = tk.StringVar(value="")
         entry_pooling = ttk.Entry(self.probe_tab, textvariable=self.settings_vars["probe_pooling_types"], width=20)
         entry_pooling.grid(row=12, column=1, padx=10, pady=5)
-        self.add_help_button(self.probe_tab, 12, 2, "Types of pooling to use in the probe model, separate with commas.")
+        self.add_help_button(self.probe_tab, 12, 2, "Pooling types for the transformer and Lyra probes, separated by commas. Leave empty for each probe's default: mean, cls for the transformer probe and mean for Lyra, which takes one type.")
         
         # Transformer Dropout
         ttk.Label(self.probe_tab, text="Transformer Dropout:").grid(row=13, column=0, padx=10, pady=5, sticky="w")
@@ -651,7 +660,7 @@ class GUI(MainProcess):
         run_button = ttk.Button(self.probe_tab, text="Save Probe Arguments", command=self._create_probe_args)
         run_button.grid(row=99, column=0, columnspan=2, pady=(10, 10))
 
-    def build_trainer_tab(self):
+    def build_trainer_tab(self) -> None:
         # Hybrid Probe checkbox
         ttk.Label(self.trainer_tab, text="Hybrid Probe:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["hybrid_probe"] = tk.BooleanVar(value=False)
@@ -769,7 +778,7 @@ class GUI(MainProcess):
         self.settings_vars["read_scaler"] = tk.IntVar(value=100)
         spin_read_scaler = ttk.Spinbox(self.trainer_tab, from_=1, to=1000, textvariable=self.settings_vars["read_scaler"])
         spin_read_scaler.grid(row=15, column=1, padx=10, pady=5, sticky="w")
-        self.add_help_button(self.trainer_tab, 15, 2, "Read scaler for SQL storage (multiplier for batch size when reading from SQL database).")
+        self.add_help_button(self.trainer_tab, 15, 2, "Read scaler for streamed (SQL) storage (multiplier for batch size when reading rows from the feature store).")
 
         # Deterministic
         ttk.Label(self.trainer_tab, text="Deterministic:").grid(row=16, column=0, padx=10, pady=5, sticky="w")
@@ -788,7 +797,7 @@ class GUI(MainProcess):
         run_button = ttk.Button(self.trainer_tab, text="Run trainer", command=self._run_trainer)
         run_button.grid(row=99, column=0, columnspan=2, pady=(10, 10))
 
-    def build_wandb_tab(self):
+    def build_wandb_tab(self) -> None:
         ttk.Label(self.wandb_tab, text="Use W&B Hyperopt:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["use_wandb_hyperopt"] = tk.BooleanVar(value=False)
         check_use_wandb_hyperopt = ttk.Checkbutton(self.wandb_tab, variable=self.settings_vars["use_wandb_hyperopt"])
@@ -828,12 +837,12 @@ class GUI(MainProcess):
         combo_sweep_method.grid(row=5, column=1, padx=10, pady=5, sticky="w")
 
         ttk.Label(self.wandb_tab, text="Sweep Metric (Classification):").grid(row=6, column=0, padx=10, pady=5, sticky="w")
-        self.settings_vars["sweep_metric_cls"] = tk.StringVar(value="eval_loss")
+        self.settings_vars["sweep_metric_cls"] = tk.StringVar(value=DEFAULT_SWEEP_METRIC_CLS)
         entry_sweep_metric_cls = ttk.Entry(self.wandb_tab, textvariable=self.settings_vars["sweep_metric_cls"], width=30)
         entry_sweep_metric_cls.grid(row=6, column=1, padx=10, pady=5, sticky="w")
 
         ttk.Label(self.wandb_tab, text="Sweep Metric (Regression):").grid(row=7, column=0, padx=10, pady=5, sticky="w")
-        self.settings_vars["sweep_metric_reg"] = tk.StringVar(value="eval_loss")
+        self.settings_vars["sweep_metric_reg"] = tk.StringVar(value=DEFAULT_SWEEP_METRIC_REG)
         entry_sweep_metric_reg = ttk.Entry(self.wandb_tab, textvariable=self.settings_vars["sweep_metric_reg"], width=30)
         entry_sweep_metric_reg.grid(row=7, column=1, padx=10, pady=5, sticky="w")
 
@@ -850,7 +859,7 @@ class GUI(MainProcess):
         run_button = ttk.Button(self.wandb_tab, text="Save W&B Settings", command=self._save_wandb_settings)
         run_button.grid(row=99, column=0, columnspan=2, pady=(10, 10))
 
-    def build_cloud_tab(self):
+    def build_cloud_tab(self) -> None:
         ttk.Label(self.cloud_tab, text="Cloud URL:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["cloud_url"] = tk.StringVar(value="https://api.synthyra.com")
         entry_cloud_url = ttk.Entry(self.cloud_tab, textvariable=self.settings_vars["cloud_url"], width=40)
@@ -909,7 +918,7 @@ class GUI(MainProcess):
         fetch_button = ttk.Button(self.cloud_tab, text="Fetch Results", command=self._cloud_fetch_artifacts)
         fetch_button.grid(row=9, column=1, padx=10, pady=5, sticky="w")
 
-    def build_proteingym_tab(self):
+    def build_proteingym_tab(self) -> None:
         # ProteinGym Checkbox
         ttk.Label(self.proteingym_tab, text="Run ProteinGym:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
         self.settings_vars["proteingym"] = tk.BooleanVar(value=False)
@@ -980,7 +989,7 @@ class GUI(MainProcess):
         run_button = ttk.Button(self.proteingym_tab, text="Run ProteinGym", command=self._run_proteingym)
         run_button.grid(row=99, column=0, columnspan=2, pady=(10, 10))
 
-    def build_scikit_tab(self):
+    def build_scikit_tab(self) -> None:
         # Create a frame for scikit settings
         scikit_frame = ttk.LabelFrame(self.scikit_tab, text="Scikit-Learn Settings")
         scikit_frame.pack(fill="x", padx=10, pady=5)
@@ -1030,7 +1039,7 @@ class GUI(MainProcess):
         run_button = ttk.Button(self.scikit_tab, text="Run Scikit Models", command=self._run_scikit)
         run_button.pack(pady=(20, 10))
 
-    def build_replay_tab(self):
+    def build_replay_tab(self) -> None:
         # Create a frame for replay settings
         replay_frame = ttk.LabelFrame(self.replay_tab, text="Log Replay Settings")
         replay_frame.pack(fill="x", padx=10, pady=5)
@@ -1050,7 +1059,7 @@ class GUI(MainProcess):
         replay_button = ttk.Button(replay_frame, text="Start Replay", command=self._start_replay)
         replay_button.grid(row=1, column=0, columnspan=3, pady=20)
 
-    def build_viz_tab(self):
+    def build_viz_tab(self) -> None:
         # Create a frame for visualization settings
         viz_frame = ttk.LabelFrame(self.viz_tab, text="Visualization Settings")
         viz_frame.pack(fill="x", padx=10, pady=5)
@@ -1091,24 +1100,24 @@ class GUI(MainProcess):
         generate_button = ttk.Button(viz_frame, text="Generate Plots", command=self._generate_plots)
         generate_button.grid(row=99, column=0, columnspan=3, pady=20)
 
-    def add_help_button(self, parent, row, column, help_text):
+    def add_help_button(self, parent: tk.Misc, row: int, column: int, help_text: str) -> ttk.Button:
         """Add a small help button that displays information when clicked"""
         help_button = ttk.Button(parent, text="?", width=2, 
                                 command=lambda: messagebox.showinfo("Help", help_text))
         help_button.grid(row=row, column=column, padx=(0,5), pady=5)
         return help_button
 
-    def _selected_model_dtype(self):
+    def _selected_model_dtype(self) -> torch.dtype:
         dtype_name = self.settings_vars["model_dtype"].get()
         assert dtype_name in self.dtype_map, f"Unsupported model dtype: {dtype_name}"
         return self.dtype_map[dtype_name]
 
-    def _selected_embed_dtype(self):
+    def _selected_embed_dtype(self) -> torch.dtype:
         dtype_name = self.settings_vars["embed_dtype"].get()
         assert dtype_name in self.dtype_map, f"Unsupported embedding dtype: {dtype_name}"
         return self.dtype_map[dtype_name]
 
-    def _browse_data_dir(self):
+    def _browse_data_dir(self) -> None:
         data_dir = filedialog.askdirectory(title="Select Data Directory")
         if not data_dir:
             return
@@ -1121,7 +1130,7 @@ class GUI(MainProcess):
             existing_parts.append(data_dir)
         self.settings_vars["data_dirs"].set(", ".join(existing_parts))
 
-    def _browse_sweep_config(self):
+    def _browse_sweep_config(self) -> None:
         filename = filedialog.askopenfilename(
             title="Select W&B Sweep Config",
             filetypes=(("YAML files", "*.yaml *.yml"), ("All files", "*.*")),
@@ -1129,7 +1138,7 @@ class GUI(MainProcess):
         if filename:
             self.settings_vars["sweep_config_path"].set(filename)
 
-    def _save_wandb_settings(self):
+    def _save_wandb_settings(self) -> None:
         print_message("Saving W&B sweep settings...")
         self.full_args.use_wandb_hyperopt = self.settings_vars["use_wandb_hyperopt"].get()
         self.full_args.wandb_project = self.settings_vars["wandb_project"].get().strip() or "Protify"
@@ -1138,8 +1147,8 @@ class GUI(MainProcess):
         self.full_args.sweep_config_path = self.settings_vars["sweep_config_path"].get().strip() or "yamls/sweep.yaml"
         self.full_args.sweep_count = self.settings_vars["sweep_count"].get()
         self.full_args.sweep_method = self.settings_vars["sweep_method"].get()
-        self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or "eval_loss"
-        self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or "eval_loss"
+        self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or DEFAULT_SWEEP_METRIC_CLS
+        self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or DEFAULT_SWEEP_METRIC_REG
         self.full_args.sweep_goal = self.settings_vars["sweep_goal"].get()
 
         args_dict = {k: v for k, v in self.full_args.__dict__.items() if k != 'all_seqs' and 'token' not in k.lower() and 'api' not in k.lower()}
@@ -1149,10 +1158,10 @@ class GUI(MainProcess):
         print_message("W&B sweep settings saved")
         print_done()
 
-    def _resolve_repo_root(self):
+    def _resolve_repo_root(self) -> str:
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-    def _get_cloud_backend(self):
+    def _get_cloud_backend(self) -> CloudBackend:
         """Get or create a CloudBackend from the GUI settings."""
         api_key = self.settings_vars["cloud_api_key"].get().strip()
         base_url = self.settings_vars["cloud_url"].get().strip() or None
@@ -1160,7 +1169,7 @@ class GUI(MainProcess):
         assert backend is not None, "No cloud API key provided. Enter your API key in the Info tab."
         return backend
 
-    def _collect_cloud_run_config(self):
+    def _collect_cloud_run_config(self) -> dict[str, Any]:
         selected_model_indices = self.model_listbox.curselection()
         selected_models = [self.model_listbox.get(i) for i in selected_model_indices]
         if len(selected_models) == 0:
@@ -1183,7 +1192,8 @@ class GUI(MainProcess):
             multi_column = None
 
         embedding_pooling = [item.strip() for item in self.settings_vars["embedding_pooling_types"].get().split(",") if item.strip()]
-        probe_pooling = [item.strip() for item in self.settings_vars["probe_pooling_types"].get().split(",") if item.strip()]
+        # An empty field leaves each probe its own default pooling.
+        probe_pooling = [item.strip() for item in self.settings_vars["probe_pooling_types"].get().split(",") if item.strip()] or None
 
         dms_ids_raw = self.settings_vars["dms_ids"].get().strip()
         if dms_ids_raw.lower() == "all":
@@ -1305,8 +1315,8 @@ class GUI(MainProcess):
             "sweep_config_path": self.settings_vars["sweep_config_path"].get().strip() or "yamls/sweep.yaml",
             "sweep_count": self.settings_vars["sweep_count"].get(),
             "sweep_method": self.settings_vars["sweep_method"].get(),
-            "sweep_metric_cls": self.settings_vars["sweep_metric_cls"].get().strip() or "eval_loss",
-            "sweep_metric_reg": self.settings_vars["sweep_metric_reg"].get().strip() or "eval_loss",
+            "sweep_metric_cls": self.settings_vars["sweep_metric_cls"].get().strip() or DEFAULT_SWEEP_METRIC_CLS,
+            "sweep_metric_reg": self.settings_vars["sweep_metric_reg"].get().strip() or DEFAULT_SWEEP_METRIC_REG,
             "sweep_goal": self.settings_vars["sweep_goal"].get(),
             "use_scikit": self.settings_vars["use_scikit"].get(),
             "scikit_n_iter": self.settings_vars["scikit_n_iter"].get(),
@@ -1317,25 +1327,25 @@ class GUI(MainProcess):
         }
         return config
 
-    def _cloud_submit_run(self):
+    def _cloud_submit_run(self) -> None:
         print_message("Submitting remote cloud run...")
 
-        def background_submit():
+        def background_submit() -> None:
             backend = self._get_cloud_backend()
             config = self._collect_cloud_run_config()
 
             gpu_type = self.settings_vars["cloud_gpu_type"].get()
             timeout_seconds = self.settings_vars["cloud_timeout_seconds"].get()
 
-            result = backend.submit_job(
+            submission = backend.submit_job(
                 config=config,
                 gpu_type=gpu_type,
                 timeout_seconds=timeout_seconds,
             )
-            assert isinstance(result, dict), "Cloud submit returned a non-dict response."
-            assert "job_id" in result, "Cloud submit response missing job_id."
+            assert isinstance(submission, dict), "Cloud submit returned a non-dict response."
+            assert "job_id" in submission, "Cloud submit response missing job_id."
 
-            job_id = result["job_id"]
+            job_id = submission["job_id"]
             self.settings_vars["cloud_job_id"].set(job_id)
 
             print_message(f"Cloud job submitted.\nJob ID: {job_id}")
@@ -1346,7 +1356,7 @@ class GUI(MainProcess):
 
         self.run_in_background(background_submit)
 
-    def _cloud_start_auto_poll(self):
+    def _cloud_start_auto_poll(self) -> None:
         if self.cloud_polling_active:
             print_message("Auto polling is already active.")
             return
@@ -1354,11 +1364,11 @@ class GUI(MainProcess):
         print_message("Started cloud auto polling.")
         self._cloud_auto_poll_loop()
 
-    def _cloud_stop_auto_poll(self):
+    def _cloud_stop_auto_poll(self) -> None:
         self.cloud_polling_active = False
         print_message("Stopped cloud auto polling.")
 
-    def _cloud_auto_poll_loop(self):
+    def _cloud_auto_poll_loop(self) -> None:
         if not self.cloud_polling_active:
             return
         if not self.settings_vars["cloud_auto_poll"].get():
@@ -1374,14 +1384,14 @@ class GUI(MainProcess):
         poll_interval = self.settings_vars["cloud_poll_interval"].get()
         self.master.after(max(1, poll_interval) * 1000, self._cloud_auto_poll_loop)
 
-    def _cloud_poll_status(self):
+    def _cloud_poll_status(self) -> None:
         job_id = self.settings_vars["cloud_job_id"].get().strip()
         if not job_id:
             print_message("No cloud job ID set. Submit a remote run first.")
             return
         print_message(f"Polling cloud status for job {job_id}...")
 
-        def background_poll():
+        def background_poll() -> None:
             backend = self._get_cloud_backend()
             status_payload = backend.get_job_status(job_id=job_id)
 
@@ -1403,7 +1413,7 @@ class GUI(MainProcess):
                 if content:
                     tail = content[-3000:] if len(content) > 3000 else content
                     print_message(f"Latest Logs:\n{tail}")
-            except Exception:
+            except Exception:  # noqa: broad-except, silent-except  logs are optional and a custom backend may raise anything
                 pass
 
             terminal_states = {"Complete", "Failed", "Cancelled", "SUCCESS", "FAILED", "TERMINATED", "TIMEOUT"}
@@ -1413,7 +1423,7 @@ class GUI(MainProcess):
 
         self.run_in_background(background_poll)
 
-    def _cloud_cancel_run(self):
+    def _cloud_cancel_run(self) -> None:
         job_id = self.settings_vars["cloud_job_id"].get().strip()
         if not job_id:
             print_message("No cloud job ID set. Submit a run first.")
@@ -1421,22 +1431,22 @@ class GUI(MainProcess):
         print_message(f"Cancelling cloud job {job_id}...")
         self.cloud_polling_active = False
 
-        def background_cancel():
+        def background_cancel() -> None:
             backend = self._get_cloud_backend()
-            result = backend.cancel_job(job_id=job_id)
-            print_message(f"Cancel result: {result}")
+            cancellation = backend.cancel_job(job_id=job_id)
+            print_message(f"Cancel result: {cancellation}")
             print_done()
 
         self.run_in_background(background_cancel)
 
-    def _cloud_fetch_artifacts(self):
+    def _cloud_fetch_artifacts(self) -> None:
         job_id = self.settings_vars["cloud_job_id"].get().strip()
         if not job_id:
             print_message("No cloud job ID set. Submit a run first.")
             return
         print_message(f"Fetching cloud artifacts for job {job_id}...")
 
-        def background_fetch():
+        def background_fetch() -> None:
             backend = self._get_cloud_backend()
             result_payload = backend.get_results(job_id=job_id)
             assert isinstance(result_payload, dict), "get_results returned a non-dict response."
@@ -1465,11 +1475,11 @@ class GUI(MainProcess):
                 os.makedirs(plots_dir, exist_ok=True)
                 for img in images:
                     filename = img.get("filename", "plot.png")
-                    data = img.get("data", "")
-                    if data:
+                    image_base64 = img.get("data", "")
+                    if image_base64:
                         img_path = os.path.join(plots_dir, filename)
                         with open(img_path, "wb") as f:
-                            f.write(base64.b64decode(data))
+                            f.write(base64.b64decode(image_base64))
                         file_count += 1
 
             metadata_path = os.path.join(job_dir, "cloud_fetch_summary.json")
@@ -1486,25 +1496,23 @@ class GUI(MainProcess):
 
         self.run_in_background(background_fetch)
 
-    def _session_start(self):
+    def _session_start(self) -> None:
         print_message("Starting Protify session...")
         # Update session variables
         hf_token = self.settings_vars["huggingface_token"].get()
         synthyra_api_key = self.settings_vars["synthyra_api_key"].get()
         wandb_api_key = self.settings_vars["wandb_api_key"].get()
-        def background_login():
+        def background_login() -> None:
 
+            # huggingface_hub and wandb read these variables whenever they need a credential.
+            # Setting them for this process, rather than calling `login`, keeps a token typed
+            # into the GUI off disk; `hf auth login` or a `.secrets.env` keeps one on purpose.
             if hf_token:
-                from huggingface_hub import login
-                login(hf_token)
-                print_message('Logged in to Hugging Face')
+                os.environ['HF_TOKEN'] = hf_token
+                print_message('Hugging Face token set for this session')
             if wandb_api_key:
-                try:
-                    import wandb
-                    wandb.login(key=wandb_api_key)
-                    print_message('Logged in to Weights & Biases')
-                except Exception as error:
-                    print_message(f'W&B login failed: {error}')
+                os.environ['WANDB_API_KEY'] = wandb_api_key
+                print_message('Weights & Biases key set for this session')
             if synthyra_api_key:
                 print_message('Synthyra API key provided')
             
@@ -1523,8 +1531,8 @@ class GUI(MainProcess):
             self.full_args.sweep_config_path = self.settings_vars["sweep_config_path"].get().strip() or "yamls/sweep.yaml"
             self.full_args.sweep_count = self.settings_vars["sweep_count"].get()
             self.full_args.sweep_method = self.settings_vars["sweep_method"].get()
-            self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or "eval_loss"
-            self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or "eval_loss"
+            self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or DEFAULT_SWEEP_METRIC_CLS
+            self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or DEFAULT_SWEEP_METRIC_REG
             self.full_args.sweep_goal = self.settings_vars["sweep_goal"].get()
             self.full_args.score_only = self.settings_vars["score_only"].get()
             self.full_args.aa_to_dna = self.settings_vars["aa_to_dna"].get()
@@ -1545,7 +1553,7 @@ class GUI(MainProcess):
             hf_home_value = self.settings_vars["hf_home"].get().strip()
             self.full_args.hf_home = hf_home_value if hf_home_value else None
 
-            def _make_true_dir(path):
+            def _make_true_dir(path: str) -> str:
                 true_path = os.path.join(self.full_args.home_dir, path)
                 os.makedirs(true_path, exist_ok=True)
                 return true_path
@@ -1566,7 +1574,7 @@ class GUI(MainProcess):
         
         self.run_in_background(background_login)
 
-    def _create_probe_args(self):
+    def _create_probe_args(self) -> None:
         print_message("Configuring probe...")
         
         # Gather settings from variables
@@ -1585,7 +1593,8 @@ class GUI(MainProcess):
         self.full_args.attention_backend = self.settings_vars["attention_backend"].get()
         
         pooling_str = self.settings_vars["probe_pooling_types"].get().strip()
-        self.full_args.probe_pooling_types = [p.strip() for p in pooling_str.split(",") if p.strip()]
+        # An empty field leaves each probe its own default pooling.
+        self.full_args.probe_pooling_types = [p.strip() for p in pooling_str.split(",") if p.strip()] or None
         
         self.full_args.transformer_dropout = self.settings_vars["transformer_dropout"].get()
         self.full_args.use_bias = self.settings_vars["use_bias"].get()
@@ -1612,7 +1621,7 @@ class GUI(MainProcess):
         print_message("Probe configuration saved")
         print_done()
 
-    def _run_trainer(self):
+    def _run_trainer(self) -> None:
         print_message("Starting training...")
         
         # Gather settings
@@ -1643,8 +1652,8 @@ class GUI(MainProcess):
         self.full_args.sweep_config_path = self.settings_vars["sweep_config_path"].get().strip() or "yamls/sweep.yaml"
         self.full_args.sweep_count = self.settings_vars["sweep_count"].get()
         self.full_args.sweep_method = self.settings_vars["sweep_method"].get()
-        self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or "eval_loss"
-        self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or "eval_loss"
+        self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or DEFAULT_SWEEP_METRIC_CLS
+        self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or DEFAULT_SWEEP_METRIC_REG
         self.full_args.sweep_goal = self.settings_vars["sweep_goal"].get()
         self.full_args.use_xformers = self.settings_vars["use_xformers"].get()
         if self.full_args.use_xformers:
@@ -1660,7 +1669,7 @@ class GUI(MainProcess):
         self.logger_args = SimpleNamespace(**args_dict)
         self._write_args()
         
-        def background_train():
+        def background_train() -> None:
             if self.full_args.use_wandb_hyperopt:
                 if not self.full_args.full_finetuning:
                     self.save_embeddings_to_disk()
@@ -1677,7 +1686,7 @@ class GUI(MainProcess):
             
         self.run_in_background(background_train)
 
-    def _run_proteingym(self):
+    def _run_proteingym(self) -> None:
         print_message("Starting ProteinGym...")
         
         # Gather settings
@@ -1700,7 +1709,7 @@ class GUI(MainProcess):
         self.logger_args = SimpleNamespace(**args_dict)
         self._write_args()
         
-        def background_proteingym():
+        def background_proteingym() -> None:
             if self.full_args.compare_scoring_methods and self.full_args.proteingym:
                 print_message("Running scoring method comparison...")
                 dms_ids = expand_dms_ids_all(self.full_args.dms_ids, mode=self.full_args.mode)
@@ -1729,7 +1738,7 @@ class GUI(MainProcess):
             
         self.run_in_background(background_proteingym)
 
-    def _run_scikit(self):
+    def _run_scikit(self) -> None:
         print_message("Starting Scikit-learn models...")
         assert "datasets" in self.__dict__, "Datasets are not loaded. Run the Data tab first."
         assert len(self.datasets) > 0, "No datasets are loaded. Run the Data tab first."
@@ -1799,14 +1808,14 @@ class GUI(MainProcess):
         self.logger_args = SimpleNamespace(**args_dict)
         self._write_args()
         
-        def background_scikit():
+        def background_scikit() -> None:
             self.save_embeddings_to_disk()
             self.run_scikit_scheme()
             print_done()
             
         self.run_in_background(background_scikit)
 
-    def _select_models(self):
+    def _select_models(self) -> None:
         print_message("Selecting models...")
         # Gather selected model names
         selected_indices = self.model_listbox.curselection()
@@ -1840,7 +1849,7 @@ class GUI(MainProcess):
         self._write_args()
         print_done()
 
-    def _get_data(self):
+    def _get_data(self) -> None:
         print_message("=== Getting Data ===")
         print_message("Loading and preparing datasets...")
         
@@ -1857,7 +1866,7 @@ class GUI(MainProcess):
         if (not selected_datasets) and (len(data_dirs) == 0):
             selected_datasets = standard_data_benchmark
             
-        def background_get_data():
+        def background_get_data() -> None:
             # Update full_args with data settings
             self.full_args.data_names = selected_datasets
             self.full_args.data_dirs = data_dirs
@@ -1908,7 +1917,7 @@ class GUI(MainProcess):
             
         self.run_in_background(background_get_data)
 
-    def _get_embeddings(self):
+    def _get_embeddings(self) -> None:
         if not self.all_seqs:
             print_message('Sequences are not loaded yet. Please run the data tab first.')
             return
@@ -1919,7 +1928,7 @@ class GUI(MainProcess):
         pooling_list = [p.strip() for p in pooling_str.split(",") if p.strip()]
         dtype_val = self._selected_embed_dtype()
         
-        def background_get_embeddings():
+        def background_get_embeddings() -> None:
             # Update full args
             self.full_args.all_seqs = self.all_seqs
             self.full_args.model_dtype = self._selected_model_dtype()
@@ -1947,7 +1956,7 @@ class GUI(MainProcess):
             
         self.run_in_background(background_get_embeddings)
 
-    def _browse_replay_log(self):
+    def _browse_replay_log(self) -> None:
         filename = filedialog.askopenfilename(
             title="Select Replay Log",
             filetypes=(("Txt files", "*.txt"), ("All files", "*.*"))
@@ -1955,7 +1964,7 @@ class GUI(MainProcess):
         if filename:
             self.settings_vars["replay_path"].set(filename)
 
-    def _start_replay(self):
+    def _start_replay(self) -> None:
         replay_path = self.settings_vars["replay_path"].get()
         if not replay_path:
             print_message("Please select a replay log file first")
@@ -1963,8 +1972,8 @@ class GUI(MainProcess):
         
         print_message("Starting replay from log file...")
         
-        def background_replay():
-            from logger import LogReplayer
+        def background_replay() -> None:
+            from .logger import LogReplayer
             replayer = LogReplayer(replay_path)
             replay_args = replayer.parse_log()
             replay_args.replay_path = replay_path
@@ -1980,7 +1989,7 @@ class GUI(MainProcess):
         
         self.run_in_background(background_replay)
         
-    def _browse_results_file(self):
+    def _browse_results_file(self) -> None:
         filename = filedialog.askopenfilename(
             title="Select Results File",
             filetypes=(("TSV files", "*.tsv"), ("All files", "*.*"))
@@ -1990,7 +1999,7 @@ class GUI(MainProcess):
             # Set use_current_run to False since we're selecting a specific file
             self.settings_vars["use_current_run"].set(False)
     
-    def _generate_plots(self):
+    def _generate_plots(self) -> None:
         print_message("Generating visualization plots...")
         
         # Determine which results file to use
@@ -2020,7 +2029,7 @@ class GUI(MainProcess):
         
         # Get output directory
         output_dir = self.settings_vars["viz_output_dir"].get()
-        def background_generate_plots():
+        def background_generate_plots() -> None:
             # Call the plot generation function
             print_message(f"Generating plots in {output_dir}...")
             create_plots(results_file, output_dir)
@@ -2030,9 +2039,9 @@ class GUI(MainProcess):
         self.run_in_background(background_generate_plots)
 
 
-def main():
+def main() -> None:
     root = tk.Tk()
-    app = GUI(root)
+    _ = GUI(root)  # the window's callbacks need the GUI alive until the main loop ends
     print_title("Protify")
     root.mainloop()
 

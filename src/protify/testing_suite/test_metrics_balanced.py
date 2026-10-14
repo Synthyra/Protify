@@ -1,31 +1,13 @@
 import numpy as np
 import pytest
 
-try:
-    from src.protify.metrics_balanced import (
-        compute_sample_weights,
-        apply_weights_from_reference,
-        compute_balanced_regression_metrics,
-        label_distribution_smoothing,
-        SUPPORTED_METHODS,
-    )
-except ImportError:
-    try:
-        from protify.metrics_balanced import (
-            compute_sample_weights,
-            apply_weights_from_reference,
-            compute_balanced_regression_metrics,
-            label_distribution_smoothing,
-            SUPPORTED_METHODS,
-        )
-    except ImportError:
-        from ..metrics_balanced import (
-            compute_sample_weights,
-            apply_weights_from_reference,
-            compute_balanced_regression_metrics,
-            label_distribution_smoothing,
-            SUPPORTED_METHODS,
-        )
+from protify.metrics_balanced import (
+    compute_sample_weights,
+    apply_weights_from_reference,
+    compute_balanced_regression_metrics,
+    label_distribution_smoothing,
+    SUPPORTED_METHODS,
+)
 
 
 def _skewed_labels(rng):
@@ -150,6 +132,18 @@ def test_degenerate_single_class_auc_is_minus_100():
     assert m['binned_roc_auc_mean'] == -100.0
 
 
+def test_a_constant_resample_is_left_out_of_the_resampled_correlation():
+    """Two rows resample to a constant pair about half the time, which has no correlation.
+
+    Counting those resamples as -100 once pulled the reported mean far below any real value.
+    """
+    y = np.array([4.0, 8.0])  # (n=2,)
+    m = compute_balanced_regression_metrics(y, y.copy(), np.ones(2), [6], n_resamples=40, seed=0)
+    assert m['weighted_pearson_rho'] == pytest.approx(1.0)
+    assert m['weighted_spearman_rho'] == pytest.approx(1.0)
+    assert m['weighted_pearson_rho_std'] == pytest.approx(0.0)
+
+
 def test_shape_handling_2d_input_matches_flattened():
     rng = np.random.default_rng(10)
     y_flat = _skewed_labels(rng)
@@ -209,7 +203,7 @@ def test_apply_weights_reference_different_distribution():
 
 
 def test_resampled_correlation_more_balanced_than_raw():
-    """On highly skewed data, resampled Pearson should differ from raw Pearson — EpHod's key motivation."""
+    """On highly skewed data, resampled Pearson should differ from raw Pearson, which is EpHod's key motivation."""
     rng = np.random.default_rng(15)
     y = _skewed_labels(rng)
     y_pred = y + rng.normal(0, 0.5, size=len(y))
@@ -217,12 +211,12 @@ def test_resampled_correlation_more_balanced_than_raw():
     raw_r = float(pearsonr(y, y_pred)[0])
     w = compute_sample_weights(y, method='bin_inv', bin_borders=[5, 9])
     m = compute_balanced_regression_metrics(y, y_pred, w, [5, 9], n_resamples=200, seed=0)
-    # Resampled should be higher — balanced data has wider spread, boosting correlation
+    # Resampled should be higher: balanced data has wider spread, boosting correlation
     assert m['weighted_pearson_rho'] > raw_r
 
 
 def _ephod_reference_performance(ytrue, ypred, weights, bins, n_resamples, seed):
-    """Direct port of EpHod's performance() from trainutils.py — ground truth for parity."""
+    """Direct port of EpHod's performance() from trainutils.py, the ground truth for parity."""
     from scipy.stats import spearmanr, pearsonr
     from sklearn import metrics as skm
     ytrue = np.asarray(ytrue, dtype=np.float64)
@@ -374,12 +368,8 @@ def test_apply_weights_from_reference_honors_explicit_borders():
 
 def test_data_mixin_honors_explicit_bin_borders(monkeypatch):
     """Simulate DataMixin._compute_balanced_weights_for with explicit vs default borders."""
-    try:
-        from src.protify.metrics_balanced import _default_bin_borders
-        from src.protify.metrics_balanced import compute_sample_weights as csw
-    except ImportError:
-        from protify.metrics_balanced import _default_bin_borders
-        from protify.metrics_balanced import compute_sample_weights as csw
+    from protify.metrics_balanced import _default_bin_borders
+    from protify.metrics_balanced import compute_sample_weights as csw
 
     rng = np.random.default_rng(105)
     train_labels = _skewed_labels(rng)
@@ -401,13 +391,7 @@ def test_data_mixin_honors_explicit_bin_borders(monkeypatch):
 def test_data_mixin_compute_balanced_weights_without_init():
     """Regression guard: MainProcess skips DataMixin.__init__ due to super() chain,
     so _compute_balanced_weights_for must self-initialize self.balanced_weights."""
-    try:
-        from protify.data.data_mixin import DataMixin
-    except ImportError:
-        try:
-            from ..data.data_mixin import DataMixin
-        except ImportError:
-            from src.protify.data.data_mixin import DataMixin
+    from protify.data.data_mixin import DataMixin
 
     class FakeTrainerArgs:
         def __init__(self):

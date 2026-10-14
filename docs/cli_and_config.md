@@ -33,14 +33,8 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--hf_username` | str | Synthyra | Hugging Face username. |
-| `--hf_token` | str | None | Hugging Face token. |
-| `--synthyra_api_key` | str | None | Synthyra API key for cloud GPU compute. Get yours at [synthyra.com](https://synthyra.com). |
-| `--wandb_api_key` | str | None | Weights and Biases API key. |
-| `--modal_token_id` | str | None | Modal token ID. |
-| `--modal_token_secret` | str | None | Modal token secret. |
-| `--modal_api_key` | str | None | Modal key as `token_id:token_secret`. |
-| `--rebuild_modal` | flag | False | Force rebuild and deploy Modal backend before run. |
-| `--delete_modal_embeddings` | flag | False | Delete embedding cache on Modal volume before submission. |
+
+No argument takes a credential. Run `hf auth login` once or set `HF_TOKEN`; a W&B run reads `WANDB_API_KEY` from the environment, where `wandb login` does not put it, and a cloud run reads `SYNTHYRA_API_KEY`. A `.secrets.env` at a clone's root, or the file `FOUNDRY_SECRETS` names, sets those three names and no others. A YAML config that holds `hf_token`, `wandb_api_key`, `synthyra_api_key`, or `cloud_api_key` is refused.
 
 ### Paths
 
@@ -56,6 +50,8 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--plots_dir` | str | plots | Directory for plots. |
 | `--replay_path` | str | None | Path to replay log file. |
 
+A launcher that keeps different models' embeddings on different volumes sets `PROTIFY_FEATURE_ROOTS` to JSON such as `{"logical_root": "/vol/embeddings", "routes": {"ESMC-600": "/vol/esmc_600", "ESMC-6B": "/vol/esmc_6b"}}`. A store that would live under `logical_root` then lives under the root of the longest prefix its model name matches, where `ESMC-600` matches `ESMC-600` and any name continuing after a `-`, such as `ESMC-600-SAE-l27-k64-c16384`. A model under `logical_root` that no route matches raises. Store names do not change, and other roots are untouched.
+
 ### Data
 
 | Argument | Type | Default | Description |
@@ -66,9 +62,13 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--padding` | choice | max_length | Padding strategy: `max_length` pads all sequences to `--max_length` (recommended for torch.compile + flex attention); `longest` pads to the longest sequence in each batch. |
 | `--trim` | flag | False | If set, drop sequences longer than max_length; else truncate. |
 | `--data_names` | list | [] | Dataset names (HuggingFace or preset e.g. standard_benchmark). |
+| `--data_revisions` | list | None | Immutable Hugging Face revisions, one per `--data_names` entry, so a run reads exactly the dataset commits it names. Rejected for benchmark presets and `protein_gym`, which do not name one dataset. |
 | `--data_dirs` | list | [] | Local split directories with train and valid/test aliases; accepts tabular files or labeled FASTA. |
+| `--max_train_rows`, `--max_valid_rows`, `--max_test_rows` | int | None | Most rows each split of each dataset keeps: a deterministic subsample, stratified by class or regression decile, in original row order. A split at or under its cap is untouched. See [Data](data.md#split-row-caps). |
+| `--split_row_cap_seed` | int | 0 | Seed of the capped subsamples. Independent of `--seed`, so every training seed reads the same rows. |
 | `--aa_to_dna`, `--aa_to_rna`, `--dna_to_aa`, `--rna_to_aa`, `--codon_to_aa`, `--aa_to_codon` | flag | False | Sequence translation (only one may be True). |
-| `--random_pair_flipping` | flag | False | Randomly swap paired inputs (e.g. PPI) on the training split only. Validation and test keep the dataset order so a score does not depend on the random state. |
+| `--random_pair_flipping` | flag | False | Randomly swap paired inputs (e.g. PPI) on the training split only. Validation and test keep the dataset order so a score does not depend on the random state. Ignored under `--pair_feature_mode minmax`. |
+| `--pair_feature_mode` | choice | concat | How two pooled protein vectors become one pair row. `concat` is A then B, which depends on the dataset ordering. `minmax` sorts each feature across the pair into `[min, max]`, which a swap leaves unchanged, so one interaction is one row and no order augmentation is needed. Needs pooled embeddings, so it is rejected with `--matrix_embed`. |
 | `--multi_column` | list | None | Sequence column names for multi-input tasks. |
 
 ### Base model
@@ -88,11 +88,17 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `--probe_type` | choice | mlp | mlp, transformer, lyra, xgboost, lightgbm, random_forest. "linear" is the former name for mlp. |
+| `--probe_type` | choice | mlp | mlp, transformer, lyra, xgboost, lightgbm, random_forest. "linear" is the former name for mlp. A head registered with `register_probe_type` is accepted by `ProbeArguments` in Python; see [Probes and training](probes_and_training.md#registering-a-probe-type). |
 | `--tokenwise` | flag | False | Token-wise prediction. |
 | `--probe_n_jobs` | int | -1 | Workers for xgboost, lightgbm, and random_forest probes. |
-| `--hidden_size` | int | 8192 | Hidden size for the MLP probe. |
-| `--transformer_hidden_size` | int | 512 | Hidden size for transformer probe. |
+| `--estimator_device` | choice | auto | Where an xgboost probe fits. `auto` uses the GPU when one is visible. The GPU histogram is one buffer of `max_bin` entries per feature per node, so a wide feature matrix can exceed GPU memory; `cpu` trades speed for the host's larger memory. |
+| `--tune_estimator` | flag | False | Search estimator hyperparameters with Optuna against the validation split before the final fit. The built-in defaults were selected on one 8192-wide task and do not carry to much wider feature matrices. |
+| `--tune_trials` | int | 40 | Optuna trials for `--tune_estimator`. |
+| `--tune_seeds` | int | 1 | Fits per Optuna trial, averaged into the objective. Raise it when the validation split is small: one fit lets a configuration win a trial on subsampling luck, and the chosen configuration then fails to reproduce on test. |
+| `--tune_metric` | str | None | Validation metric `--tune_estimator` optimizes. Defaults to the metric the results table reports: `mcc` for classification and `spearman_rho` for regression. Error metrics (`mse`, `mae`, `rmse`) are minimized; everything else is maximized. Use `pr_auc` when the positive class is rare and ranking is what you ship. |
+| `--tune_timeout` | float | None | Wall-clock seconds after which `--tune_estimator` stops starting new trials. |
+| `--keep_dead_features` | flag | False | Keep embedding columns that are zero for every training row. Estimator probes drop them by default: they cannot produce a split, and keeping them dilutes the column sample of every tree. |
+| `--hidden_size` | int | 8192 | Hidden size of the MLP, transformer, and Lyra probes. A transformer's must divide into heads of `--head_size`. |
 | `--dropout` | float | 0.2 | Dropout rate. |
 | `--n_layers` | int | 1 | Number of layers. |
 | `--pre_ln` | flag | True | Pre-LayerNorm (store_false to disable). |
@@ -104,7 +110,7 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--rotary` | flag | True | Use rotary embeddings (store_false to disable). |
 | `--attention_backend` | choice | flex | kernels, flex, sdpa. |
 | `--output_s_max` | flag | False | Return s_max from attention layers. |
-| `--probe_pooling_types` | list | [mean, var] | Pooling types for probe. |
+| `--probe_pooling_types` | list | None | Pooling types for the transformer and Lyra probes. Unset keeps each probe's default: `mean cls` for the transformer probe, `mean` for Lyra. Lyra takes one type. `bom` works only in the transformer sequence probe. |
 | `--use_bias` | flag | False | Use bias in Linear layers. |
 | `--save_model` | flag | False | Save trained model. |
 | `--push_raw_probe` | flag | False | With --save_model, push raw probe class to Hub (load with e.g. Class.from_pretrained(repo_id)) instead of packaged AutoModel. |
@@ -141,8 +147,8 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--embedding_hidden_state_index` | int | -1 | Hidden-state tuple index to pool from. `-1` uses `last_hidden_state` without materializing all layer states. |
 | `--save_embeddings` | flag | False | Save computed embeddings. |
 | `--embed_dtype` | choice | None | fp32/fp16/bf16 for embeddings (default: model_dtype). |
-| `--sql` | flag | False | Store embeddings in SQLite. |
-| `--read_scaler` | int | 100 | Read scaler for SQL. |
+| `--sql` | flag | False | Stream embeddings from the feature store at train time instead of holding them in RAM. The store is the same either way; the name is kept from when this chose a SQLite file. |
+| `--read_scaler` | int | 100 | Read scaler for streamed (`--sql`) storage. |
 
 ### Trainer
 
@@ -159,7 +165,7 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--lr_scheduler` | str | cosine | Hugging Face `TrainingArguments.lr_scheduler_type`. |
 | `--optimizer` | str | adamw_torch | Hugging Face `TrainingArguments.optim`. |
 | `--weight_decay` | float | 0.00 | Weight decay. |
-| `--patience` | int | 1 | Early-stopping patience (probe phase, and base phase unless `--base_patience` is set). |
+| `--patience` | int | 5 | Early-stopping patience (probe phase, and base phase unless `--base_patience` is set). |
 | `--base_num_epochs` | int | None | Epoch count for the base-model phase of hybrid / full-finetuning training. If omitted, falls back to `--num_epochs`. |
 | `--base_patience` | int | None | Early-stopping patience for the base-model phase. If omitted, falls back to `--patience`. |
 | `--seed` | int | None | Random seed (None: time-based). |
@@ -177,15 +183,15 @@ The schema is defined by the union of [base.yaml](../src/protify/yamls/base.yaml
 | `--parallel_probe_grad_clip_mode` | choice | global | Gradient clipping mode for parallel probe banks: `none`, `global`, or `per_run`. With the default max norm of `0.0`, all modes are no-ops until a positive norm is set. |
 | `--parallel_probe_ensemble_average_mode` | choice | logits | Average mode for reported seed-bank ensemble metrics: `logits` or `probabilities`. |
 
-For a no-training preflight over a planned model/dataset/probe sweep, use `python -m scripts.plan_parallel_probes`. It reports grouping, Trainer invocation reduction, static probe-bank resource estimates, embedding prerequisite commands, launch-manifest command templates, an `execution_recommendation` block, and a sequential-vs-parallel validation comparison block without loading datasets, models, embeddings, or Trainer. The `embedding_prerequisites` block emits one `_PROTIFY_EMBED_PHASE=1` command per model/dataset cache, records cache fanout into downstream probe runs, and keeps embedding work separate from probe launch waves because PLM sizes and cache writes can dominate resource use. Shape those commands with `--embedding_save_dir`, `--embedding_batch_size`, `--embedding_num_workers`, `--embedding_pooling_types`, `--embedding_hidden_state_index`, `--embed_dtype`, `--sql`, and `--download_embeddings`. The launch manifest includes full accepted `python -m main` command arrays plus monitor-wrapped command arrays for future workstation runs; use `--telemetry_dir`, `--monitor_interval_seconds`, and `--monitor_gpu_index` to shape those telemetry templates. The preflight accepts plural probe-shape flags such as `--probe_hidden_sizes`, `--probe_dropouts`, and `--probe_n_layers` to model probe-configuration sweeps; add `--probe_batch_size` and `--train_dataset_size` to include batch-activation, matmul FLOP, and run-specific permutation-index estimates, add `--training_state_budget_gb` or `--estimated_peak_budget_gb` to apply conservative per-probe group-size caps, and add `--parallel_max_grad_norm` plus `--parallel_grad_clip_mode per_run` to template independence-preserving gradient clipping. For future workstation co-scheduling tests across model/dataset/probe groups, add `--wave_max_groups`, `--wave_memory_budget_gb`, and `--wave_target_training_flops_per_batch` to emit an `execution_waves` launch matrix. Add `--gpu_peak_tflops` and `--gpu_memory_bandwidth_gbps` to emit a static `hardware_roofline` block with per-wave compute and memory lower bounds for the target GPU profile. Add `--gpu_indices 0 1 ...` to place planned groups through manifest `CUDA_VISIBLE_DEVICES` environment metadata; `--gpu_assignment_mode packed` keeps groups in the same wave on one GPU, while `round_robin` spreads groups within each wave. Wave entries include per-GPU estimated peak bytes, memory-budget fit, and FLOPs so placement can be reviewed before execution. The recommendation block selects a concrete group-size cap and manifest-runner template from static candidate plans while respecting any explicit `--parallel_max_group_size` as a hard cap; the runner templates include `--output_path` values under `--telemetry_dir` for durable dry-run and execution reports. Co-scheduled plans include separate `manifest_runner_sequential_execute_args` and `manifest_runner_parallel_execute_args`; the parallel template uses concurrent waves when requested, while the sequential template stays sequential for baseline timing. The validation block also includes `compare_conservative_args` and `compare_coscheduled_args` so later result TSVs, runner reports, telemetry summaries, manifest coverage, probe-config coverage, and saved comparison report JSON can be checked without rebuilding the command by hand.
+For a no-training preflight over a planned model/dataset/probe sweep, use `python -m protify.scripts.plan_parallel_probes`. It reports grouping, Trainer invocation reduction, static probe-bank resource estimates, embedding prerequisite commands, launch-manifest command templates, an `execution_recommendation` block, and a sequential-vs-parallel validation comparison block without loading datasets, models, embeddings, or Trainer. The `embedding_prerequisites` block emits one `_PROTIFY_EMBED_PHASE=1` command per model/dataset cache, records cache fanout into downstream probe runs, and keeps embedding work separate from probe launch waves because PLM sizes and cache writes can dominate resource use. Shape those commands with `--embedding_save_dir`, `--embedding_batch_size`, `--embedding_num_workers`, `--embedding_pooling_types`, `--embedding_hidden_state_index`, `--embed_dtype`, `--sql`, and `--download_embeddings`. The launch manifest includes full accepted `python -m protify.main` command arrays plus monitor-wrapped command arrays for future workstation runs; use `--telemetry_dir`, `--monitor_interval_seconds`, and `--monitor_gpu_index` to shape those telemetry templates. The preflight accepts plural probe-shape flags such as `--probe_hidden_sizes`, `--probe_dropouts`, and `--probe_n_layers` to model probe-configuration sweeps; add `--probe_batch_size` and `--train_dataset_size` to include batch-activation, matmul FLOP, and run-specific permutation-index estimates, add `--training_state_budget_gb` or `--estimated_peak_budget_gb` to apply conservative per-probe group-size caps, and add `--parallel_max_grad_norm` plus `--parallel_grad_clip_mode per_run` to template independence-preserving gradient clipping. For future workstation co-scheduling tests across model/dataset/probe groups, add `--wave_max_groups`, `--wave_memory_budget_gb`, and `--wave_target_training_flops_per_batch` to emit an `execution_waves` launch matrix. Add `--gpu_peak_tflops` and `--gpu_memory_bandwidth_gbps` to emit a static `hardware_roofline` block with per-wave compute and memory lower bounds for the target GPU profile. Add `--gpu_indices 0 1 ...` to place planned groups through manifest `CUDA_VISIBLE_DEVICES` environment metadata; `--gpu_assignment_mode packed` keeps groups in the same wave on one GPU, while `round_robin` spreads groups within each wave. Wave entries include per-GPU estimated peak bytes, memory-budget fit, and FLOPs so placement can be reviewed before execution. The recommendation block selects a concrete group-size cap and manifest-runner template from static candidate plans while respecting any explicit `--parallel_max_group_size` as a hard cap; the runner templates include `--output_path` values under `--telemetry_dir` for durable dry-run and execution reports. Co-scheduled plans include separate `manifest_runner_sequential_execute_args` and `manifest_runner_parallel_execute_args`; the parallel template uses concurrent waves when requested, while the sequential template stays sequential for baseline timing. The validation block also includes `compare_conservative_args` and `compare_coscheduled_args` so later result TSVs, runner reports, telemetry summaries, manifest coverage, probe-config coverage, and saved comparison report JSON can be checked without rebuilding the command by hand.
 
-`--num_labels` is intentionally not a `python -m main` argument. Normal Protify runs infer label count from the loaded dataset and store it on `probe_args`. The synthetic benchmark and no-training planner have their own `--num_labels` flag only because they do not load datasets; launch-manifest `python -m main` commands generated by the planner omit it.
+`--num_labels` is intentionally not a `python -m protify.main` argument. Normal Protify runs infer label count from the loaded dataset and store it on `probe_args`. The synthetic benchmark and no-training planner have their own `--num_labels` flag only because they do not load datasets; launch-manifest `python -m protify.main` commands generated by the planner omit it.
 
-Use `python -m scripts.run_parallel_probe_launch_manifest --manifest_path <preflight.json>` to dry-run those launch-manifest commands by wave. It only runs commands when `--execute` is explicitly passed; add `--output_path <runner-report.json>` to save the dry-run or execution report. The runner defaults to `--phase probes`; use `--phase embeddings` to plan or execute the embed-only prerequisite commands, or `--phase all` to include the embedding prerequisite wave before probe waves. Add `--wave_execution_mode concurrent` to launch all parallel commands in each planned wave together during future workstation runs. Concurrent launch with `--variant sequential` or `--variant both` is blocked by default because it can contaminate baseline timing; use `--allow_baseline_concurrency` only for deliberate throughput tests. If selected waves are over the preflight GPU memory budget, execution is blocked unless `--allow_over_budget` is explicitly passed. Add `--skip_completed` to omit commands whose monitor summary JSON already exists when resuming a partially completed manifest.
+Use `python -m protify.scripts.run_parallel_probe_launch_manifest --manifest_path <preflight.json>` to dry-run those launch-manifest commands by wave. It only runs commands when `--execute` is explicitly passed; add `--output_path <runner-report.json>` to save the dry-run or execution report. The runner defaults to `--phase probes`; use `--phase embeddings` to plan or execute the embed-only prerequisite commands, or `--phase all` to include the embedding prerequisite wave before probe waves. Add `--wave_execution_mode concurrent` to launch all parallel commands in each planned wave together during future workstation runs. Concurrent launch with `--variant sequential` or `--variant both` is blocked by default because it can contaminate baseline timing; use `--allow_baseline_concurrency` only for deliberate throughput tests. If selected waves are over the preflight GPU memory budget, execution is blocked unless `--allow_over_budget` is explicitly passed. Add `--skip_completed` to omit commands whose monitor summary JSON already exists when resuming a partially completed manifest.
 
-After workstation runs exist, use `python -m scripts.compare_parallel_probe_runs --sequential_results <seq.tsv> --parallel_results <par.tsv>` to compare wall-clock speedups and metric parity without rerunning training. Add `--output_path <compare-report.json>` to save the JSON report. If both files include seed-ensemble metrics, the report also compares `sequential_probe_ensemble_test_*` against `parallel_probe_ensemble_test_*`. The JSON summary includes `validation_verdict`; tune it with thresholds such as `--min_wall_clock_speedup`, `--min_per_run_speedup`, `--min_manifest_speedup_efficiency`, `--require_manifest_result_coverage`, `--require_manifest_probe_result_coverage`, `--require_ensemble_metrics`, `--require_complete_telemetry`, `--require_successful_runner_reports`, `--min_parallel_gpu_utilization_percent`, and `--min_gpu_utilization_gain_percent`. Add `--launch_manifest <preflight.json>` to report planned model/dataset result coverage, exact probe-config coverage from standard TSV probe identity fields, and observed wall-clock speedup as a fraction of the preflight trainer-invocation speedup ceiling. Add `--runner_reports <manifest_runner_execute.report.json>` to summarize saved manifest-runner dry-run or execution reports; add `--require_successful_runner_reports` to require at least one saved execution report with no over-budget block, unknown selected command ids, missing wave command ids, nonzero command returns, runner failures, or missing executed command results. When `--launch_manifest` is also provided, runner-report validation checks exact `(command_id, variant)` coverage against every planned sequential and parallel probe command. Embedding-prerequisite commands from `--phase embeddings` or `--phase all` runner reports are summarized but ignored for probe manifest coverage. Executed commands and resume skips with `skip_reason='completed_summary_exists'` count as covered; empty-command skips do not. Add sequential plus parallel telemetry summary JSON files to compare utilization summaries from the hardware monitor and report telemetry coverage against planned monitor commands.
+After workstation runs exist, use `python -m protify.scripts.compare_parallel_probe_runs --sequential_results <seq.tsv> --parallel_results <par.tsv>` to compare wall-clock speedups and metric parity without rerunning training. Add `--output_path <compare-report.json>` to save the JSON report. If both files include seed-ensemble metrics, the report also compares `sequential_probe_ensemble_test_*` against `parallel_probe_ensemble_test_*`. The JSON summary includes `validation_verdict`; tune it with thresholds such as `--min_wall_clock_speedup`, `--min_per_run_speedup`, `--min_manifest_speedup_efficiency`, `--require_manifest_result_coverage`, `--require_manifest_probe_result_coverage`, `--require_ensemble_metrics`, `--require_complete_telemetry`, `--require_successful_runner_reports`, `--min_parallel_gpu_utilization_percent`, and `--min_gpu_utilization_gain_percent`. Add `--launch_manifest <preflight.json>` to report planned model/dataset result coverage, exact probe-config coverage from standard TSV probe identity fields, and observed wall-clock speedup as a fraction of the preflight trainer-invocation speedup ceiling. Add `--runner_reports <manifest_runner_execute.report.json>` to summarize saved manifest-runner dry-run or execution reports; add `--require_successful_runner_reports` to require at least one saved execution report with no over-budget block, unknown selected command ids, missing wave command ids, nonzero command returns, runner failures, or missing executed command results. When `--launch_manifest` is also provided, runner-report validation checks exact `(command_id, variant)` coverage against every planned sequential and parallel probe command. Embedding-prerequisite commands from `--phase embeddings` or `--phase all` runner reports are summarized but ignored for probe manifest coverage. Executed commands and resume skips with `skip_reason='completed_summary_exists'` count as covered; empty-command skips do not. Add sequential plus parallel telemetry summary JSON files to compare utilization summaries from the hardware monitor and report telemetry coverage against planned monitor commands.
 
-Use `python -m scripts.monitor_parallel_probe_hardware --output_jsonl <samples.jsonl> --command -- <protify command>` on the workstation to collect `nvidia-smi` utilization telemetry around those runs.
+Use `python -m protify.scripts.monitor_parallel_probe_hardware --output_jsonl <samples.jsonl> --command -- <protify command>` on the workstation to collect `nvidia-smi` utilization telemetry around those runs.
 
 ### Balanced regression metrics (EpHod-style)
 
@@ -219,7 +225,7 @@ Applied only for regression tasks. See [Probes and Training > Balanced regressio
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--use_wandb_hyperopt` | flag | False | Run W&B hyperparameter sweep. |
-| `--wandb_project` | str | (from env/args) | W&B project name. |
+| `--wandb_project` | str | (from env/args) | W&B project name, for sweeps and `--report_to wandb`. |
 | `--wandb_entity` | str | (from env/args) | W&B entity. |
 | `--sweep_config_path` | str | yamls/sweep.yaml | Sweep YAML path. |
 | `--sweep_count` | int | 10 | Number of trials. |
@@ -237,7 +243,6 @@ The file [src/protify/yamls/base.yaml](../src/protify/yamls/base.yaml) is organi
 ```yaml
 # ID
 hf_username: Synthyra
-hf_token: null
 # ...
 
 # Paths
@@ -281,25 +286,25 @@ Anything you can set via CLI can be set in YAML; CLI overrides when both are pre
 ### Probe-only with two models and one dataset
 
 ```bash
-py -m src.protify.main --model_names ESM2-8 ESM2-35 --data_names DeepLoc-2 --num_epochs 5 --results_dir my_results
+python -m protify.main --model_names ESM2-8 ESM2-35 --data_names DeepLoc-2 --num_epochs 5 --results_dir my_results
 ```
 
 ### ProteinGym zero-shot on all substitution assays
 
 ```bash
-py -m src.protify.main --proteingym --model_names ESM2-150 --dms_ids all --mode benchmark
+python -m protify.main --proteingym --model_names ESM2-150 --dms_ids all --mode benchmark
 ```
 
 ### W&B sweep (after setting W&B credentials)
 
 ```bash
-py -m src.protify.main --yaml_path src/protify/yamls/base.yaml --use_wandb_hyperopt --sweep_count 5 --wandb_project my_project --wandb_entity my_entity
+python -m protify.main --yaml_path src/protify/yamls/base.yaml --use_wandb_hyperopt --sweep_count 5 --wandb_project my_project --wandb_entity my_entity
 ```
 
 ### YAML with CLI overrides
 
 ```bash
-py -m src.protify.main --yaml_path my_config.yaml --num_epochs 20 --lr 5e-5 --save_embeddings
+python -m protify.main --yaml_path my_config.yaml --num_epochs 20 --lr 5e-5 --save_embeddings
 ```
 
 ### Docker
@@ -307,22 +312,22 @@ py -m src.protify.main --yaml_path my_config.yaml --num_epochs 20 --lr 5e-5 --sa
 Run from the repository root on your host with the workspace mounted and working directory set to `/workspace/src/protify`. Linux/mac example:
 
 ```bash
-docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify protify-env:latest python -m main --model_names ESM2-8 ESM2-35 --data_names DeepLoc-2 --num_epochs 5 --results_dir my_results
+docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace protify-env:latest python -m protify.main --model_names ESM2-8 ESM2-35 --data_names DeepLoc-2 --num_epochs 5 --results_dir my_results
 ```
 
 ProteinGym zero-shot:
 
 ```bash
-docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify protify-env:latest python -m main --proteingym --model_names ESM2-150 --dms_ids all --mode benchmark
+docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace protify-env:latest python -m protify.main --proteingym --model_names ESM2-150 --dms_ids all --mode benchmark
 ```
 
 YAML with overrides:
 
 ```bash
-docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify protify-env:latest python -m main --yaml_path yamls/base.yaml --num_epochs 20 --lr 5e-5 --save_embeddings
+docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace protify-env:latest python -m protify.main --yaml_path src/protify/yamls/base.yaml --num_epochs 20 --lr 5e-5 --save_embeddings
 ```
 
-On Windows use `-v "%CD%":/workspace` and `py -m main` instead of `python -m main`. Ensure the image is built first: `docker build -t protify-env:latest .`
+On Windows use `-v "%CD%":/workspace` and `python -m protify.main` instead of `python -m protify.main`. Ensure the image is built first: `docker build -t protify-env:latest .`
 
 ---
 

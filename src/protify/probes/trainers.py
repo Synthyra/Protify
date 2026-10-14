@@ -1,88 +1,111 @@
+import math
+import os
+import numpy as np
 import torch
 import torch.nn.functional as F
-import os
-import sqlite3
-import numpy as np
+
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from copy import deepcopy
-from typing import Optional, Dict, List, Any, Union
-from huggingface_hub import HfApi
-from transformers import Trainer, TrainingArguments, EarlyStoppingCallback, EvalPrediction, TrainerCallback
 from dataclasses import dataclass
-try:
-    from probes.hybrid_probe import HybridProbe, HybridProbeConfig
-    from probes.parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
-    from probes.parallel_probe_batches import ParallelRunDataset
-    from probes.parallel_probe_plan import (
-        build_seed_run_specs,
-        estimate_parallel_probe_plan,
-        max_linear_probe_runs_for_estimated_peak_budget,
-        max_linear_probe_runs_for_training_state_budget,
-        plan_parallel_probe_runs,
-    )
-    from probes.export_packaged_model import export_packaged_model_to_hub
-    from data.dataset_classes import (
-        EmbedsLabelsDatasetFromDisk,
-        PairEmbedsLabelsDatasetFromDisk,
-        EmbedsLabelsDataset,
-        PairEmbedsLabelsDataset,
-        StringLabelDataset,
-        PairStringLabelDataset,
-        MultiEmbedsLabelsDatasetFromDisk,
-        MultiEmbedsLabelsDataset,
-        EmbeddingStandardizer,
-    )
-except ImportError:
-    from .hybrid_probe import HybridProbe, HybridProbeConfig
-    from .parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
-    from .parallel_probe_batches import ParallelRunDataset
-    from .parallel_probe_plan import (
-        build_seed_run_specs,
-        estimate_parallel_probe_plan,
-        max_linear_probe_runs_for_estimated_peak_budget,
-        max_linear_probe_runs_for_training_state_budget,
-        plan_parallel_probe_runs,
-    )
-    from .export_packaged_model import export_packaged_model_to_hub
-    from ..data.dataset_classes import (
-        EmbedsLabelsDatasetFromDisk,
-        PairEmbedsLabelsDatasetFromDisk,
-        EmbedsLabelsDataset,
-        PairEmbedsLabelsDataset,
-        StringLabelDataset,
-        PairStringLabelDataset,
-        MultiEmbedsLabelsDatasetFromDisk,
-        MultiEmbedsLabelsDataset,
-        EmbeddingStandardizer,
-    )
-try:
-    from data.data_collators import (
-        EmbedsLabelsCollator,
-        PairEmbedsLabelsCollator,
-        PairCollator_input_ids,
-        StringLabelsCollator,
-    )
-    from visualization.ci_plots import regression_ci_plot, classification_ci_plot
-    from utils import print_message
-    from metrics import get_compute_metrics, get_compute_metrics_with_balanced
-    from metrics_balanced import compute_balanced_regression_metrics
-    from seed_utils import set_global_seed
-    from probes.get_probe import get_probe
-except ImportError:
-    from ..data.data_collators import (
-        EmbedsLabelsCollator,
-        PairEmbedsLabelsCollator,
-        PairCollator_input_ids,
-        StringLabelsCollator,
-    )
-    from ..visualization.ci_plots import regression_ci_plot, classification_ci_plot
-    from ..utils import print_message
-    from ..metrics import get_compute_metrics, get_compute_metrics_with_balanced
-    from ..metrics_balanced import compute_balanced_regression_metrics
-    from ..seed_utils import set_global_seed
-    from .get_probe import get_probe
+from typing import Any
+from datasets import Dataset
+from huggingface_hub import HfApi, get_token
+from scipy import sparse
+from torch.utils.data import DataLoader
+from transformers import (
+    EarlyStoppingCallback,
+    EvalPrediction,
+    Trainer,
+    TrainerCallback,
+    TrainerControl,
+    TrainerState,
+    TrainingArguments,
+)
+
+from .export_packaged_model import export_packaged_model_to_hub
+from .feature_path_selector import (
+    FeaturePathConfig,
+    FeatureSelection,
+    fit_feature_path_selection,
+    subsample_rows,
+)
+from .fit_hooks import fit_hooks_of
+from .get_probe import get_probe
+from .hybrid_probe import HybridProbe, HybridProbeConfig
+from .parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
+from .parallel_probe_batches import ParallelRunDataset
+from .parallel_probe_plan import (
+    build_seed_run_specs,
+    estimate_parallel_probe_plan,
+    max_linear_probe_runs_for_estimated_peak_budget,
+    max_linear_probe_runs_for_training_state_budget,
+    plan_parallel_probe_runs,
+    ParallelProbeRunSpec,
+)
+from ..calibration_report import calibration_report, supports_calibration_report
+from ..console_output import print_message
+from ..data.data_collators import (
+    EmbedsLabelsCollator,
+    PairEmbedsLabelsCollator,
+    PairInputIdsCollator,
+    StringLabelsCollator,
+)
+from ..data.dataset_classes import (
+    EmbedsLabelsDatasetFromDisk,
+    PairEmbedsLabelsDatasetFromDisk,
+    EmbedsLabelsDataset,
+    PairEmbedsLabelsDataset,
+    StringLabelDataset,
+    PairStringLabelDataset,
+    MultiEmbedsLabelsDatasetFromDisk,
+    MultiEmbedsLabelsDataset,
+    EmbeddingStandardizer,
+)
+from ..data.pair_features import pair_order_matters, pair_vector_halves
+from ..feature_cache import open_reader
+from ..metrics import UNDEFINED_METRIC, get_compute_metrics, get_compute_metrics_with_balanced
+from ..metrics_balanced import compute_balanced_regression_metrics
+# Through the package path in both import modes, so the run a sweep opened is the run its trials see.
+from ..run_tracking import reports_training_job, trainer_callbacks
+from ..seed_utils import set_global_seed
+from ..visualization.ci_plots import regression_ci_plot, classification_ci_plot
 
 
-def _unwrap_parallel_probe_for_gradient_clipping(model) -> ParallelLinearProbe:
+# One split's rows: a Hugging Face dataset, or a mapping from column name to values as the fold trainer builds.
+SplitData = Dataset | Mapping[str, Sequence[Any]]
+# One training run's model, validation metrics, test metrics, test predictions, and test labels.
+TrainOutcome = tuple[torch.nn.Module, dict[str, Any], dict[str, Any], np.ndarray | None, np.ndarray | None]
+# One sequential probe run: index, validation loss, test predictions, test labels, seed, trained model.
+RunResult = tuple[int, float, np.ndarray, np.ndarray, int, torch.nn.Module]
+
+
+def _joined_pair_vector(
+        embedding_a: torch.Tensor, embedding_b: torch.Tensor, pair_mode: str
+    ) -> torch.Tensor:
+    """One pair row from two pooled vectors, joined the way the probe will read it.
+
+    The collator joins the same two halves the dataset returns, so a transform fit here
+    sees exactly the row the probe is trained on.
+    """
+    # embedding_a: (f,) or (1, f), embedding_b: (f,) or (1, f)
+    half_a, half_b = pair_vector_halves(
+        embedding_a.reshape(1, -1), embedding_b.reshape(1, -1), pair_mode
+    )  # two of (1, f)
+    return torch.cat([half_a, half_b], dim=-1)  # (1, 2 * f)
+
+
+def _joined_columns(
+        parts: list[torch.Tensor], ppi: bool, pair_mode: str
+    ) -> torch.Tensor:
+    """One row from the pooled vector of each sequence column of a dataset."""
+    # parts: (1, f) per column
+    if ppi:
+        return _joined_pair_vector(parts[0], parts[1], pair_mode)  # (1, 2 * f)
+
+    return torch.cat(parts, dim=-1)  # (1, p * f)
+
+
+def _unwrap_parallel_probe_for_gradient_clipping(model: torch.nn.Module) -> ParallelLinearProbe:
     if isinstance(model, ParallelLinearProbe):
         return model
     model_dict = model.__dict__
@@ -96,7 +119,7 @@ def _unwrap_parallel_probe_for_gradient_clipping(model) -> ParallelLinearProbe:
     return original_model
 
 
-def _clip_parallel_probe_gradients_per_run(model, max_norm: float) -> List[float]:
+def _clip_parallel_probe_gradients_per_run(model: torch.nn.Module, max_norm: float) -> list[float]:
     assert max_norm > 0.0, "max_norm must be positive for per-run clipping."
     parallel_model = _unwrap_parallel_probe_for_gradient_clipping(model)
     first_param = next(parallel_model.parameters())
@@ -130,12 +153,12 @@ def _clip_parallel_probe_gradients_per_run(model, max_norm: float) -> List[float
 
 
 class ParallelProbePerRunGradientClipCallback(TrainerCallback):
-    def __init__(self, max_norm: float):
+    def __init__(self, max_norm: float) -> None:
         assert max_norm > 0.0, "parallel per-run gradient clipping requires a positive max norm."
         self.max_norm = max_norm
         self.last_pre_clip_norms = []
 
-    def on_pre_optimizer_step(self, args, state, control, **kwargs):
+    def on_pre_optimizer_step(self, args: TrainingArguments, state: TrainerState, control: TrainerControl, **kwargs: Any) -> TrainerControl:
         del args, state
         self.last_pre_clip_norms = _clip_parallel_probe_gradients_per_run(kwargs['model'], self.max_norm)
         return control
@@ -147,7 +170,7 @@ def _compute_eval_accumulation_steps(
     num_labels: int,
     task_type: str,
     output_multiplier: int = 1,
-) -> Optional[int]:
+) -> int | None:
     """Compute eval_accumulation_steps based on prediction size vs GPU memory.
 
     Returns None when all predictions fit comfortably on GPU (fastest path).
@@ -179,6 +202,74 @@ def _compute_eval_accumulation_steps(
     return max(1, int(budget_bytes / bytes_per_step))
 
 
+def _as_python_number(value: Any) -> float | None:
+    """The value as a float when it is one, otherwise None.
+
+    A numpy scalar needs naming here rather than relying on isinstance against the
+    builtins: np.float64 happens to subclass float, but np.float32 does not, so a metric
+    computed in single precision would fall out of the numeric branch, keep only its first
+    run's value, and then fail to serialize. Booleans are excluded because averaging a
+    flag across seeds says nothing.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        return None
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    return None
+
+
+def _as_builtin(value: Any) -> Any:
+    """Convert numpy scalars and arrays to their Python equivalents.
+
+    The results table is written as JSON, which has no encoder for a numpy type. A metric
+    that reaches the writer unconverted throws away a whole run's worth of GPU time at the
+    last step.
+    """
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, dict):
+        return {key: _as_builtin(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_as_builtin(item) for item in value]
+    return value
+
+
+def _selection_loss(valid_metrics: Mapping[str, Any]) -> float:
+    """The validation loss a multi-seed run is ranked by; test never decides which seed is kept."""
+    if 'eval_loss' not in valid_metrics:
+        raise ValueError(f"validation metrics carry no eval_loss to choose a seed by: {sorted(valid_metrics)}")
+    return float(valid_metrics['eval_loss'])
+
+
+def validate_probe_controls(arguments: Any) -> None:
+    """Reject invalid numeric controls before constructing a trainer or starting a fit."""
+    for name, minimum in (
+        ("num_epochs", 1), ("probe_batch_size", 1), ("probe_grad_accum", 1),
+        ("probe_max_steps", -1), ("probe_warmup_steps", 0), ("probe_eval_steps", 1),
+        ("num_workers", 0), ("patience", 1),
+    ):
+        value = getattr(arguments, name)
+        if type(value) is not int or value < minimum or (name == "probe_max_steps" and value == 0):
+            raise ValueError(f"invalid {name}: {value!r}")
+    for name in ("weight_decay", "probe_max_grad_norm", "early_stopping_threshold", "adam_beta1", "adam_beta2", "adam_epsilon"):
+        value = getattr(arguments, name)
+        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"invalid {name}: {value!r}")
+        if (name.startswith("adam_beta") and value >= 1) or (name == "adam_epsilon" and value == 0):
+            raise ValueError(f"invalid {name}: {value!r}")
+    if arguments.probe_precision not in {"float32", "bfloat16", "float16"}:
+        raise ValueError("invalid probe_precision")
+    if arguments.probe_eval_strategy not in {"auto", "epoch", "steps"}:
+        raise ValueError("invalid probe_eval_strategy")
+    accumulation = arguments.eval_accumulation_steps
+    if accumulation not in (None, "auto") and (
+        isinstance(accumulation, bool) or not str(accumulation).isdigit() or int(accumulation) < 1
+    ):
+        raise ValueError("eval_accumulation_steps must be auto, null, or a positive integer")
+
+
 @dataclass
 class TrainerArguments:
     def __init__(
@@ -190,15 +281,15 @@ class TrainerArguments:
             probe_grad_accum: int = 1,
             base_grad_accum: int = 1,
             lr: float = 1e-4,
-            probe_lr: Optional[float] = None,
+            probe_lr: float | None = None,
             lr_scheduler: str = 'cosine',
             optimizer: str = 'adamw_torch',
             weight_decay: float = 0.00,
             task_type: str = 'regression',
-            patience: int = 3,
-            base_num_epochs: Optional[int] = None,
-            base_patience: Optional[int] = None,
-            base_lr: Optional[float] = None,
+            patience: int = 5,
+            base_num_epochs: int | None = None,
+            base_patience: int | None = None,
+            base_lr: float | None = None,
             read_scaler: int = 100,
             save_model: bool = False,
             push_raw_probe: bool = False,
@@ -212,10 +303,10 @@ class TrainerArguments:
             make_plots: bool = True,
             num_runs: int = 1,
             torch_compile: bool = True,
-            eval_accumulation_steps: Union[int, str] = "auto",
+            eval_accumulation_steps: int | str = "auto",
             balanced_regression_metrics: bool = True,
             balanced_weight_method: str = 'bin_inv',
-            balanced_bin_borders: Optional[List[float]] = None,
+            balanced_bin_borders: list[float] | None = None,
             balanced_n_resamples: int = 100,
             balanced_lds_bins: int = 100,
             balanced_lds_ks: int = 5,
@@ -223,14 +314,28 @@ class TrainerArguments:
             parallel_probe_runs: bool = False,
             parallel_probe_batch_mode: str = 'shared',
             parallel_probe_index_strategy: str = 'permutation',
-            parallel_probe_max_group_size: Optional[int] = None,
-            parallel_probe_training_state_budget_gb: Optional[float] = None,
-            parallel_probe_estimated_peak_budget_gb: Optional[float] = None,
+            parallel_probe_max_group_size: int | None = None,
+            parallel_probe_training_state_budget_gb: float | None = None,
+            parallel_probe_estimated_peak_budget_gb: float | None = None,
             parallel_probe_max_grad_norm: float = 0.0,
             parallel_probe_grad_clip_mode: str = 'global',
             parallel_probe_ensemble_average_mode: str = 'logits',
-            **kwargs
-    ):
+            probe_max_steps: int = -1,
+            probe_warmup_steps: int = 100,
+            probe_max_grad_norm: float = 1.0,
+            probe_precision: str = 'float32',
+            probe_eval_strategy: str = 'auto',
+            probe_eval_steps: int = 500,
+            early_stopping_threshold: float = 0.0,
+            adam_beta1: float = 0.9,
+            adam_beta2: float = 0.999,
+            adam_epsilon: float = 1e-8,
+            report_to: str = 'none',
+            wandb_project: str = 'Protify',
+            wandb_entity: str | None = None,
+            log_dir: str = 'logs',
+            **kwargs: Any
+    ) -> None:
         self.model_save_dir = model_save_dir
         self.num_epochs = num_epochs
         self.probe_batch_size = probe_batch_size
@@ -242,6 +347,21 @@ class TrainerArguments:
         self.lr_scheduler = lr_scheduler
         self.optimizer = optimizer
         self.weight_decay = weight_decay
+        self.probe_max_steps = probe_max_steps
+        self.probe_warmup_steps = probe_warmup_steps
+        self.probe_max_grad_norm = probe_max_grad_norm
+        self.probe_precision = probe_precision
+        self.probe_eval_strategy = probe_eval_strategy
+        self.probe_eval_steps = probe_eval_steps
+        self.early_stopping_threshold = early_stopping_threshold
+        self.adam_beta1 = adam_beta1
+        self.adam_beta2 = adam_beta2
+        self.adam_epsilon = adam_epsilon
+        # `wandb` opens a foundry.logging run per training job (run_tracking); the Trainer itself reports nowhere.
+        self.report_to = report_to
+        self.wandb_project = wandb_project
+        self.wandb_entity = wandb_entity
+        self.log_dir = log_dir
         self.task_type = task_type
         self.patience = patience
         self.base_num_epochs = base_num_epochs
@@ -304,7 +424,8 @@ class TrainerArguments:
         self.num_labels = 2
         self.eval_output_multiplier = 1
 
-    def __call__(self, probe: Optional[bool] = True):
+    def __call__(self, probe: bool | None = True) -> TrainingArguments:
+        validate_probe_controls(self)
         batch_size = self.probe_batch_size if probe else self.base_batch_size
         grad_accum = self.probe_grad_accum if probe else self.base_grad_accum
         num_epochs = self.num_epochs if (probe or self.base_num_epochs is None) else self.base_num_epochs
@@ -326,13 +447,20 @@ class TrainerArguments:
                 'eval_strategy': 'epoch',
                 'save_strategy': 'epoch',
             }
+        if probe and self.probe_eval_strategy != 'auto':
+            eval_strats = {
+                'eval_strategy': self.probe_eval_strategy,
+                'save_strategy': self.probe_eval_strategy,
+                'eval_steps': self.probe_eval_steps,
+                'save_steps': self.probe_eval_steps,
+            }
 
         if '/' in self.model_save_dir:
             save_dir = self.model_save_dir.split('/')[-1]
         else:
             save_dir = self.model_save_dir
 
-        warmup_steps = 100 if probe else 1000
+        warmup_steps = self.probe_warmup_steps if probe else 1000
 
         if self.eval_accumulation_steps == "auto":
             eval_accum = _compute_eval_accumulation_steps(
@@ -343,7 +471,7 @@ class TrainerArguments:
                 output_multiplier=self.eval_output_multiplier,
             )
         else:
-            eval_accum = self.eval_accumulation_steps
+            eval_accum = int(self.eval_accumulation_steps) if self.eval_accumulation_steps is not None else None
 
         return TrainingArguments(
             output_dir=save_dir,
@@ -355,6 +483,11 @@ class TrainerArguments:
             lr_scheduler_type=self.lr_scheduler,
             optim=self.optimizer,
             weight_decay=float(self.weight_decay),
+            adam_beta1=self.adam_beta1,
+            adam_beta2=self.adam_beta2,
+            adam_epsilon=self.adam_epsilon,
+            max_steps=self.probe_max_steps if probe else -1,
+            max_grad_norm=self.probe_max_grad_norm if probe else 1.0,
             warmup_steps=warmup_steps,
             save_total_limit=3,
             logging_steps=1000,
@@ -366,17 +499,35 @@ class TrainerArguments:
             label_names=['labels'],
             dataloader_num_workers=self.num_workers,
             dataloader_prefetch_factor=2 if self.num_workers > 0 else None,
-            # Explicitly disable mixed precision training to prevent automatic fp16 conversion
-            fp16=False,
-            bf16=False,
+            fp16=probe and self.probe_precision == 'float16',
+            bf16=probe and self.probe_precision == 'bfloat16',
             torch_compile=self.torch_compile,
             eval_accumulation_steps=eval_accum,
             **eval_strats
         )
 
+    def for_datasets(
+            self, probe_args: Any, train_dataset: Any, valid_dataset: Any, test_dataset: Any, *, probe: bool = True
+    ) -> TrainingArguments:
+        """Resolve the same training arguments for planning, execution, and resume checks."""
+        self.train_data_size = fit_hooks_of(train_dataset).draws_per_epoch(train_dataset)
+        self.num_labels = probe_args.num_labels
+        self.eval_dataset_size = len(valid_dataset) if valid_dataset is not None else len(test_dataset)
+        self.eval_output_multiplier = 1
+        arguments = self(probe=probe)
+        if getattr(train_dataset, 'label_masks', None) is not None:
+            arguments.label_names = ['labels', 'label_mask']
+            arguments.metric_for_best_model = 'eval_observed_loss'
+        return arguments
+
+    def early_stopping(self, *, probe: bool = True) -> dict[str, int | float]:
+        """The callback settings, including its absolute improvement threshold."""
+        patience = self.patience if probe or self.base_patience is None else self.base_patience
+        return {'early_stopping_patience': patience, 'early_stopping_threshold': self.early_stopping_threshold}
+
 
 class TrainerMixin:
-    def __init__(self, trainer_args: Optional[TrainerArguments] = None):
+    def __init__(self, trainer_args: TrainerArguments | None = None) -> None:
         self.trainer_args = trainer_args
 
     def _format_metric_value(self, value: Any) -> str:
@@ -384,7 +535,7 @@ class TrainerMixin:
             return f"{value:.6f}"
         return str(value)
 
-    def _format_metrics_markdown(self, metrics: Dict[str, Any]) -> str:
+    def _format_metrics_markdown(self, metrics: dict[str, Any]) -> str:
         if metrics is None or len(metrics) == 0:
             return "- No metrics recorded."
         lines = []
@@ -398,11 +549,11 @@ class TrainerMixin:
             data_name: str,
             model_name: str,
             log_id: str,
-            train_dataset,
-            valid_dataset,
-            test_dataset,
-            valid_metrics: Dict[str, Any],
-            test_metrics: Dict[str, Any],
+            train_dataset: SplitData,
+            valid_dataset: SplitData,
+            test_dataset: SplitData,
+            valid_metrics: dict[str, Any],
+            test_metrics: dict[str, Any],
         ) -> str:
         train_size = len(train_dataset)
         valid_size = "N/A" if valid_dataset is None else str(len(valid_dataset))
@@ -420,9 +571,22 @@ tags: []
 
 Fine-tuned with Protify.
 
+## How to use
+
+A packaged repository holds the backbone recipe and the probe, and loads with Transformers. Its
+module imports Protify, so install it first (`pip install protify`, or
+`pip install git+https://github.com/Synthyra/Protify`).
+
+```python
+from transformers import AutoModel, AutoTokenizer
+
+model = AutoModel.from_pretrained("{repo_id}", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained("{repo_id}")
+```
+
 ## About Protify
 
-Protify is an open source platform designed to simplify and democratize workflows for chemical language models. With Protify, deep learning models can be trained to predict chemical properties without requiring extensive coding knowledge or computational resources.
+Protify is an open source platform designed to simplify and democratize workflows for protein and chemical language models. With Protify, deep learning models can be trained to predict properties without requiring extensive coding knowledge or computational resources.
 
 ### Why Protify?
 
@@ -454,23 +618,26 @@ Protify is an open source platform designed to simplify and democratize workflow
 {test_metrics_text}
 """
 
-    def _extract_prediction_array(self, predictions):
+    def _extract_prediction_array(self, predictions: np.ndarray | tuple[np.ndarray, ...]) -> np.ndarray:
+        # predictions: (n, r, c) or a tuple whose first entry is (n, r, c)
         if isinstance(predictions, tuple):
-            return predictions[0]
-        return predictions
+            return predictions[0]  # (n, r, c)
+        return predictions  # (n, r, c)
 
-    def _extract_label_array(self, label_ids):
+    def _extract_label_array(self, label_ids: np.ndarray | tuple[np.ndarray, ...]) -> np.ndarray:
+        # label_ids: (n,) or (n, c), or a tuple whose second entry is
         if isinstance(label_ids, tuple):
-            return label_ids[1]
-        return label_ids
+            return label_ids[1]  # (n,) or (n, c)
+        return label_ids  # (n,) or (n, c)
 
     def _parallel_probe_labels_for_run(
             self,
-            labels,
+            labels: np.ndarray,
             run_idx: int,
             num_runs: int,
-            num_labels: Optional[int] = None,
-        ):
+            num_labels: int | None = None,
+        ) -> np.ndarray:
+        # labels: (n,), (n, c), (n, r) or (n, r, c)
         task_type = self.trainer_args.task_type
         if num_labels is None:
             num_labels = self.probe_args.num_labels
@@ -484,16 +651,16 @@ Protify is an open source platform designed to simplify and democratize workflow
                     assert labels.shape[-1] == 1, (
                         f"Singlelabel run-specific labels must end in dim 1, got shape {tuple(labels.shape)}."
                     )
-                    return labels[:, run_idx, 0]
-                return labels[:, run_idx]
-            return labels
+                    return labels[:, run_idx, 0]  # (n,)
+                return labels[:, run_idx]  # (n,)
+            return labels  # (n,) or (n, c), as given
 
         labels_have_explicit_run_dimension = (
             labels.ndim == 3
             and labels.shape[1] == num_runs
         )
         if labels_have_explicit_run_dimension:
-            return labels[:, run_idx, :]
+            return labels[:, run_idx, :]  # (n, c)
 
         labels_have_scalar_run_dimension = (
             labels.ndim == 2
@@ -501,16 +668,17 @@ Protify is an open source platform designed to simplify and democratize workflow
             and num_labels == 1
         )
         if labels_have_scalar_run_dimension:
-            return labels[:, run_idx]
+            return labels[:, run_idx]  # (n,)
 
-        return labels
+        return labels  # (n,) or (n, c), as given
 
     def _parallel_probe_losses_by_run(
             self,
             logits: np.ndarray,
             labels: np.ndarray,
             task_type: str,
-        ) -> List[float]:
+        ) -> list[float]:
+        # logits: (n, r, c) for r parallel runs, labels: (n,), (n, c), (n, r) or (n, r, c)
         logits_t = torch.as_tensor(logits)
         labels_t = torch.as_tensor(labels)
         num_runs = logits_t.shape[1]
@@ -553,26 +721,28 @@ Protify is an open source platform designed to simplify and democratize workflow
             logits: np.ndarray,
             task_type: str,
         ) -> np.ndarray:
+        # logits: (n, r, c) for r parallel runs
         if task_type == 'singlelabel':
             shifted = logits - logits.max(axis=-1, keepdims=True)
             exp_logits = np.exp(shifted)
             probabilities = exp_logits / exp_logits.sum(axis=-1, keepdims=True)
             clipped = np.clip(probabilities.mean(axis=1), 1e-12, 1.0)
-            return np.log(clipped).astype(np.float32)
+            return np.log(clipped).astype(np.float32)  # (n, c)
         if task_type == 'multilabel':
             probabilities = 1.0 / (1.0 + np.exp(-logits))
             clipped = np.clip(probabilities.mean(axis=1), 1e-12, 1.0 - 1e-12)
-            return np.log(clipped / (1.0 - clipped)).astype(np.float32)
-        return logits.mean(axis=1).astype(np.float32)
+            return np.log(clipped / (1.0 - clipped)).astype(np.float32)  # (n, c)
+        return logits.mean(axis=1).astype(np.float32)  # (n, c)
 
     def _parallel_probe_ensemble_predictions(
             self,
             logits: np.ndarray,
             task_type: str,
         ) -> np.ndarray:
+        # logits: (n, r, c) for r parallel runs
         if self.trainer_args.parallel_probe_ensemble_average_mode == 'probabilities':
-            return self._parallel_probe_probability_averaged_predictions(logits, task_type)
-        return logits.mean(axis=1).astype(np.float32)
+            return self._parallel_probe_probability_averaged_predictions(logits, task_type)  # (n, c)
+        return logits.mean(axis=1).astype(np.float32)  # (n, c)
 
     def _parallel_probe_prediction_loss(
             self,
@@ -580,6 +750,7 @@ Protify is an open source platform designed to simplify and democratize workflow
             labels: np.ndarray,
             task_type: str,
         ) -> float:
+        # predictions: (n, c), labels: (n,) or (n, c)
         predictions_t = torch.as_tensor(predictions)
         labels_t = torch.as_tensor(labels)
         if task_type == 'singlelabel':
@@ -616,7 +787,8 @@ Protify is an open source platform designed to simplify and democratize workflow
             logits: np.ndarray,
             labels: np.ndarray,
             split_name: str,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
+        # logits: (n, r, c) for r parallel runs, labels: (n,) or (n, c)
         task_type = self.trainer_args.task_type
         ensemble_predictions = self._parallel_probe_ensemble_predictions(logits, task_type)
         compute_metrics = get_compute_metrics(task_type, tokenwise=False)
@@ -634,12 +806,12 @@ Protify is an open source platform designed to simplify and democratize workflow
 
     def _seed_ensemble_metrics_from_run_results(
             self,
-            run_results,
+            run_results: list[RunResult],
             split_name: str,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
         predictions_by_run = []
         reference_labels = None
-        for _run_idx, _test_loss, y_pred, y_true, _seed, _model in run_results:
+        for _run_idx, _valid_loss, y_pred, y_true, _seed, _model in run_results:
             predictions = np.asarray(y_pred, dtype=np.float32)
             if predictions.ndim == 1:
                 predictions = predictions.reshape(-1, 1)
@@ -667,7 +839,8 @@ Protify is an open source platform designed to simplify and democratize workflow
             labels: np.ndarray,
             data_name: str,
             split_name: str,
-        ) -> List[Dict[str, Any]]:
+        ) -> list[dict[str, Any]]:
+        # logits: (n, r, c) for r parallel runs, labels: (n,), (n, c), (n, r) or (n, r, c)
         task_type = self.trainer_args.task_type
         compute_metrics = get_compute_metrics(task_type, tokenwise=False)
         losses = self._parallel_probe_losses_by_run(logits, labels, task_type)
@@ -726,7 +899,8 @@ Protify is an open source platform designed to simplify and democratize workflow
             labels: np.ndarray,
             data_name: str,
             split_name: str,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
+        # logits: (n, r, c) for r parallel runs, labels: (n,), (n, c), (n, r) or (n, r, c)
         metrics_by_run = self._parallel_probe_metrics_by_run(logits, labels, data_name, split_name)
         flat_metrics = {}
         split_prefix = f"{split_name}_"
@@ -738,8 +912,8 @@ Protify is an open source platform designed to simplify and democratize workflow
                 flat_metrics[f"run_{run_idx}_{metric_name}"] = value
         return self._parallel_probe_json_safe(flat_metrics)
 
-    def _parallel_probe_compute_metrics(self, data_name: str, split_name: str):
-        def compute_metrics(eval_prediction: EvalPrediction) -> Dict[str, Any]:
+    def _parallel_probe_compute_metrics(self, data_name: str, split_name: str) -> Callable[[EvalPrediction], dict[str, Any]]:
+        def compute_metrics(eval_prediction: EvalPrediction) -> dict[str, Any]:
             logits = np.asarray(self._extract_prediction_array(eval_prediction.predictions), dtype=np.float32)
             labels = np.asarray(self._extract_label_array(eval_prediction.label_ids))
             return self._parallel_probe_flat_metrics_by_run(logits, labels, data_name, split_name)
@@ -774,7 +948,7 @@ Protify is an open source platform designed to simplify and democratize workflow
             f"index_strategy={self.trainer_args.parallel_probe_index_strategy}"
         )
 
-    def _parallel_probe_train_dataset(self, train_dataset, run_seeds: List[int], ppi: bool):
+    def _parallel_probe_train_dataset(self, train_dataset: SplitData, run_seeds: list[int], ppi: bool) -> SplitData | ParallelRunDataset:
         if self.trainer_args.parallel_probe_batch_mode == 'shared':
             return train_dataset
         assert not ppi, "run_specific parallel probe batches currently support pooled non-PPI datasets only."
@@ -790,7 +964,7 @@ Protify is an open source platform designed to simplify and democratize workflow
             return self.trainer_args.parallel_probe_max_grad_norm
         return 0.0
 
-    def _parallel_probe_callbacks(self):
+    def _parallel_probe_callbacks(self) -> list[TrainerCallback]:
         callbacks = [EarlyStoppingCallback(early_stopping_patience=self.trainer_args.patience)]
         if (
                 self.trainer_args.parallel_probe_grad_clip_mode == 'per_run'
@@ -801,7 +975,7 @@ Protify is an open source platform designed to simplify and democratize workflow
             )
         return callbacks
 
-    def _unwrap_parallel_probe_model(self, model) -> ParallelLinearProbe:
+    def _unwrap_parallel_probe_model(self, model: torch.nn.Module) -> ParallelLinearProbe:
         if isinstance(model, ParallelLinearProbe):
             return model
         model_dict = model.__dict__
@@ -814,7 +988,7 @@ Protify is an open source platform designed to simplify and democratize workflow
         )
         return original_model
 
-    def _parallel_probe_json_safe(self, value):
+    def _parallel_probe_json_safe(self, value: Any) -> Any:
         if isinstance(value, dict):
             return {
                 str(key): self._parallel_probe_json_safe(item)
@@ -834,9 +1008,9 @@ Protify is an open source platform designed to simplify and democratize workflow
 
     def _parallel_probe_effective_max_group_size(
             self,
-            run_specs,
+            run_specs: Sequence[ParallelProbeRunSpec],
             train_dataset_size: int,
-        ) -> Optional[int]:
+        ) -> int | None:
         cap_metadata = self._parallel_probe_group_size_cap_metadata(
             run_specs,
             train_dataset_size=train_dataset_size,
@@ -847,9 +1021,9 @@ Protify is an open source platform designed to simplify and democratize workflow
 
     def _parallel_probe_group_size_cap_metadata(
             self,
-            run_specs,
+            run_specs: Sequence[ParallelProbeRunSpec],
             train_dataset_size: int,
-        ) -> Dict[str, Any]:
+        ) -> dict[str, Any]:
         explicit_max_group_size = self.trainer_args.parallel_probe_max_group_size
         candidate_group_sizes = []
         explicit_group_size = None
@@ -905,18 +1079,19 @@ Protify is an open source platform designed to simplify and democratize workflow
 
     def _save_parallel_best_probe_to_hub(
             self,
-            best_model,
-            train_dataset,
-            valid_dataset,
-            test_dataset,
-            valid_metrics: Dict[str, Any],
-            test_metrics: Dict[str, Any],
-            tokenizer,
+            best_model: torch.nn.Module,
+            train_dataset: SplitData,
+            valid_dataset: SplitData,
+            test_dataset: SplitData,
+            valid_metrics: dict[str, Any],
+            test_metrics: dict[str, Any],
+            tokenizer: Any,
             log_id: str,
             model_name: str,
             data_name: str,
-            source_model_name: Optional[str],
+            source_model_name: str | None,
             ppi: bool,
+            feature_selection: FeatureSelection | None = None,
         ) -> None:
         try:
             if source_model_name is None:
@@ -927,10 +1102,6 @@ Protify is an open source platform designed to simplify and democratize workflow
                 return
 
             repo_id = self.trainer_args.push_raw_probe_repo or f"{hf_username}/{data_name}_{model_name}_{log_id}"
-            if self.full_args.hf_token is None:
-                hf_token = os.environ["HF_TOKEN"] if "HF_TOKEN" in os.environ else None
-            else:
-                hf_token = self.full_args.hf_token
 
             model_card = self._build_model_card(
                 repo_id=repo_id,
@@ -945,12 +1116,8 @@ Protify is an open source platform designed to simplify and democratize workflow
             )
 
             if self.trainer_args.push_raw_probe:
-                if hf_token is not None:
-                    best_model.push_to_hub(repo_id, private=True, token=hf_token)
-                    api = HfApi(token=hf_token)
-                else:
-                    best_model.push_to_hub(repo_id, private=True)
-                    api = HfApi()
+                best_model.push_to_hub(repo_id, private=True)
+                api = HfApi()
                 api.upload_file(
                     path_or_fileobj=model_card.encode("utf-8"),
                     path_in_repo="README.md",
@@ -973,21 +1140,19 @@ Protify is an open source platform designed to simplify and democratize workflow
                         repo_id=repo_id,
                         model_card=model_card,
                         ppi=ppi,
+                        pair_feature_mode=self._pair_feature_mode,
                         private=True,
-                        hf_token=hf_token,
+                        feature_selection=feature_selection,
+                        embedding_standardizer=getattr(train_dataset, 'embedding_standardizer', None),
                     )
                     print_message(export_message)
-                except Exception as packaged_error:
+                except Exception as packaged_error:  # noqa: broad-except best-effort Hub export: the failure is printed and the direct push follows
                     print_message(f"Warning: packaged export failed for {repo_id}: {packaged_error}")
 
                 if not packaged_export_succeeded:
                     print_message(f"Falling back to direct best parallel probe push_to_hub for {repo_id}")
-                    if hf_token is not None:
-                        best_model.push_to_hub(repo_id, private=True, token=hf_token)
-                        api = HfApi(token=hf_token)
-                    else:
-                        best_model.push_to_hub(repo_id, private=True)
-                        api = HfApi()
+                    best_model.push_to_hub(repo_id, private=True)
+                    api = HfApi()
                     api.upload_file(
                         path_or_fileobj=model_card.encode("utf-8"),
                         path_in_repo="README.md",
@@ -996,27 +1161,30 @@ Protify is an open source platform designed to simplify and democratize workflow
                     )
 
             print_message(f"Successfully saved best parallel probe to HuggingFace Hub: {repo_id}")
-        except Exception as e:
+        except Exception as e:  # noqa: broad-except a failed Hub upload is printed with its traceback and the run goes on
             import traceback
             error_trace = traceback.format_exc()
             print_message(f"Error saving best parallel probe to HuggingFace Hub: {e}")
+            if get_token() is None:
+                print_message("No Hugging Face token found: run `hf auth login` once, or set HF_TOKEN.")
             print_message(f"Error traceback: {error_trace}")
             print_message(f"save_model flag: {self.trainer_args.save}")
 
     def _train_parallel_linear_probe_runs(
             self,
-            train_dataset,
-            valid_dataset,
-            test_dataset,
-            data_collator,
-            tokenizer,
-            log_id,
-            model_name,
-            data_name,
-            source_model_name: Optional[str] = None,
+            train_dataset: SplitData,
+            valid_dataset: SplitData,
+            test_dataset: SplitData,
+            data_collator: Any,
+            tokenizer: Any,
+            log_id: str,
+            model_name: str,
+            data_name: str,
+            source_model_name: str | None = None,
             ppi: bool = False,
             skip_plot: bool = False,
-        ):
+            feature_selection: FeatureSelection | None = None,
+        ) -> TrainOutcome:
         assert valid_dataset is not None, "Parallel probe runs require a validation dataset for early stopping."
         task_type = self.trainer_args.task_type
         base_seed = self.trainer_args.seed
@@ -1091,7 +1259,8 @@ Protify is an open source platform designed to simplify and democratize workflow
             best_run_idx = -1
             best_run_id = ""
             best_seed = base_seed
-            best_loss = float('inf')
+            best_valid_loss = float('inf')
+            best_test_loss = None
             group_output_dirs = []
             group_runtime_records = []
             parallel_run_records = []
@@ -1143,7 +1312,7 @@ Protify is an open source platform designed to simplify and democratize workflow
 
                 train_output = trainer.train()
                 train_metrics = train_output.metrics
-                train_runtime = train_metrics['train_runtime'] if 'train_runtime' in train_metrics else 0.0
+                train_runtime = train_metrics.get('train_runtime', 0.0)
                 total_train_runtime += train_runtime
                 group_estimate = parallel_plan_estimate.group_estimates[group_idx]
                 group_runtime_records.append(
@@ -1202,10 +1371,7 @@ Protify is an open source platform designed to simplify and democratize workflow
                 for local_run_idx, test_metrics in enumerate(group_test_metrics):
                     valid_metrics = group_valid_metrics[local_run_idx]
                     test_loss = test_metrics['test_loss']
-                    if 'eval_loss' in valid_metrics:
-                        valid_loss = valid_metrics['eval_loss']
-                    else:
-                        valid_loss = None
+                    valid_loss = valid_metrics.get('eval_loss')
                     run_spec = parallel_group.runs[local_run_idx]
                     global_run_idx = run_spec.seed - base_seed
                     assert 0 <= global_run_idx < self.trainer_args.num_runs, (
@@ -1227,8 +1393,11 @@ Protify is an open source platform designed to simplify and democratize workflow
                             'test_loss': test_loss,
                         }
                     )
-                    if test_loss < best_loss:
-                        best_loss = test_loss
+                    # The kept seed is chosen on validation, never on test, which it is then scored on.
+                    assert valid_loss is not None, "Parallel probe validation produced no eval_loss to choose a seed by."
+                    if valid_loss < best_valid_loss:
+                        best_valid_loss = valid_loss
+                        best_test_loss = test_loss
                         best_run_idx = global_run_idx
                         best_run_id = run_spec.run_id
                         best_seed = run_spec.seed
@@ -1354,13 +1523,14 @@ Protify is an open source platform designed to simplify and democratize workflow
             aggregated_test['parallel_probe_run_records'] = self._parallel_probe_json_safe(parallel_run_records)
             aggregated_test['parallel_probe_valid_run_metrics'] = self._parallel_probe_json_safe(all_valid_metrics)
             aggregated_test['parallel_probe_test_run_metrics'] = self._parallel_probe_json_safe(all_test_metrics)
-            aggregated_test['parallel_probe_best_selection_metric'] = 'test_loss'
+            aggregated_test['parallel_probe_best_selection_metric'] = 'eval_loss'
             aggregated_test['parallel_probe_best_run_index'] = best_run_idx
             aggregated_test['parallel_probe_best_run_number'] = best_run_idx + 1
             aggregated_test['parallel_probe_best_run_id'] = best_run_id
             aggregated_test['parallel_probe_best_seed'] = best_seed
-            aggregated_test['parallel_probe_best_test_loss'] = best_loss
-            print_message(f"Best parallel run: {best_run_idx + 1} (seed={best_seed}, test_loss={best_loss:.4f})")
+            aggregated_test['parallel_probe_best_valid_loss'] = best_valid_loss
+            aggregated_test['parallel_probe_best_test_loss'] = best_test_loss
+            print_message(f"Best parallel run by validation loss: {best_run_idx + 1} (seed={best_seed}, eval_loss={best_valid_loss:.4f})")
 
             if self.trainer_args.make_plots and self.trainer_args.plots_dir is not None and not skip_plot:
                 output_dir = os.path.join(self.trainer_args.plots_dir, log_id)
@@ -1386,6 +1556,7 @@ Protify is an open source platform designed to simplify and democratize workflow
                     data_name=data_name,
                     source_model_name=source_model_name,
                     ppi=ppi,
+                                    feature_selection=feature_selection,
                 )
             return best_model, aggregated_valid, aggregated_test, best_y_pred, best_y_true
         finally:
@@ -1393,43 +1564,55 @@ Protify is an open source platform designed to simplify and democratize workflow
 
     def _train(
             self,
-            model,
-            train_dataset,
-            valid_dataset,
-            test_dataset,
-            data_collator,
-            tokenizer,
-            log_id,
-            model_name,
-            data_name,
-            source_model_name: Optional[str] = None,
+            model: torch.nn.Module,
+            train_dataset: SplitData,
+            valid_dataset: SplitData,
+            test_dataset: SplitData,
+            data_collator: Any,
+            tokenizer: Any,
+            log_id: str,
+            model_name: str,
+            data_name: str,
+            source_model_name: str | None = None,
             ppi: bool = False,
-            probe: Optional[bool] = True,
+            probe: bool | None = True,
             skip_plot: bool = False,
-        ):
+            feature_selection: FeatureSelection | None = None,
+            evaluate_test: bool = True,
+        ) -> TrainOutcome:
         task_type = self.trainer_args.task_type
         tokenwise = self.probe_args.tokenwise
-        compute_metrics = get_compute_metrics(task_type, tokenwise=tokenwise)
-        self.trainer_args.train_data_size = len(train_dataset)
-        self.trainer_args.num_labels = self.probe_args.num_labels
-        self.trainer_args.eval_dataset_size = len(valid_dataset) if valid_dataset is not None else len(test_dataset)
-        self.trainer_args.eval_output_multiplier = 1
-        hf_trainer_args = self.trainer_args(probe=probe)
-        if probe or self.trainer_args.base_patience is None:
-            early_stopping_patience = self.trainer_args.patience
-        else:
-            early_stopping_patience = self.trainer_args.base_patience
-        trainer = Trainer(
+        if test_dataset is None and evaluate_test:
+            raise ValueError('evaluating the test split requires its dataset')
+        # A fit that never loaded the test split passes none and sets evaluate_test False.
+        splits = (train_dataset, valid_dataset) if test_dataset is None else (train_dataset, valid_dataset, test_dataset)
+        masked_splits = [getattr(dataset, 'label_masks', None) is not None for dataset in splits]
+        observed_labels = any(masked_splits)
+        if observed_labels and not all(masked_splits):
+            raise ValueError('explicit label masks must be present in train, validation, and test')
+        if observed_labels and task_type in ('regression', 'sigmoid_regression') and self.trainer_args.balanced_regression_metrics:
+            raise ValueError('balanced regression metrics need observed-label weights before masked training')
+        hooks = fit_hooks_of(train_dataset)
+        # A multilabel release with observed labels selects its checkpoint on the observed loss alone. The complete
+        # metrics run over every observed entry of the split, which no training loop can afford at a vocabulary of
+        # thousands, and the release computes them from the saved predictions.
+        selection_only = observed_labels and task_type == 'multilabel' and hooks.reserves_test
+        compute_metrics = get_compute_metrics(task_type, tokenwise=tokenwise, observed_labels=observed_labels, selection_only=selection_only)
+        hf_trainer_args = self.trainer_args.for_datasets(self.probe_args, train_dataset, valid_dataset, test_dataset, probe=probe)
+        stopping = self.trainer_args.early_stopping(probe=probe)
+        hooks.before_training(train_dataset, hf_trainer_args, self.probe_args, stopping)
+        trainer = hooks.build_trainer(
             model=model,
             args=hf_trainer_args,
             train_dataset=train_dataset,
             eval_dataset=valid_dataset,
             data_collator=data_collator,
             compute_metrics=compute_metrics,
-            callbacks=[EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)]
+            callbacks=[hooks.stopping_callback(stopping), *trainer_callbacks()],
         )
         trainer.can_return_loss = True
-        metrics = trainer.evaluate(test_dataset)
+        initial_dataset = valid_dataset if not evaluate_test or hooks.reserves_test else test_dataset
+        metrics = trainer.evaluate(initial_dataset)
         print_message(f'Initial metrics: {metrics}')
 
         bw_store = self.balanced_weights if 'balanced_weights' in self.__dict__ else None
@@ -1449,10 +1632,20 @@ Protify is an open source platform designed to simplify and democratize workflow
             )
 
         train_output = trainer.train()
+        hooks.after_training(trainer, train_dataset)
         train_runtime = train_output.metrics.get('train_runtime', 0.0)
+        # A probe with a posterior, such as a Gaussian process head, fits it in one pass over the
+        # training data with the restored weights, so everything below reads the posterior predictive.
+        if hasattr(trainer.model, 'fit_posterior'):
+            trainer.model.fit_posterior(hooks.posterior_rows(trainer, train_dataset))
 
         valid_metrics = trainer.evaluate(valid_dataset)
         print_message(f'Final validation metrics: {valid_metrics}')
+
+        if not evaluate_test:
+            # A fitting stage keeps the selected head, but does not expose held-out metrics,
+            # plots, model cards, or predictions before the suite freezes its selection.
+            return trainer.model, valid_metrics, {'training_time_seconds': train_runtime}, None, None
 
         y_pred_valid, y_true_valid, _vm_raw = trainer.predict(valid_dataset)
         if isinstance(y_pred_valid, tuple):
@@ -1465,6 +1658,7 @@ Protify is an open source platform designed to simplify and democratize workflow
         if balanced_active:
             trainer.compute_metrics = compute_metrics
         y_pred, y_true, test_metrics = trainer.predict(test_dataset)
+        test_label_mask = y_true[1] if observed_labels else None
         if isinstance(y_pred, tuple):
             y_pred = y_pred[0]
         if isinstance(y_true, tuple):
@@ -1508,7 +1702,7 @@ Protify is an open source platform designed to simplify and democratize workflow
         test_metrics['training_time_seconds'] = train_runtime
         print_message(f'y_pred: {y_pred.shape}\ny_true: {y_true.shape}\nFinal test metrics: \n{test_metrics}\n')
 
-        if self.trainer_args.make_plots and self.trainer_args.plots_dir is not None and not skip_plot:
+        if self.trainer_args.make_plots and self.trainer_args.plots_dir is not None and not skip_plot and not observed_labels:
             output_dir = os.path.join(self.trainer_args.plots_dir, log_id)
             os.makedirs(output_dir, exist_ok=True)
             save_path = os.path.join(output_dir, f"{data_name}_{model_name}_{log_id}.png")
@@ -1529,9 +1723,6 @@ Protify is an open source platform designed to simplify and democratize workflow
                     print_message("Warning: hf_username is not set. Cannot save model to HuggingFace Hub.")
                 else:
                     repo_id = self.trainer_args.push_raw_probe_repo or f"{hf_username}/{data_name}_{model_name}_{log_id}"
-                    hf_token = self.full_args.hf_token
-                    if hf_token is None:
-                        hf_token = os.environ.get("HF_TOKEN")
 
                     model_card = self._build_model_card(
                         repo_id=repo_id,
@@ -1547,12 +1738,8 @@ Protify is an open source platform designed to simplify and democratize workflow
 
                     if self.trainer_args.push_raw_probe and (probe or isinstance(trainer.model, HybridProbe)):
                         probe_to_push = trainer.model.probe if isinstance(trainer.model, HybridProbe) else trainer.model
-                        if hf_token is not None:
-                            probe_to_push.push_to_hub(repo_id, private=True, token=hf_token)
-                            api = HfApi(token=hf_token)
-                        else:
-                            probe_to_push.push_to_hub(repo_id, private=True)
-                            api = HfApi()
+                        probe_to_push.push_to_hub(repo_id, private=True)
+                        api = HfApi()
                         api.upload_file(
                             path_or_fileobj=model_card.encode("utf-8"),
                             path_in_repo="README.md",
@@ -1573,21 +1760,19 @@ Protify is an open source platform designed to simplify and democratize workflow
                                     repo_id=repo_id,
                                     model_card=model_card,
                                     ppi=ppi,
+                                    pair_feature_mode=self._pair_feature_mode,
                                     private=True,
-                                    hf_token=hf_token,
+                                    feature_selection=feature_selection,
+                                    embedding_standardizer=getattr(train_dataset, 'embedding_standardizer', None),
                                 )
                                 print_message(export_message)
-                            except Exception as packaged_error:
+                            except Exception as packaged_error:  # noqa: broad-except best-effort Hub export: the failure is printed and the direct push follows
                                 print_message(f"Warning: packaged export failed for {repo_id}: {packaged_error}")
 
                         if not packaged_export_succeeded:
                             print_message(f"Falling back to direct model push_to_hub for {repo_id}")
-                            if hf_token is not None:
-                                trainer.model.push_to_hub(repo_id, private=True, token=hf_token)
-                                api = HfApi(token=hf_token)
-                            else:
-                                trainer.model.push_to_hub(repo_id, private=True)
-                                api = HfApi()
+                            trainer.model.push_to_hub(repo_id, private=True)
+                            api = HfApi()
                             api.upload_file(
                                 path_or_fileobj=model_card.encode("utf-8"),
                                 path_in_repo="README.md",
@@ -1595,20 +1780,25 @@ Protify is an open source platform designed to simplify and democratize workflow
                                 repo_type="model",
                             )
                     print_message(f"Successfully saved model to HuggingFace Hub: {repo_id}")
-            except Exception as e:
+            except Exception as e:  # noqa: broad-except a failed Hub upload is printed with its traceback and the run goes on
                 import traceback
                 error_trace = traceback.format_exc()
                 print_message(f"Error saving model to HuggingFace Hub: {e}")
+                if get_token() is None:
+                    print_message("No Hugging Face token found: run `hf auth login` once, or set HF_TOKEN.")
                 print_message(f"Error traceback: {error_trace}")
                 print_message(f"save_model flag: {self.trainer_args.save}")
 
         model = trainer.model.cpu()
         trainer.accelerator.free_memory()
         torch.cuda.empty_cache()
+        # Masked runs retain the mask beside their target values for downstream callers.
+        if observed_labels:
+            y_true = (y_true, test_label_mask)
         return model, valid_metrics, test_metrics, y_pred, y_true
 
-    def _aggregate_metrics(self, metrics_list: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Aggregate metrics across multiple runs, computing mean ± std for each metric."""
+    def _aggregate_metrics(self, metrics_list: list[dict[str, Any]]) -> dict[str, Any]:
+        """Aggregate metrics across multiple runs, computing mean and std for each metric."""
         if not metrics_list:
             return {}
         
@@ -1622,11 +1812,14 @@ Protify is an open source platform designed to simplify and democratize workflow
             values = [m.get(key) for m in metrics_list if key in m and m[key] is not None]
             if not values:
                 continue
-            
-            # Check if all values are numeric
-            if all(isinstance(v, (int, float)) for v in values):
-                mean_val = np.mean(values)
-                std_val = np.std(values)
+
+            numbers = [_as_python_number(value) for value in values]
+            if all(number is not None for number in numbers):
+                # A run whose rows could not define the metric is left out rather than averaged
+                # in as the sentinel, which stands only when no run defines it.
+                defined = [number for number in numbers if number != UNDEFINED_METRIC] or [UNDEFINED_METRIC]
+                mean_val = np.mean(defined)
+                std_val = np.std(defined)
                 # Store as formatted string with mean±std
                 aggregated[key] = f"{mean_val:.4f}±{std_val:.4f}"
                 # Also store raw mean for sorting/comparison purposes
@@ -1634,144 +1827,281 @@ Protify is an open source platform designed to simplify and democratize workflow
                 aggregated[f"{key}_std"] = float(std_val)
             else:
                 # For non-numeric values, just take the first one
-                aggregated[key] = values[0]
+                aggregated[key] = _as_builtin(values[0])
         
         return aggregated
 
-    def _iter_vector_embeddings_for_standardizer(
+    def _iter_vector_embeddings(
             self,
-            train_dataset,
-            emb_dict,
+            dataset: SplitData,
+            emb_dict: dict[str, torch.Tensor] | None,
             db_path: str,
             ppi: bool,
-            use_multi,
-        ):
+            use_multi: list[str] | None,
+            flip_pairs: bool,
+        ) -> Iterator[torch.Tensor]:
+        """Yield one pooled vector per row of `dataset`, in dataset order.
+
+        With `flip_pairs`, a pair row yields twice: once as stored and once with A and B
+        swapped. That matches the training-time augmentation, so a scaler fit here sees
+        the same distribution the probe will. A caller that needs rows to line up with
+        labels one for one passes False.
+        """
+        # emb_dict: (d,) pooled or (l + 2, d) token rows per sequence
+        pair_mode = self._pair_feature_mode
         if self.embedding_args.sql:
-            with sqlite3.connect(db_path) as conn:
-                cursor = conn.cursor()
+            with open_reader(db_path) as reader:
                 if ppi:
-                    for seq_a, seq_b in zip(list(train_dataset['SeqA']), list(train_dataset['SeqB'])):
-                        emb_a = self._select_from_sql(cursor, seq_a, cast_to_torch=True)
-                        emb_b = self._select_from_sql(cursor, seq_b, cast_to_torch=True)
-                        yield torch.cat([emb_a.reshape(1, -1), emb_b.reshape(1, -1)], dim=-1)
-                        if self.full_args.random_pair_flipping:
-                            yield torch.cat([emb_b.reshape(1, -1), emb_a.reshape(1, -1)], dim=-1)
+                    for seq_a, seq_b in zip(list(dataset['SeqA']), list(dataset['SeqB']), strict=True):
+                        emb_a = self._select_from_store(reader, seq_a, cast_to_torch=True)
+                        emb_b = self._select_from_store(reader, seq_b, cast_to_torch=True)
+                        yield _joined_pair_vector(emb_a, emb_b, pair_mode)  # (1, 2 * f)
+                        if flip_pairs:
+                            yield _joined_pair_vector(emb_b, emb_a, pair_mode)  # (1, 2 * f)
                 elif use_multi:
-                    seq_columns = [list(train_dataset[col]) for col in use_multi]
-                    for seqs in zip(*seq_columns):
+                    seq_columns = [list(dataset[col]) for col in use_multi]
+                    for seqs in zip(*seq_columns, strict=True):
                         parts = [
-                            self._select_from_sql(cursor, seq, cast_to_torch=True).reshape(1, -1)
+                            self._select_from_store(reader, seq, cast_to_torch=True).reshape(1, -1)
                             for seq in seqs
                         ]
                         yield torch.cat(parts, dim=-1)
                 else:
-                    for seq in list(train_dataset['seqs']):
-                        yield self._select_from_sql(cursor, seq, cast_to_torch=True)
+                    for seq in list(dataset['seqs']):
+                        yield self._select_from_store(reader, seq, cast_to_torch=True)
         else:
             assert emb_dict is not None, "emb_dict is required for in-memory embedding standardization."
             if ppi:
-                for seq_a, seq_b in zip(list(train_dataset['SeqA']), list(train_dataset['SeqB'])):
+                for seq_a, seq_b in zip(list(dataset['SeqA']), list(dataset['SeqB']), strict=True):
                     emb_a = emb_dict[seq_a]
                     emb_b = emb_dict[seq_b]
-                    yield torch.cat([emb_a.reshape(1, -1), emb_b.reshape(1, -1)], dim=-1)
-                    if self.full_args.random_pair_flipping:
-                        yield torch.cat([emb_b.reshape(1, -1), emb_a.reshape(1, -1)], dim=-1)
+                    yield _joined_pair_vector(emb_a, emb_b, pair_mode)  # (1, 2 * f)
+                    if flip_pairs:
+                        yield _joined_pair_vector(emb_b, emb_a, pair_mode)  # (1, 2 * f)
             elif use_multi:
-                seq_columns = [list(train_dataset[col]) for col in use_multi]
-                for seqs in zip(*seq_columns):
+                seq_columns = [list(dataset[col]) for col in use_multi]
+                for seqs in zip(*seq_columns, strict=True):
                     parts = [emb_dict[seq].reshape(1, -1) for seq in seqs]
                     yield torch.cat(parts, dim=-1)
             else:
-                for seq in list(train_dataset['seqs']):
+                for seq in list(dataset['seqs']):
                     yield emb_dict[seq]
 
     def _fit_embedding_standardizer(
             self,
-            train_dataset,
-            emb_dict,
+            train_dataset: SplitData,
+            emb_dict: dict[str, torch.Tensor] | None,
             db_path: str,
             ppi: bool,
-            use_multi,
+            use_multi: list[str] | None,
             full: bool,
-        ) -> Optional[EmbeddingStandardizer]:
+        ) -> EmbeddingStandardizer | None:
+        # emb_dict: (d,) pooled or (l + 2, d) token rows per sequence
         embedding_scaler = self.embedding_args.embedding_scaler
         assert isinstance(embedding_scaler, bool), f"Invalid embedding_scaler: {embedding_scaler}"
         if full or not embedding_scaler:
             return None
         print_message("Fitting StandardScaler on training embeddings")
-        embeddings = self._iter_vector_embeddings_for_standardizer(
+        embeddings = self._iter_vector_embeddings(
             train_dataset,
             emb_dict,
             db_path,
             ppi,
             use_multi,
+            flip_pairs=self._augment_pair_order(),
         )
         return EmbeddingStandardizer.fit_tensors(embeddings)
 
-    def trainer_probe(
+    def _augment_pair_order(self) -> bool:
+        """Whether to train on both orderings of a pair.
+
+        A symmetric pair mode builds the same row from either ordering, so the swap would
+        emit a duplicate rather than an example.
+        """
+        return self.full_args.random_pair_flipping and pair_order_matters(self._pair_feature_mode)
+
+    def _selected_vector_embeddings(
             self,
-            model,
-            tokenizer,
-            model_name,
-            data_name,
-            train_dataset,
-            valid_dataset,
-            test_dataset,
-            emb_dict=None,
-            ppi=False,
-            log_id=None,
-            skip_plot=False,
-            source_model_name: Optional[str] = None,
-        ):
+            dataset: SplitData,
+            emb_dict: dict[str, torch.Tensor] | None,
+            db_path: str,
+            ppi: bool,
+            use_multi: list[str] | None,
+            keep_rows: np.ndarray,
+        ) -> Iterator[torch.Tensor]:
+        """Yield the pooled vector for each row in `keep_rows`, in that order.
+
+        The streaming sibling `_iter_vector_embeddings` walks the whole split. A caller
+        that wants a subsample would then deserialize every row to keep a fraction of
+        them: on a pair dataset of 163192 training rows subsampled to 20000, that is
+        eight blob reads and eight dense round trips for every row kept. The sequence
+        columns are strings and cheap to index; only the vectors those names resolve to
+        are expensive, so this resolves the names first and fetches exactly those.
+
+        Pair augmentation has no place here. A caller selecting rows is lining them up
+        with labels, so every row yields exactly once, matching the `flip_pairs=False`
+        the streaming path is given for the same reason.
+        """
+        # keep_rows: (n_keep,) ascending
+        # emb_dict: (d,) pooled or (l + 2, d) token rows per sequence
+        pair_mode = self._pair_feature_mode
+        if ppi:
+            sequence_columns = [list(dataset['SeqA']), list(dataset['SeqB'])]
+        elif use_multi:
+            sequence_columns = [list(dataset[column]) for column in use_multi]
+        else:
+            sequence_columns = [list(dataset['seqs'])]
+
+        if self.embedding_args.sql:
+            with open_reader(db_path) as reader:
+                for row in keep_rows:
+                    parts = [
+                        self._select_from_store(
+                            reader, column[int(row)], cast_to_torch=True
+                        ).reshape(1, -1)  # (1, f)
+                        for column in sequence_columns
+                    ]
+                    yield _joined_columns(parts, ppi, pair_mode)  # (1, p * f) for p columns
+            return
+
+        assert emb_dict is not None, "emb_dict is required to select embeddings by row."
+        for row in keep_rows:
+            parts = [
+                emb_dict[column[int(row)]].reshape(1, -1)  # (1, f)
+                for column in sequence_columns
+            ]
+            yield _joined_columns(parts, ppi, pair_mode)  # (1, p * f) for p columns
+
+    def _split_feature_matrix(
+            self,
+            dataset: SplitData,
+            emb_dict: dict[str, torch.Tensor] | None,
+            db_path: str,
+            ppi: bool,
+            use_multi: list[str] | None,
+            keep_rows: np.ndarray,
+        ) -> sparse.csr_matrix:
+        """Stack the chosen rows of one split into the matrix the path selector reads.
+
+        The result is CSR whatever the model, because a max-pooled SAE embedding runs
+        roughly 10% to 34% dense across 131072 columns and the dense equivalent of a
+        large split does not fit in host memory. For a narrow dense embedding the format
+        costs a little and keeps this to one code path.
+        """
+        # keep_rows: (n_keep,) ascending, and the row order the caller's labels are in
+        # emb_dict: (d,) pooled or (l + 2, d) token rows per sequence
+        rows = [
+            sparse.csr_matrix(embedding.reshape(1, -1).float().numpy())  # (1, f)
+            for embedding in self._selected_vector_embeddings(
+                dataset, emb_dict, db_path, ppi, use_multi, keep_rows
+            )
+        ]
+        return sparse.vstack(rows, format='csr')  # (n_keep, f)
+
+    def _fit_feature_selection(
+            self,
+            train_dataset: SplitData,
+            valid_dataset: SplitData,
+            emb_dict: dict[str, torch.Tensor] | None,
+            cache_model_name: str,
+            ppi: bool,
+            full: bool,
+        ) -> FeatureSelection | None:
+        """Choose which embedding columns the probe will see, from train and valid only.
+
+        Returns None when selection is off or cannot apply. Matrix embeddings are
+        excluded because the selector reads one pooled vector per protein, not a
+        per-residue matrix.
+        """
+        # emb_dict: (d,) pooled or (l + 2, d) token rows per sequence
+        if full or not getattr(self.probe_args, 'feature_selection', False):
+            return None
+
+        db_path = self._embedding_store(cache_model_name)
+        use_multi = getattr(self.full_args, 'multi_column', None)
+        config = FeaturePathConfig(
+            min_output_size=self.probe_args.feature_selection_min_size,
+            seed=self.trainer_args.seed,
+        )
+        generator = np.random.default_rng(config.seed)
+        train_rows = subsample_rows(len(train_dataset['labels']), config.max_fit_rows, generator)
+        valid_rows = subsample_rows(len(valid_dataset['labels']), config.max_fit_rows, generator)
+
+        print_message(
+            f"Fitting the feature path on {train_rows.size} training and "
+            f"{valid_rows.size} validation rows"
+        )
+        train_features = self._split_feature_matrix(
+            train_dataset, emb_dict, db_path, ppi, use_multi, train_rows
+        )  # (n_train_fit, f)
+        valid_features = self._split_feature_matrix(
+            valid_dataset, emb_dict, db_path, ppi, use_multi, valid_rows
+        )  # (n_valid_fit, f)
+        return fit_feature_path_selection(
+            train_features,
+            np.asarray(train_dataset['labels'])[train_rows],
+            valid_features,
+            np.asarray(valid_dataset['labels'])[valid_rows],
+            self.probe_args.task_type,
+            config,
+        )
+
+    def _build_probe_datasets(
+            self,
+            train_dataset: SplitData,
+            valid_dataset: SplitData,
+            test_dataset: SplitData,
+            tokenizer: Any,
+            emb_dict: dict[str, torch.Tensor] | None,
+            db_path: str | None,
+            ppi: bool,
+            feature_selection: FeatureSelection | None = None,
+            calibration_dataset: SplitData | None = None,
+        ) -> tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, torch.utils.data.Dataset, Any, torch.utils.data.Dataset | None]:
+        """The train, validation, and test datasets a probe reads, their collator, and the calibration dataset.
+
+        The embedding standardizer is fit on the training split alone and shared by all
+        of them. With SQL each vector is read from the cache at `db_path` as it is needed;
+        otherwise `emb_dict` holds them in memory. The collator takes the tokenizer, `full`,
+        and the task type; each dataset takes its split, the cache, the batch and read sizes,
+        and the pair settings. The calibration dataset is built as test is, or None without
+        `calibration_dataset`.
+        """
+        # emb_dict: (d,) pooled or (l + 2, d) token rows per sequence
         batch_size = self.trainer_args.probe_batch_size
         read_scaler = self.trainer_args.read_scaler
         input_size = self.probe_args.input_size
         task_type = self.probe_args.task_type
         tokenwise = self.probe_args.tokenwise
-        num_runs = getattr(self.trainer_args, 'num_runs', 1)
-        base_seed = self.trainer_args.seed
-        
-        print(f'task_type: {task_type}')
-        # The cache belongs to the model that produced the embeddings, which is the source
-        # model when this run reuses another model's cache.
-        cache_model_name = source_model_name or model_name
-        db_filename = self._embedding_cache_filename(cache_model_name, 'db')
-        db_path = os.path.join(self.embedding_args.embedding_save_dir, db_filename)
-
+        full = self._full
         use_multi = getattr(self.full_args, 'multi_column', None)
         if self.embedding_args.sql:
             print('SQL enabled')
             if ppi:
-                DatasetClass = PairEmbedsLabelsDatasetFromDisk
-                CollatorClass = PairEmbedsLabelsCollator
+                dataset_class = PairEmbedsLabelsDatasetFromDisk
+                collator_class = PairEmbedsLabelsCollator
             elif use_multi:
-                DatasetClass = MultiEmbedsLabelsDatasetFromDisk
-                CollatorClass = EmbedsLabelsCollator
+                dataset_class = MultiEmbedsLabelsDatasetFromDisk
+                collator_class = EmbedsLabelsCollator
             else:
-                DatasetClass = EmbedsLabelsDatasetFromDisk
-                CollatorClass = EmbedsLabelsCollator
+                dataset_class = EmbedsLabelsDatasetFromDisk
+                collator_class = EmbedsLabelsCollator
         else:
             print('SQL disabled')
             if ppi:
-                DatasetClass = PairEmbedsLabelsDataset
-                CollatorClass = PairEmbedsLabelsCollator
+                dataset_class = PairEmbedsLabelsDataset
+                collator_class = PairEmbedsLabelsCollator
             elif use_multi:
-                DatasetClass = MultiEmbedsLabelsDataset
-                CollatorClass = EmbedsLabelsCollator
+                dataset_class = MultiEmbedsLabelsDataset
+                collator_class = EmbedsLabelsCollator
             else:
-                DatasetClass = EmbedsLabelsDataset
-                CollatorClass = EmbedsLabelsCollator
-
-        """
-        For collator need to pass tokenizer, full, task_type
-        For dataset need to pass
-        hf_dataset, col_a, col_b, label_col, input_size, task_type, db_path, emb_dict, batch_size, read_scaler, full, train
-        """
+                dataset_class = EmbedsLabelsDataset
+                collator_class = EmbedsLabelsCollator
 
         add_token_ids = getattr(self.probe_args, 'add_token_ids', False)
         padding = getattr(self.full_args, 'padding', 'max_length')
         max_length = getattr(self.full_args, 'max_length', 2048)
-        data_collator = CollatorClass(tokenizer=tokenizer, full=full, task_type=task_type, tokenwise=tokenwise, add_token_ids=add_token_ids, padding=padding, max_length=max_length)
+        data_collator = collator_class(tokenizer=tokenizer, full=full, task_type=task_type, tokenwise=tokenwise, add_token_ids=add_token_ids, padding=padding, max_length=max_length)
         embedding_standardizer = self._fit_embedding_standardizer(
             train_dataset,
             emb_dict,
@@ -1780,6 +2110,12 @@ Protify is an open source platform designed to simplify and democratize workflow
             use_multi,
             full,
         )
+        if feature_selection is not None and embedding_standardizer is not None:
+            # The scaler was fit on the full width. Subsetting it is exact, because
+            # StandardScaler treats columns independently, and avoids a second pass.
+            embedding_standardizer = embedding_standardizer.select_features(
+                feature_selection.indices
+            )
         common_kwargs = dict(
             hf_dataset=train_dataset,
             input_size=input_size,
@@ -1790,33 +2126,153 @@ Protify is an open source platform designed to simplify and democratize workflow
             read_scaler=read_scaler,
             full=full,
             train=True,
-            random_pair_flipping=self.full_args.random_pair_flipping,
+            random_pair_flipping=self._augment_pair_order(),
+            pair_feature_mode=self._pair_feature_mode,
             embedding_standardizer=embedding_standardizer,
+            feature_selection=feature_selection,
         )
         if use_multi:
-            train_ds = DatasetClass(seq_cols=use_multi, **deepcopy(common_kwargs))
+            train_ds = dataset_class(seq_cols=use_multi, **deepcopy(common_kwargs))
         else:
-            train_ds = DatasetClass(**deepcopy(common_kwargs))
-        
-        # BUG FIX: Update hf_dataset in common_kwargs before creating validation and test datasets.
-        # Previously, common_kwargs['hf_dataset'] was set to train_dataset and never updated,
-        # causing valid_dataset and test_dataset to incorrectly use training data. This resulted
-        # in valid_metrics and test_metrics being identical since they were computed on the same
-        # (training) dataset. The fix ensures each dataset uses the correct HuggingFace dataset.
-        # We use deepcopy to ensure each dataset gets an independent copy of the kwargs dictionary
-        # to prevent any potential shared state issues.
+            train_ds = dataset_class(**deepcopy(common_kwargs))
+
+        # Each split gets its own HuggingFace dataset. Validation and test were once built
+        # from the training split, because hf_dataset was never reassigned, which made their
+        # metrics identical. deepcopy gives every dataset an independent copy of the kwargs.
         common_kwargs['train'] = False
         common_kwargs['hf_dataset'] = valid_dataset
         if use_multi:
-            valid_ds = DatasetClass(seq_cols=use_multi, **deepcopy(common_kwargs))
+            valid_ds = dataset_class(seq_cols=use_multi, **deepcopy(common_kwargs))
         else:
-            valid_ds = DatasetClass(**deepcopy(common_kwargs))
+            valid_ds = dataset_class(**deepcopy(common_kwargs))
         common_kwargs['hf_dataset'] = test_dataset
         if use_multi:
-            test_ds = DatasetClass(seq_cols=use_multi, **deepcopy(common_kwargs))
+            test_ds = dataset_class(seq_cols=use_multi, **deepcopy(common_kwargs))
         else:
-            test_ds = DatasetClass(**deepcopy(common_kwargs))
-        
+            test_ds = dataset_class(**deepcopy(common_kwargs))
+
+        calibration_ds = None
+        if calibration_dataset is not None:
+            common_kwargs['hf_dataset'] = calibration_dataset
+            if use_multi:
+                calibration_ds = dataset_class(seq_cols=use_multi, **deepcopy(common_kwargs))
+            else:
+                calibration_ds = dataset_class(**deepcopy(common_kwargs))
+
+        return train_ds, valid_ds, test_ds, data_collator, calibration_ds
+
+    @reports_training_job
+    def trainer_probe(
+            self,
+            model: torch.nn.Module,
+            tokenizer: Any,
+            model_name: str,
+            data_name: str,
+            train_dataset: SplitData,
+            valid_dataset: SplitData,
+            test_dataset: SplitData,
+            emb_dict: dict[str, torch.Tensor] | None=None,
+            ppi: bool=False,
+            log_id: str | None=None,
+            skip_plot: bool=False,
+            source_model_name: str | None = None,
+            feature_selection: FeatureSelection | None = None,
+            probe_datasets: tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, torch.utils.data.Dataset, Any] | None = None,
+        ) -> TrainOutcome:
+        """Train one probe, or `num_runs` of them, over the dataset's splits.
+
+        `probe_datasets`, as `(train, valid, test, collator)`, replaces the datasets built from
+        one model's cache, as the default probe's joined branches do, and gets no calibration report.
+        """
+        # emb_dict: (d,) pooled or (l + 2, d) token rows per sequence
+        task_type = self.probe_args.task_type
+        print(f'task_type: {task_type}')
+        # The cache belongs to the model that produced the embeddings, which is the source
+        # model when this run reuses another model's cache.
+        cache_model_name = source_model_name or model_name
+        db_path = self._embedding_store(cache_model_name)
+
+        # A dataset's calibration split, when it has one, is read the way test is (calibration_report.py).
+        calibration_rows = getattr(self, 'calibration_sets', {}).get(data_name)
+        if not supports_calibration_report(task_type) or self.probe_args.tokenwise:
+            calibration_rows = None
+        calibration_ds = None
+        if probe_datasets is None:
+            train_ds, valid_ds, test_ds, data_collator, calibration_ds = self._build_probe_datasets(
+                train_dataset,
+                valid_dataset,
+                test_dataset,
+                tokenizer,
+                emb_dict,
+                db_path,
+                ppi,
+                feature_selection,
+                calibration_dataset=calibration_rows,
+            )
+        else:
+            train_ds, valid_ds, test_ds, data_collator = probe_datasets
+
+        outcome = self._train_probe_runs(
+            model, tokenizer, model_name, data_name, train_ds, valid_ds, test_ds, data_collator,
+            ppi=ppi, log_id=log_id, skip_plot=skip_plot, source_model_name=source_model_name, feature_selection=feature_selection,
+        )
+        if calibration_ds is not None:
+            self._add_calibration_report(outcome, calibration_ds, data_collator)
+        return outcome
+
+    def _add_calibration_report(self, outcome: TrainOutcome, calibration_dataset: torch.utils.data.Dataset, data_collator: Any) -> None:
+        """Add the calibration report to the outcome's test metrics, read off the model the outcome keeps."""
+        model, _, test_metrics, test_outputs, test_labels = outcome
+        if isinstance(test_outputs, tuple):
+            test_outputs = test_outputs[0]
+        if test_outputs is None or isinstance(test_labels, tuple):
+            # No test predictions, or labels that carry an observation mask: the report needs every label.
+            return
+
+        calibration_outputs, calibration_labels = self._predict_split(model, calibration_dataset, data_collator)
+        report = calibration_report(self.probe_args.task_type, calibration_outputs, calibration_labels, test_outputs, test_labels)
+        test_metrics.update({f'test_{name}': value for name, value in report.items()})
+        print_message('Calibration report: ' + ', '.join(f'{name}={value:.4f}' for name, value in report.items()))
+
+    def _predict_split(self, model: torch.nn.Module, dataset: torch.utils.data.Dataset, data_collator: Any) -> tuple[np.ndarray, np.ndarray]:
+        """The model's raw outputs and the labels on one split, in row order."""
+        loader = DataLoader(dataset, batch_size=self.trainer_args.probe_batch_size, shuffle=False, collate_fn=data_collator)
+        device = next(model.parameters()).device
+        model.eval()
+        outputs, labels = [], []
+        with torch.inference_mode():
+            for batch in loader:
+                labels.append(batch['labels'].numpy())  # (b,) or (b, 1)
+                batch = {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in batch.items()}
+                outputs.append(model(**batch).logits.float().cpu().numpy())  # (b, c) or (b, 1)
+        return np.concatenate(outputs), np.concatenate(labels)  # (n, c) or (n, 1), then (n,) or (n, 1)
+
+    def _train_probe_runs(
+            self,
+            model: torch.nn.Module,
+            tokenizer: Any,
+            model_name: str,
+            data_name: str,
+            train_ds: torch.utils.data.Dataset,
+            valid_ds: torch.utils.data.Dataset,
+            test_ds: torch.utils.data.Dataset,
+            data_collator: Any,
+            *,
+            ppi: bool,
+            log_id: str | None,
+            skip_plot: bool,
+            source_model_name: str | None,
+            feature_selection: FeatureSelection | None,
+        ) -> TrainOutcome:
+        """Train one probe, or `num_runs` of them in parallel or in turn, and keep the run chosen on validation."""
+        task_type = self.probe_args.task_type
+        num_runs = getattr(self.trainer_args, 'num_runs', 1)
+        base_seed = self.trainer_args.seed
+        # Matrix embeddings keep one row per residue, which changes the dataset class, the
+        # collator, and whether pooled-vector transforms apply at all. MainProcess derives
+        # this from --matrix_embed.
+        full = self._full
+
         # Single run - original behavior
         if num_runs == 1:
             return self._train(
@@ -1833,6 +2289,7 @@ Protify is an open source platform designed to simplify and democratize workflow
                 ppi=ppi,
                 probe=True,
                 skip_plot=skip_plot,
+                feature_selection=feature_selection,
             )
 
         if self.trainer_args.parallel_probe_runs:
@@ -1860,6 +2317,7 @@ Protify is an open source platform designed to simplify and democratize workflow
                     source_model_name=source_model_name,
                     ppi=ppi,
                     skip_plot=skip_plot,
+                                    feature_selection=feature_selection,
                 )
             print_message(
                 "--parallel_probe_runs is only available for pooled, sequence-level non-PPI linear probes. "
@@ -1871,7 +2329,7 @@ Protify is an open source platform designed to simplify and democratize workflow
 
         all_valid_metrics = []
         all_test_metrics = []
-        run_results = []  # Store (run_idx, test_loss, y_pred, y_true, seed, model) for plotting best
+        run_results = []  # (run_idx, validation loss, test predictions, test labels, seed, model) per run
         
         for run_idx in range(num_runs):
             run_seed = base_seed + run_idx
@@ -1902,9 +2360,8 @@ Protify is an open source platform designed to simplify and democratize workflow
             all_valid_metrics.append(valid_metrics)
             all_test_metrics.append(test_metrics)
             
-            # Track test loss for determining best run
-            test_loss = test_metrics.get('test_loss', test_metrics.get('eval_loss', float('inf')))
-            run_results.append((run_idx, test_loss, y_pred, y_true, run_seed, run_model))
+            # The kept seed is chosen on validation loss; test only scores it.
+            run_results.append((run_idx, _selection_loss(valid_metrics), y_pred, y_true, run_seed, run_model))
         
         # Restore original seed
         self.trainer_args.seed = base_seed
@@ -1919,21 +2376,22 @@ Protify is an open source platform designed to simplify and democratize workflow
             self.trainer_args.parallel_probe_ensemble_average_mode
         )
         aggregated_test['sequential_probe_total_runs'] = num_runs
-        aggregated_test['sequential_probe_run_seeds'] = [result[4] for result in run_results]
+        aggregated_test['sequential_probe_run_seeds'] = [run_result[4] for run_result in run_results]
         aggregated_test['sequential_probe_run_records'] = [
             {
-                'run_index': result[0],
-                'run_number': result[0] + 1,
-                'seed': result[4],
-                'test_loss': result[1],
+                'run_index': run_result[0],
+                'run_number': run_result[0] + 1,
+                'seed': run_result[4],
+                'valid_loss': run_result[1],
+                'test_loss': all_test_metrics[run_result[0]].get('test_loss'),
             }
-            for result in run_results
+            for run_result in run_results
         ]
         
-        # Find the best run (lowest test loss)
+        # The kept run has the lowest validation loss.
         best_run = min(run_results, key=lambda x: x[1])
         best_run_idx, best_loss, best_y_pred, best_y_true, best_seed, best_model = best_run
-        print_message(f"Best run: {best_run_idx + 1} (seed={best_seed}, test_loss={best_loss:.4f})")
+        print_message(f"Best run by validation loss: {best_run_idx + 1} (seed={best_seed}, eval_loss={best_loss:.4f})")
         
         # Generate plot for best run (unless skip_plot is True)
         if not skip_plot:
@@ -1950,40 +2408,41 @@ Protify is an open source platform designed to simplify and democratize workflow
         # Return the best model along with aggregated metrics
         return best_model, aggregated_valid, aggregated_test, best_y_pred, best_y_true
 
+    @reports_training_job
     def trainer_base_model(
             self,
-            model,
-            tokenizer,
-            model_name,
-            data_name,
-            train_dataset,
-            valid_dataset,
-            test_dataset,
-            ppi=False,
-            log_id=None,
-            skip_plot=False,
-            model_factory=None,
-            source_model_name: Optional[str] = None,
-        ):
+            model: torch.nn.Module,
+            tokenizer: Any,
+            model_name: str,
+            data_name: str,
+            train_dataset: SplitData,
+            valid_dataset: SplitData,
+            test_dataset: SplitData,
+            ppi: bool=False,
+            log_id: str | None=None,
+            skip_plot: bool=False,
+            model_factory: Callable[[], torch.nn.Module] | None=None,
+            source_model_name: str | None = None,
+        ) -> TrainOutcome:
         task_type = self.probe_args.task_type
         tokenwise = self.probe_args.tokenwise
         num_runs = getattr(self.trainer_args, 'num_runs', 1)
         base_seed = self.trainer_args.seed
 
         if ppi:
-            DatasetClass = PairStringLabelDataset
-            CollatorClass = PairCollator_input_ids
+            dataset_class = PairStringLabelDataset
+            collator_class = PairInputIdsCollator
         else:
-            DatasetClass = StringLabelDataset
-            CollatorClass = StringLabelsCollator
+            dataset_class = StringLabelDataset
+            collator_class = StringLabelsCollator
 
         padding = getattr(self.full_args, 'padding', 'max_length')
         max_length = getattr(self.full_args, 'max_length', 2048)
-        data_collator = CollatorClass(tokenizer=tokenizer, task_type=task_type, tokenwise=tokenwise, padding=padding, max_length=max_length)
+        data_collator = collator_class(tokenizer=tokenizer, task_type=task_type, tokenwise=tokenwise, padding=padding, max_length=max_length)
 
-        train_ds = DatasetClass(hf_dataset=train_dataset, train=True, random_pair_flipping=self.full_args.random_pair_flipping)
-        valid_ds = DatasetClass(hf_dataset=valid_dataset, train=False, random_pair_flipping=self.full_args.random_pair_flipping)
-        test_ds = DatasetClass(hf_dataset=test_dataset, train=False, random_pair_flipping=self.full_args.random_pair_flipping)
+        train_ds = dataset_class(hf_dataset=train_dataset, train=True, random_pair_flipping=self.full_args.random_pair_flipping)
+        valid_ds = dataset_class(hf_dataset=valid_dataset, train=False, random_pair_flipping=self.full_args.random_pair_flipping)
+        test_ds = dataset_class(hf_dataset=test_dataset, train=False, random_pair_flipping=self.full_args.random_pair_flipping)
 
         # Single run - original behavior
         if num_runs == 1:
@@ -2008,7 +2467,7 @@ Protify is an open source platform designed to simplify and democratize workflow
         
         all_valid_metrics = []
         all_test_metrics = []
-        run_results = []  # Store (run_idx, test_loss, y_pred, y_true, seed, model) for plotting best
+        run_results = []  # (run_idx, validation loss, test predictions, test labels, seed, model) per run
         
         for run_idx in range(num_runs):
             run_seed = base_seed + run_idx
@@ -2040,9 +2499,8 @@ Protify is an open source platform designed to simplify and democratize workflow
             all_valid_metrics.append(valid_metrics)
             all_test_metrics.append(test_metrics)
             
-            # Track test loss for determining best run
-            test_loss = test_metrics.get('test_loss', test_metrics.get('eval_loss', float('inf')))
-            run_results.append((run_idx, test_loss, y_pred, y_true, run_seed, trained_model))
+            # The kept seed is chosen on validation loss; test only scores it.
+            run_results.append((run_idx, _selection_loss(valid_metrics), y_pred, y_true, run_seed, trained_model))
         
         # Restore original seed
         self.trainer_args.seed = base_seed
@@ -2051,10 +2509,10 @@ Protify is an open source platform designed to simplify and democratize workflow
         aggregated_valid = self._aggregate_metrics(all_valid_metrics)
         aggregated_test = self._aggregate_metrics(all_test_metrics)
         
-        # Find the best run (lowest test loss)
+        # The kept run has the lowest validation loss.
         best_run = min(run_results, key=lambda x: x[1])
         best_run_idx, best_loss, best_y_pred, best_y_true, best_seed, best_model = best_run
-        print_message(f"Best run: {best_run_idx + 1} (seed={best_seed}, test_loss={best_loss:.4f})")
+        print_message(f"Best run by validation loss: {best_run_idx + 1} (seed={best_seed}, eval_loss={best_loss:.4f})")
         
         # Generate plot for best run (unless skip_plot is True)
         if not skip_plot:
@@ -2071,24 +2529,26 @@ Protify is an open source platform designed to simplify and democratize workflow
         # Return the best model along with aggregated metrics
         return best_model, aggregated_valid, aggregated_test, best_y_pred, best_y_true
 
+    @reports_training_job
     def trainer_hybrid_model(
             self,
-            model,
-            tokenizer,
-            probe,
-            model_name,
-            data_name,
-            train_dataset,
-            valid_dataset,
-            test_dataset,
-            emb_dict=None,
-            ppi=False,
-            log_id=None,
-            skip_plot=False,
-            model_factory=None,
-            probe_factory=None,
-            source_model_name: Optional[str] = None,
-        ):
+            model: torch.nn.Module,
+            tokenizer: Any,
+            probe: torch.nn.Module,
+            model_name: str,
+            data_name: str,
+            train_dataset: SplitData,
+            valid_dataset: SplitData,
+            test_dataset: SplitData,
+            emb_dict: dict[str, torch.Tensor] | None=None,
+            ppi: bool=False,
+            log_id: str | None=None,
+            skip_plot: bool=False,
+            model_factory: Callable[[], torch.nn.Module] | None=None,
+            probe_factory: Callable[[], torch.nn.Module] | None=None,
+            source_model_name: str | None = None,
+        ) -> TrainOutcome:
+            # emb_dict: (d,) pooled or (l + 2, d) token rows per sequence
             num_runs = getattr(self.trainer_args, 'num_runs', 1)
             base_seed = self.trainer_args.seed
             
@@ -2117,7 +2577,7 @@ Protify is an open source platform designed to simplify and democratize workflow
             
             all_valid_metrics = []
             all_test_metrics = []
-            run_results = []  # Store (run_idx, test_loss, y_pred, y_true, seed, model) for plotting best
+            run_results = []  # (run_idx, validation loss, test predictions, test labels, seed, model) per run
             
             for run_idx in range(num_runs):
                 run_seed = base_seed + run_idx
@@ -2152,9 +2612,8 @@ Protify is an open source platform designed to simplify and democratize workflow
                 all_valid_metrics.append(valid_metrics)
                 all_test_metrics.append(test_metrics)
                 
-                # Track test loss for determining best run
-                test_loss = test_metrics.get('test_loss', test_metrics.get('eval_loss', float('inf')))
-                run_results.append((run_idx, test_loss, y_pred, y_true, run_seed, trained_model))
+                # The kept seed is chosen on validation loss; test only scores it.
+                run_results.append((run_idx, _selection_loss(valid_metrics), y_pred, y_true, run_seed, trained_model))
             
             # Restore original seed
             self.trainer_args.seed = base_seed
@@ -2164,10 +2623,10 @@ Protify is an open source platform designed to simplify and democratize workflow
             aggregated_valid = self._aggregate_metrics(all_valid_metrics)
             aggregated_test = self._aggregate_metrics(all_test_metrics)
             
-            # Find the best run (lowest test loss)
+            # The kept run has the lowest validation loss.
             best_run = min(run_results, key=lambda x: x[1])
             best_run_idx, best_loss, best_y_pred, best_y_true, best_seed, best_model = best_run
-            print_message(f"Best hybrid run: {best_run_idx + 1} (seed={best_seed}, test_loss={best_loss:.4f})")
+            print_message(f"Best hybrid run by validation loss: {best_run_idx + 1} (seed={best_seed}, eval_loss={best_loss:.4f})")
             
             # Generate plot for best run (unless skip_plot is True)
             task_type = self.probe_args.task_type
@@ -2187,22 +2646,23 @@ Protify is an open source platform designed to simplify and democratize workflow
 
     def _train_hybrid_single_run(
             self,
-            model,
-            tokenizer,
-            probe,
-            model_name,
-            data_name,
-            train_dataset,
-            valid_dataset,
-            test_dataset,
-            emb_dict=None,
-            ppi=False,
-            log_id=None,
-            skip_plot=False,
-            source_model_name: Optional[str] = None,
-        ):
+            model: torch.nn.Module,
+            tokenizer: Any,
+            probe: torch.nn.Module,
+            model_name: str,
+            data_name: str,
+            train_dataset: SplitData,
+            valid_dataset: SplitData,
+            test_dataset: SplitData,
+            emb_dict: dict[str, torch.Tensor] | None=None,
+            ppi: bool=False,
+            log_id: str | None=None,
+            skip_plot: bool=False,
+            source_model_name: str | None = None,
+        ) -> TrainOutcome:
             """Single run of hybrid probe training (probe first, then model+probe)."""
             # Store original num_runs and temporarily set to 1 for the probe phase
+            # emb_dict: (d,) pooled or (l + 2, d) token rows per sequence
             original_num_runs = getattr(self.trainer_args, 'num_runs', 1)
             self.trainer_args.num_runs = 1
             

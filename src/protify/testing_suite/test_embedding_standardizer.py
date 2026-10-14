@@ -1,25 +1,11 @@
 import numpy as np
 import torch
 
-try:
-    from src.protify.data.dataset_classes import (
-        EmbeddingStandardizer,
-        EmbedsLabelsDataset,
-        PairEmbedsLabelsDataset,
-    )
-except ImportError:
-    try:
-        from protify.data.dataset_classes import (
-            EmbeddingStandardizer,
-            EmbedsLabelsDataset,
-            PairEmbedsLabelsDataset,
-        )
-    except ImportError:
-        from ..data.dataset_classes import (
-            EmbeddingStandardizer,
-            EmbedsLabelsDataset,
-            PairEmbedsLabelsDataset,
-        )
+from protify.data.dataset_classes import (
+    EmbeddingStandardizer,
+    EmbedsLabelsDataset,
+    PairEmbedsLabelsDataset,
+)
 
 
 def test_embedding_standardizer_fit_tensors_standardizes_training_features() -> None:

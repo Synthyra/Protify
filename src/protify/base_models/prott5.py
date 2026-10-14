@@ -1,13 +1,12 @@
-import re
-
 import torch
 import torch.nn as nn
+
 from typing import Any
 from transformers import T5EncoderModel, T5Tokenizer
 
-from .base_tokenizer import BaseSequenceTokenizer
+from .base_tokenizer import ProtTransTokenizerWrapper
+from .hidden_state_selection import select_hidden_state
 from .t5 import T5ForSequenceClassification, T5ForTokenClassification
-from .utils import select_hidden_state
 
 
 presets = {
@@ -19,21 +18,9 @@ presets = {
 }
 
 
-class T5TokenizerWrapper(BaseSequenceTokenizer):
+class T5TokenizerWrapper(ProtTransTokenizerWrapper):
     def __init__(self, tokenizer: T5Tokenizer) -> None:
         super().__init__(tokenizer)
-
-    def __call__(self, sequences: str | list[str], **kwargs: Any) -> dict[str, torch.Tensor]:
-        if isinstance(sequences, str):
-            sequences = [sequences]
-        kwargs.setdefault("return_tensors", "pt")
-        kwargs.setdefault("padding", "max_length")
-        kwargs.setdefault("truncation", True)
-        kwargs.setdefault("add_special_tokens", True)
-        sequences = [re.sub(r"[UZOB]", "X", seq) for seq in sequences]
-        sequences = [" ".join(seq) for seq in sequences]
-        token_batch = self.tokenizer(sequences, **kwargs)
-        return token_batch  # default tensor fields: (b, l)
 
 
 class Prott5ForEmbedding(nn.Module):

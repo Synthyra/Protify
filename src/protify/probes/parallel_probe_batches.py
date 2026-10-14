@@ -1,7 +1,8 @@
 import math
 import torch
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 from torch.utils.data import Dataset as TorchDataset
 
 
@@ -78,12 +79,12 @@ class ParallelRunDataset(TorchDataset):
         self,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         if '__dict__' not in dir(self.base_dataset):
-            return None, None
+            return None, None  # None, None: no (n, d) or (n, ...) cache
         dataset_state = self.base_dataset.__dict__
         if 'tensors' in dataset_state:
             tensors = dataset_state['tensors']
             if len(tensors) != 2:
-                return None, None
+                return None, None  # None, None: no (n, d) or (n, ...) cache
             tensor_embeddings, tensor_labels = tensors  # (n, d), (n, ...)
             return tensor_embeddings, tensor_labels  # (n, d), (n, ...)
 
@@ -95,9 +96,9 @@ class ParallelRunDataset(TorchDataset):
             'embedding_standardizer',
         )
         if any(key not in dataset_state for key in required_keys):
-            return None, None
+            return None, None  # None, None: no (n, d) or (n, ...) cache
         if dataset_state['full']:
-            return None, None
+            return None, None  # None, None: no (n, d) or (n, ...) cache
 
         processed_embeddings: list[torch.Tensor] = []
         embedding_standardizer = dataset_state['embedding_standardizer']
@@ -141,12 +142,13 @@ class ParallelRunDataset(TorchDataset):
             )
         indices = self.run_indices_for(idx)
         items = [self.base_dataset[base_idx] for base_idx in indices]
-        return self._stack_items(items)
+        return self._stack_items(items)  # (r, d), (r, ...)
 
     def _stack_items(
         self,
         items: list[tuple[torch.Tensor, Any]],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # items: (d,) and (...) per run, r items
         first_item = items[0]
         assert isinstance(first_item, tuple), "ParallelRunDataset expects tuple dataset items."
         assert len(first_item) == 2, (

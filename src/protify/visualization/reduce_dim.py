@@ -1,26 +1,21 @@
-import os
 import argparse
-import numpy as np
-import umap
+import os
 import matplotlib.pyplot as plt
+import numpy as np
 import seaborn as sns
 import torch
+import umap
+
 from dataclasses import dataclass, field
+from matplotlib.colors import LinearSegmentedColormap
 from sklearn.decomposition import PCA as SklearnPCA
 from sklearn.manifold import TSNE as SklearnTSNE
-from typing import Optional, Union, List
-from matplotlib.colors import LinearSegmentedColormap
 
-try:
-    from utils import torch_load, print_message
-    from seed_utils import get_global_seed, set_global_seed, set_determinism
-    from data.data_mixin import DataMixin, DataArguments
-    from embedder import Embedder, EmbeddingArguments, get_embedding_filename
-except ImportError:
-    from ..utils import torch_load, print_message
-    from ..seed_utils import get_global_seed, set_global_seed, set_determinism
-    from ..data.data_mixin import DataMixin, DataArguments
-    from ..embedder import Embedder, EmbeddingArguments, get_embedding_filename
+from ..console_output import print_message
+from ..data.data_mixin import DataMixin, DataArguments
+from ..embedder import Embedder, EmbeddingArguments
+from ..feature_cache import open_reader, require_feature
+from ..seed_utils import get_global_seed, set_global_seed, set_determinism
 
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -45,7 +40,7 @@ class VisualizationArguments:
     num_workers: int = 0
     download_embeddings: bool = False
     download_dir: str = "Synthyra/vector_embeddings"
-    embedding_pooling_types: List[str] = field(default_factory=lambda: ["mean"])
+    embedding_pooling_types: list[str] = field(default_factory=lambda: ["mean"])
     embedding_hidden_state_index: int = -1
     max_length: int = 2048
     save_embeddings: bool = False
@@ -58,7 +53,7 @@ class VisualizationArguments:
     min_dist: float = 0.1     # for UMAP
     
     # Visualization settings
-    seed: Optional[int] = None  # If None, will use current time
+    seed: int | None = None  # If None, will use current time
     deterministic: bool = False
     fig_size: tuple = (10, 10)
     save_fig: bool = True
@@ -67,7 +62,7 @@ class VisualizationArguments:
 
 class DimensionalityReducer(DataMixin):
     """Base class for dimensionality reduction techniques"""
-    def __init__(self, args: VisualizationArguments):
+    def __init__(self, args: VisualizationArguments) -> None:
         # Initialize DataMixin without data_args since we're not loading datasets
         super().__init__(data_args=None)
         self.args = args
@@ -76,138 +71,57 @@ class DimensionalityReducer(DataMixin):
         # Set DataMixin instance variables based on args
         self._sql = args.sql
         self._full = args.matrix_embed
-        
-    def _check_and_embed(self, sequences: List[str]):
-        """Check if embeddings exist, and embed sequences if they don't"""
+        # DataMixin finds this model's feature store through these arguments.
+        self.embedding_args = self._embedding_arguments()
+
+    def _embedding_arguments(self) -> EmbeddingArguments:
+        """The Embedder's arguments, matching VisualizationArguments."""
+        dtype_map = {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+        }
+        return EmbeddingArguments(
+            embedding_batch_size=self.args.embedding_batch_size,
+            embedding_num_workers=self.args.num_workers,
+            download_embeddings=self.args.download_embeddings,
+            download_dir=self.args.download_dir,
+            matrix_embed=self.args.matrix_embed,
+            embedding_pooling_types=self.args.embedding_pooling_types,
+            save_embeddings=True,  # Always save embeddings when auto-embedding
+            embed_dtype=dtype_map.get(self.args.embed_dtype, torch.float32),
+            # Rows are read back from the store, so the Embedder writes them as it goes and keeps none in memory.
+            sql=True,
+            embedding_save_dir=self.args.embedding_save_dir,
+            embedding_hidden_state_index=self.args.embedding_hidden_state_index,
+            max_length=self.args.max_length,
+        )
+
+    def _check_and_embed(self, sequences: list[str]) -> None:
+        """Embed the sequences the feature store lacks, adopting an old cache of this representation first"""
         # Ensure embedding save directory exists
         os.makedirs(self.args.embedding_save_dir, exist_ok=True)
-        
-        # Check if we need to embed (similar to Embedder._read_embeddings_from_disk)
-        pooling_types = self.args.embedding_pooling_types
-        hidden_state_index = self.args.embedding_hidden_state_index
-        filename_pth = get_embedding_filename(
-            self.args.model_name,
-            self.args.matrix_embed,
-            pooling_types,
-            'pth',
-            hidden_state_index,
-            max_length=self.args.max_length,
-        )
-        filename_db = get_embedding_filename(
-            self.args.model_name,
-            self.args.matrix_embed,
-            pooling_types,
-            'db',
-            hidden_state_index,
-            max_length=self.args.max_length,
-        )
-        save_path = os.path.join(self.args.embedding_save_dir, filename_pth)
-        db_path = os.path.join(self.args.embedding_save_dir, filename_db)
-        
-        if self._sql:
-            # Check SQL database
-            import sqlite3
-            if os.path.exists(db_path):
-                conn = sqlite3.connect(db_path)
-                c = conn.cursor()
-                c.execute('CREATE TABLE IF NOT EXISTS embeddings (sequence text PRIMARY KEY, embedding blob)')
-                c.execute("SELECT sequence FROM embeddings")
-                already_embedded = set(row[0] for row in c.fetchall())
-                conn.close()
-                to_embed = [seq for seq in sequences if seq not in already_embedded]
-            else:
-                to_embed = sequences
-        else:
-            # Check PyTorch file
-            if os.path.exists(save_path):
-                emb_dict = torch_load(save_path)
-                to_embed = [seq for seq in sequences if seq not in emb_dict]
-            else:
-                to_embed = sequences
-        
-        # If there are sequences to embed, do it
-        if len(to_embed) > 0:
-            print_message(f"Embedding {len(to_embed)} sequences that are not yet embedded")
-            # Convert embed_dtype string to torch dtype
-            dtype_map = {
-                "float32": torch.float32,
-                "float16": torch.float16,
-                "bfloat16": torch.bfloat16,
-            }
-            embed_dtype = dtype_map.get(self.args.embed_dtype, torch.float32)
-            
-            # Create EmbeddingArguments matching VisualizationArguments
-            embedding_args = EmbeddingArguments(
-                embedding_batch_size=self.args.embedding_batch_size,
-                embedding_num_workers=self.args.num_workers,
-                download_embeddings=self.args.download_embeddings,
-                download_dir=self.args.download_dir,
-                matrix_embed=self.args.matrix_embed,
-                embedding_pooling_types=self.args.embedding_pooling_types,
-                save_embeddings=True,  # Always save embeddings when auto-embedding
-                embed_dtype=embed_dtype,
-                sql=self.args.sql,
-                embedding_save_dir=self.args.embedding_save_dir,
-                embedding_hidden_state_index=self.args.embedding_hidden_state_index,
-                max_length=self.args.max_length,
-            )
-            # Initialize embedder with all sequences (it will only embed missing ones)
-            embedder = Embedder(embedding_args, sequences)
-            # Embed using the model name - embedder handles checking what needs embedding internally
-            embedder(self.args.model_name)
-            print_message(f"Finished embedding sequences")
-        else:
-            print_message(f"All {len(sequences)} sequences are already embedded")
+
+        # The Embedder converts an old cache it finds, embeds only what the store lacks,
+        # and commits rows as it goes.
+        embedder = Embedder(self.embedding_args, sequences)
+        embedder(self.args.model_name)
+        print_message(f"All {len(sequences)} sequences are embedded")
     
-    def load_embeddings(self, sequences: List[str], labels: Optional[List[Union[int, float, List[int]]]] = None):
-        """Load embeddings from file using DataMixin functionality"""
+    def load_embeddings(self, sequences: list[str], labels: list[int | float | list[int]] | None = None) -> None:
+        """Load embeddings from the feature store using DataMixin functionality"""
         # First check if embeddings exist and embed if needed
         self._check_and_embed(sequences)
-        
+
         embeddings = []
-        
-        pooling_types = self.args.embedding_pooling_types
-        hidden_state_index = self.args.embedding_hidden_state_index
-        if self._sql:
-            import sqlite3
-            filename = get_embedding_filename(
-                self.args.model_name,
-                self.args.matrix_embed,
-                pooling_types,
-                'db',
-                hidden_state_index,
-                max_length=self.args.max_length,
-            )
-            save_path = os.path.join(self.args.embedding_save_dir, filename)
-            with sqlite3.connect(save_path) as conn:
-                c = conn.cursor()
-                for seq in sequences:
-                    # Use DataMixin's _select_from_sql method
-                    embedding = self._select_from_sql(c, seq, cast_to_torch=False)
-                    # Reshape to 1D if needed (DataMixin returns shape (1, dim) or (seq_len, dim))
-                    if len(embedding.shape) > 1:
-                        if self._full:
-                            # Average over sequence length
-                            embedding = embedding.mean(axis=0)
-                        else:
-                            # Already averaged, just squeeze
-                            embedding = embedding.squeeze(0)
-                    embeddings.append(embedding)
-        else:
-            filename = get_embedding_filename(
-                self.args.model_name,
-                self.args.matrix_embed,
-                pooling_types,
-                'pth',
-                hidden_state_index,
-                max_length=self.args.max_length,
-            )
-            save_path = os.path.join(self.args.embedding_save_dir, filename)
-            emb_dict = torch_load(save_path)
+
+        model_name = self.args.model_name
+        directory = require_feature(self._embedding_store(model_name), self._legacy_embedding_files(model_name))
+        with open_reader(directory) as reader:
             for seq in sequences:
-                # Use DataMixin's _select_from_pth method
-                embedding = self._select_from_pth(emb_dict, seq, cast_to_np=True)
-                # Reshape to 1D if needed
+                # Use DataMixin's _select_from_store method
+                embedding = self._select_from_store(reader, seq, cast_to_torch=False)
+                # Reshape to 1D if needed (the store gives (dim,) pooled or (seq_len, dim) per token)
                 if len(embedding.shape) > 1:
                     if self._full:
                         # Average over sequence length
@@ -225,11 +139,11 @@ class DimensionalityReducer(DataMixin):
         else:
             self.labels = None
         
-    def fit_transform(self):
+    def fit_transform(self) -> np.ndarray:
         """Implement in child class"""
         raise NotImplementedError
         
-    def plot(self, save_name: Optional[str] = None):
+    def plot(self, save_name: str | None = None) -> None:
         """Plot the reduced dimensionality embeddings with appropriate coloring scheme"""
         if self.embeddings is None:
             raise ValueError("No embeddings loaded. Call load_embeddings() first.")
@@ -322,16 +236,16 @@ class DimensionalityReducer(DataMixin):
 
 
 class PCA(DimensionalityReducer):
-    def __init__(self, args: VisualizationArguments):
+    def __init__(self, args: VisualizationArguments) -> None:
         super().__init__(args)
         self.pca = SklearnPCA(n_components=args.n_components, random_state=get_global_seed() or args.seed)
         
-    def fit_transform(self):
-        return self.pca.fit_transform(self.embeddings)
+    def fit_transform(self) -> np.ndarray:
+        return self.pca.fit_transform(self.embeddings)  # (n, k)
 
 
 class TSNE(DimensionalityReducer):
-    def __init__(self, args: VisualizationArguments):
+    def __init__(self, args: VisualizationArguments) -> None:
         super().__init__(args)
         self.tsne = SklearnTSNE(
             n_components=self.args.n_components,
@@ -339,12 +253,12 @@ class TSNE(DimensionalityReducer):
             random_state=get_global_seed() or self.args.seed
         )
         
-    def fit_transform(self):
-        return self.tsne.fit_transform(self.embeddings)
+    def fit_transform(self) -> np.ndarray:
+        return self.tsne.fit_transform(self.embeddings)  # (n, k)
 
 
 class UMAP(DimensionalityReducer):
-    def __init__(self, args: VisualizationArguments):
+    def __init__(self, args: VisualizationArguments) -> None:
         super().__init__(args)
         self.umap = umap.UMAP(
             n_components=self.args.n_components,
@@ -353,11 +267,11 @@ class UMAP(DimensionalityReducer):
             random_state=get_global_seed() or self.args.seed
         )
         
-    def fit_transform(self):
-        return self.umap.fit_transform(self.embeddings)
+    def fit_transform(self) -> np.ndarray:
+        return self.umap.fit_transform(self.embeddings)  # (n, k)
 
 
-def parse_arguments():
+def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments for visualization"""
     parser = argparse.ArgumentParser(description="Dimensionality reduction visualization for protein embeddings")
     
@@ -373,7 +287,7 @@ def parse_arguments():
     parser.add_argument("--matrix_embed", action="store_true", default=False,
                        help="Use matrix embedding (per-residue embeddings).")
     parser.add_argument("--sql", action="store_true", default=False,
-                       help="Use SQL storage for embeddings.")
+                       help="Accepted for compatibility. Embeddings always live in the feature store under --embedding_save_dir.")
     
     # ----------------- Embedding Arguments ----------------- #
     parser.add_argument("--embedding_batch_size", type=int, default=16,

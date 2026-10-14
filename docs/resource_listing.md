@@ -19,10 +19,10 @@ To list all supported models with their descriptions:
 
 ```bash
 # List all supported models
-py -m src.protify.base_models.get_base_models --list
+python -m protify.base_models.get_base_models --list
 
 # To download standard models
-py -m src.protify.base_models.get_base_models --download
+python -m protify.base_models.get_base_models --download
 ```
 
 ### Listing Datasets
@@ -31,10 +31,10 @@ To list all supported datasets with their descriptions:
 
 ```bash
 # List all datasets
-py -m src.protify.data.dataset_utils --list
+python -m protify.data.dataset_utils --list
 
 # Get information about a specific dataset
-py -m src.protify.data.dataset_utils --info EC
+python -m protify.data.dataset_utils --info EC
 ```
 
 ### Combined Listing
@@ -43,16 +43,16 @@ For a combined view of both models and datasets:
 
 ```bash
 # List both models and datasets
-py -m src.protify.resource_info --all
+python -m protify.resource_info --all
 
 # List only standard models and datasets
-py -m src.protify.resource_info --all --standard-only
+python -m protify.resource_info --all --standard-only
 
 # List only models
-py -m src.protify.resource_info --models
+python -m protify.resource_info --models
 
 # List only datasets
-py -m src.protify.resource_info --datasets
+python -m protify.resource_info --datasets
 ```
 
 ## Programmatic Access
@@ -61,8 +61,8 @@ You can also access model and dataset information programmatically:
 
 ```python
 # For models
-from src.protify.resource_info import model_descriptions
-from src.protify.base_models.get_base_models import currently_supported_models, standard_models
+from protify.resource_info import model_descriptions
+from protify.base_models.get_base_models import currently_supported_models, standard_models
 
 # Get information about a specific model
 model_info = model_descriptions.get('ESM2-150', {})
@@ -72,8 +72,8 @@ print(f"Size: {model_info.get('size', 'N/A')}")
 print(f"Type: {model_info.get('type', 'N/A')}")
 
 # For datasets
-from src.protify.resource_info import dataset_descriptions
-from src.protify.data.supported_datasets import supported_datasets
+from protify.resource_info import dataset_descriptions
+from protify.data.supported_datasets import supported_datasets
 
 # Get information about a specific dataset
 dataset_info = dataset_descriptions.get('EC', {})

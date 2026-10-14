@@ -1,16 +1,9 @@
 import numpy as np
+
 from sklearn.linear_model import Ridge
 
-try:
-    from src.protify.probes import scikit_classes
-    from src.protify.probes.scikit_classes import ScikitArguments, ScikitProbe
-except ImportError:
-    try:
-        from protify.probes import scikit_classes
-        from protify.probes.scikit_classes import ScikitArguments, ScikitProbe
-    except ImportError:
-        from ..probes import scikit_classes
-        from ..probes.scikit_classes import ScikitArguments, ScikitProbe
+from protify.probes import scikit_classes
+from protify.probes.scikit_classes import ScikitArguments, ScikitProbe
 
 
 def test_scikit_probe_passes_n_jobs_to_random_search(monkeypatch) -> None:

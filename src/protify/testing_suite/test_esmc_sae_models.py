@@ -2,54 +2,31 @@
 
 import pytest
 
-try:
-    from src.protify.base_models.esmc_sae import (
-        DEFAULT_SAE_CODEBOOK_DIM,
-        DEFAULT_SAE_K,
-        ESMC_SAE_COVERAGE,
-        SPARSE_ACTIVE_FRACTION,
-        is_sae_model_name,
-        parse_sae_model_name,
-        resolve_sae_model_name,
-    )
-    from src.protify.base_models.get_base_models import BaseModelArguments
-    from src.protify.base_models.supported_models import (
-        all_presets_with_paths,
-        currently_supported_models,
-    )
-    from src.protify.probes.estimator_probe import (
-        ESTIMATOR_DEFAULTS,
-        ESTIMATOR_PROBE_TYPES,
-        EstimatorProbeArguments,
-        build_estimator,
-        is_estimator_probe,
-    )
-    from src.protify.probes.get_probe import normalize_probe_type
-    from src.protify.base_models.get_base_models import get_base_model_for_training
-except ImportError:
-    from protify.base_models.esmc_sae import (
-        DEFAULT_SAE_CODEBOOK_DIM,
-        DEFAULT_SAE_K,
-        ESMC_SAE_COVERAGE,
-        SPARSE_ACTIVE_FRACTION,
-        is_sae_model_name,
-        parse_sae_model_name,
-        resolve_sae_model_name,
-    )
-    from protify.base_models.get_base_models import BaseModelArguments
-    from protify.base_models.supported_models import (
-        all_presets_with_paths,
-        currently_supported_models,
-    )
-    from protify.probes.estimator_probe import (
-        ESTIMATOR_DEFAULTS,
-        ESTIMATOR_PROBE_TYPES,
-        EstimatorProbeArguments,
-        build_estimator,
-        is_estimator_probe,
-    )
-    from protify.probes.get_probe import normalize_probe_type
-    from protify.base_models.get_base_models import get_base_model_for_training
+from protify.base_models.esmc_sae import (
+    ALL_LAYER_K,
+    DEFAULT_SAE_CODEBOOK_DIM,
+    DEFAULT_SAE_K,
+    ESMC_SAE_COVERAGE,
+    SPARSE_ACTIVE_FRACTION,
+    is_sae_model_name,
+    parse_sae_model_name,
+    resolve_sae_model_name,
+    resolve_sae_selection,
+)
+from protify.base_models.get_base_models import BaseModelArguments
+from protify.base_models.get_base_models import get_base_model_for_training
+from protify.base_models.supported_models import (
+    all_presets_with_paths,
+    currently_supported_models,
+)
+from protify.probes.estimator_probe import (
+    ESTIMATOR_DEFAULTS,
+    ESTIMATOR_PROBE_TYPES,
+    EstimatorProbeArguments,
+    build_estimator,
+    is_estimator_probe,
+)
+from protify.probes.get_probe import normalize_probe_type
 
 
 SAE_ALIASES = ("ESMC-300-SAE", "ESMC-600-SAE", "ESMC-6B-SAE")
@@ -105,6 +82,30 @@ def test_parsing_a_qualified_name_yields_the_biohub_checkpoint() -> None:
     assert selection.codebook_dim == 8192
 
 
+def test_depth_layer_checkpoints_name_the_layer() -> None:
+    for backbone, coverage in ESMC_SAE_COVERAGE.items():
+        selection = resolve_sae_selection(backbone, coverage.depth_layer, 64, 16384)
+
+        expected = f"biohub/{coverage.biohub_name}-sae-layer{coverage.depth_layer}-k64-codebook16384"
+        assert selection.repository == expected
+
+
+def test_other_layers_resolve_to_the_all_layer_repository() -> None:
+    """Biohub serves non-depth layers from a repository that omits the layer.
+
+    Naming these `-sae-layer{n}-` instead resolves to no repository at all, which is
+    what this asserts against.
+    """
+    for backbone, coverage in ESMC_SAE_COVERAGE.items():
+        other_layer = 0 if coverage.depth_layer != 0 else 1
+        codebook_dim = coverage.all_layer_codebook_dims[0]
+        selection = resolve_sae_selection(backbone, other_layer, ALL_LAYER_K, codebook_dim)
+
+        expected = f"biohub/{coverage.biohub_name}-sae-k{ALL_LAYER_K}-codebook{codebook_dim}"
+        assert selection.repository == expected
+        assert f"-layer{other_layer}-" not in selection.repository
+
+
 def test_parsing_a_bare_alias_raises() -> None:
     with pytest.raises(ValueError, match="not a fully qualified"):
         parse_sae_model_name("ESMC-300-SAE")
@@ -133,12 +134,9 @@ def test_sae_models_pool_inside_the_encoder() -> None:
     # Embedder reads `pools_internally` to skip building a Pooler over SAE outputs. That is
     # what lets 'sum' through: the generic Pooler owns a different name set and would reject
     # it before any embedding runs.
-    try:
-        from src.protify.base_models.esmc_sae import SAE_POOLING_TYPES, EsmcSaeForEmbedding
-        from src.protify.pooler import Pooler
-    except ImportError:
-        from protify.base_models.esmc_sae import SAE_POOLING_TYPES, EsmcSaeForEmbedding
-        from protify.pooler import Pooler
+    from protify.base_models.esmc_sae import EsmcSaeForEmbedding
+    from protify.base_models.sae_pooling import SAE_POOLING_TYPES
+    from protify.pooler import Pooler
 
     assert EsmcSaeForEmbedding.pools_internally
     assert set(SAE_POOLING_TYPES) - set(Pooler(['mean']).pooling_options) == {'sum'}
@@ -286,3 +284,33 @@ def test_storage_policy_follows_the_active_fraction_not_the_width_alone() -> Non
 def test_sae_models_have_no_trainable_path() -> None:
     with pytest.raises(ValueError, match="no trainable path"):
         get_base_model_for_training("ESMC-300-SAE-l23-k64-c8192", num_labels=2)
+
+
+def test_sae_embedding_pools_every_token_of_each_sequence_special_tokens_included() -> None:
+    """A right-padded batch as FastPLMs flattens it; the stub backbone stands in for ESM++."""
+    import torch
+    import torch.nn as nn
+
+    from types import SimpleNamespace
+
+    from protify.base_models.esmc_sae import EsmcSaeForEmbedding
+
+    generator = torch.Generator().manual_seed(3)
+    attention_mask = torch.tensor([[1, 1, 1, 1, 1, 0], [1, 1, 1, 0, 0, 0], [1, 1, 0, 0, 0, 0]])  # (b, l)
+    rows = torch.rand(int(attention_mask.sum()), 7, generator=generator)  # (n, c), one row per valid token
+    rows = rows * (rows > 0.6)
+    model = EsmcSaeForEmbedding.__new__(EsmcSaeForEmbedding)
+    nn.Module.__init__(model)
+    model.esm = lambda **kwargs: SimpleNamespace(sae_outputs={'layer23': rows.to_sparse()})
+    model.selection = parse_sae_model_name('ESMC-300-SAE-l23-k64-c8192')
+    model.sae_key, model.pooling_types = 'layer23', ('max', 'mean', 'sum')
+
+    pooled = model(torch.zeros_like(attention_mask), attention_mask)  # (b, 3c)
+
+    grid = torch.zeros(*attention_mask.shape, 7)  # (b, l + 2, c)
+    grid[attention_mask.bool()] = rows
+    expected = []
+    for sequence, count in enumerate(attention_mask.sum(dim=1).tolist()):
+        tokens = grid[sequence, :count]  # (count, c); CLS and EOS count, so l residues give l + 2 rows
+        expected.append(torch.cat([tokens.max(dim=0).values, tokens.mean(dim=0), tokens.sum(dim=0)]))  # (3c,)
+    torch.testing.assert_close(pooled, torch.stack(expected), rtol=1e-6, atol=1e-7)

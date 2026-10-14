@@ -1,12 +1,6 @@
 import pytest
 
-try:
-    from src.protify.scripts import plan_parallel_probes as preflight
-except ImportError:
-    try:
-        from protify.scripts import plan_parallel_probes as preflight
-    except ImportError:
-        from ..scripts import plan_parallel_probes as preflight
+from protify.scripts import plan_parallel_probes as preflight
 
 
 def _args(*extra_args):
@@ -90,7 +84,7 @@ def test_parallel_probe_preflight_builds_cross_product_plan_report() -> None:
     assert first_embedding_job["command"] == [
         "python",
         "-m",
-        "main",
+        "protify.main",
         "--model_names",
         "ESM2-35",
         "--data_names",
@@ -395,8 +389,8 @@ def test_parallel_probe_preflight_builds_cross_product_plan_report() -> None:
     assert wave_plan["waves"][0]["group_run_counts"] == [2]
     assert wave_plan["waves"][0]["group_run_ids"] == [["EC/ESM2-35/seed-42", "EC/ESM2-35/seed-43"]]
     manifest = report["launch_manifest"]
-    assert manifest["entrypoint"] == "python -m main"
-    assert manifest["monitor_entrypoint"] == "python -m scripts.monitor_parallel_probe_hardware"
+    assert manifest["entrypoint"] == "python -m protify.main"
+    assert manifest["monitor_entrypoint"] == "python -m protify.scripts.monitor_parallel_probe_hardware"
     assert manifest["telemetry_dir"] == "telemetry"
     assert manifest["monitor_interval_seconds"] == pytest.approx(1.0)
     assert manifest["monitor_gpu_index"] is None
@@ -440,7 +434,7 @@ def test_parallel_probe_preflight_builds_cross_product_plan_report() -> None:
     assert manifest["groups"][0]["sequential_command"] == [
         "python",
         "-m",
-        "main",
+        "protify.main",
     ] + manifest["groups"][0]["sequential_cli_args"]
     assert manifest["groups"][0]["parallel_cli_args"] == [
         "--model_names",
@@ -473,12 +467,12 @@ def test_parallel_probe_preflight_builds_cross_product_plan_report() -> None:
     assert manifest["groups"][0]["parallel_command"] == [
         "python",
         "-m",
-        "main",
+        "protify.main",
     ] + manifest["groups"][0]["parallel_cli_args"]
     assert manifest["groups"][0]["sequential_monitor_command"] == [
         "python",
         "-m",
-        "scripts.monitor_parallel_probe_hardware",
+        "protify.scripts.monitor_parallel_probe_hardware",
         "--output_jsonl",
         "telemetry/group-1_sequential.jsonl",
         "--summary_json",
@@ -491,7 +485,7 @@ def test_parallel_probe_preflight_builds_cross_product_plan_report() -> None:
     assert manifest["groups"][0]["parallel_monitor_command"] == [
         "python",
         "-m",
-        "scripts.monitor_parallel_probe_hardware",
+        "protify.scripts.monitor_parallel_probe_hardware",
         "--output_jsonl",
         "telemetry/group-1_parallel.jsonl",
         "--summary_json",

@@ -1,25 +1,16 @@
+from .dataset_descriptions import dataset_descriptions
 from .supported_datasets import (
     dataset_aliases,
     get_dataset_source,
-    internal_datasets,
-    possible_with_vector_reps,
     resolve_dataset_name,
     standard_data_benchmark,
     supported_datasets,
-    testing,
 )
 
 
 def list_supported_datasets(with_descriptions: bool = True) -> None:
     """Print supported datasets, optionally including descriptive metadata."""
-    try:
-        from .dataset_descriptions import dataset_descriptions
-
-        has_descriptions = True
-    except ImportError:
-        has_descriptions = False
-
-    if not with_descriptions or not has_descriptions:
+    if not with_descriptions:
         print("\n=== Supported Datasets ===\n")
         for dataset_name in supported_datasets:
             print(f"- {dataset_name}: {supported_datasets[dataset_name]}")
@@ -67,18 +58,12 @@ def list_supported_datasets(with_descriptions: bool = True) -> None:
 def get_dataset_info(dataset_name: str) -> dict[str, object] | None:
     """Return metadata for a supported dataset name or alias."""
     canonical_name = resolve_dataset_name(dataset_name)
-
-    try:
-        from .dataset_descriptions import dataset_descriptions
-
-        if canonical_name in dataset_descriptions:
-            dataset_info = dict(dataset_descriptions[canonical_name])
-            if dataset_name in dataset_aliases:
-                dataset_info['name'] = canonical_name
-                dataset_info['alias'] = dataset_name
-            return dataset_info
-    except ImportError:
-        pass
+    if canonical_name in dataset_descriptions:
+        dataset_info = dict(dataset_descriptions[canonical_name])
+        if dataset_name in dataset_aliases:
+            dataset_info['name'] = canonical_name
+            dataset_info['alias'] = dataset_name
+        return dataset_info
 
     if canonical_name in supported_datasets:
         return {"name": canonical_name, "source": get_dataset_source(canonical_name)}

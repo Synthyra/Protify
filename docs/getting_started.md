@@ -23,37 +23,39 @@ pip install Protify
 From the repository root:
 
 ```bash
-git clone https://github.com/Gleghorn-Lab/Protify.git
+git clone https://github.com/Synthyra/Protify.git
 cd Protify
 git submodule update --init --recursive
-py -m pip install -r requirements.txt
+python -m pip install -r requirements.txt
+python -m pip install --no-deps -e .
 ```
 
-Then run from the repo root so that `src` is on the Python path:
+The editable install makes `protify`, and the `foundry` code vendored at the repository root, importable
+from anywhere:
 
 ```bash
-py -m src.protify.main --help
+python -m protify.main --help
 ```
-
-Alternatively, from `src/protify` you can run `py -m main` and `py -m gui` (see [Entry points](#entry-points)).
 
 ### Docker
 
-Run all commands from the **repository root** on your host; you do not need to `cd src/protify`. Mount the project at `/workspace` and set the container working directory to `/workspace/src/protify` so that `py -m main` and `py -m gui` work without changing the module path.
+Run all commands from the **repository root** on your host. Mount the project at `/workspace` and run from
+`/workspace`; the image puts `src/` and the repository root on `PYTHONPATH`, so `python -m protify.main` and
+`python -m protify.gui` work there.
 
 **Linux / macOS:**
 ```bash
 docker build -t protify-env:latest .
-docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify protify-env:latest python -m main --model_names ESM2-8 --data_names DeepLoc-2 --num_epochs 2
+docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace protify-env:latest python -m protify.main --model_names ESM2-8 --data_names DeepLoc-2 --num_epochs 2
 ```
 
 **Windows:**
 ```bash
 docker build -t protify-env:latest .
-docker run --rm -it --gpus all -v "%CD%":/workspace -w /workspace/src/protify protify-env:latest py -m main --model_names ESM2-8 --data_names DeepLoc-2 --num_epochs 2
+docker run --rm -it --gpus all -v "%CD%":/workspace -w /workspace protify-env:latest python -m protify.main --model_names ESM2-8 --data_names DeepLoc-2 --num_epochs 2
 ```
 
-Paths like `--log_dir` and `--results_dir` are relative to `/workspace/src/protify`. To write outputs at project root, use e.g. `--log_dir /workspace/logs` and `--results_dir /workspace/results`.
+Paths like `--log_dir` and `--results_dir` are relative to `/workspace`, the repository root, so outputs land beside the mounted project.
 
 ### Optional: xformers for AMPLIFY
 
@@ -69,12 +71,11 @@ pip install xformers
 
 | Entry point | Purpose |
 |------------|--------|
-| `py -m src.protify.main` | CLI (and optional YAML). Run from repo root. |
-| `py -m src.protify.gui` | Tk GUI. Run from repo root. |
-| `py -m main` | Same as main, when run from `src/protify`. |
-| `py -m gui` | Same as gui, when run from `src/protify`. |
+| `python -m protify.main` | CLI (and optional YAML). |
+| `python -m protify.gui` | Tk GUI. |
 
-Use `py` on Windows; you can use `python` if it points to the same interpreter. **In Docker:** use `-w /workspace/src/protify` and then `py -m main` or `py -m gui` (no `src.protify` prefix needed).
+Use `py` on Windows if `python` is not the interpreter you installed into. Both modules are part of the
+package, so they run from any directory once Protify is installed, and from `/workspace` in Docker.
 
 ---
 
@@ -85,7 +86,7 @@ When you pass datasets (`--data_names` or `--data_dirs`), the default flow is:
 1. **Parse arguments** (CLI and optionally merge YAML).
 2. **Apply settings:** Build `DataArguments`, `BaseModelArguments`, `ProbeArguments`, `EmbeddingArguments`, `TrainerArguments` from the combined config.
 3. **Load data:** `get_datasets()` loads from HuggingFace and/or local dirs and normalizes columns.
-4. **Embeddings:** `save_embeddings_to_disk()` computes (or downloads/reads) embeddings per model and saves to disk (or SQLite).
+4. **Embeddings:** `save_embeddings_to_disk()` computes (or downloads/reads) embeddings per model and saves them to the feature store under `embedding_save_dir`, converting an old `.pth` or SQLite cache it finds.
 5. **Train:** One of: `run_nn_probes()` (default), `run_full_finetuning()`, `run_hybrid_probes()`, or `run_scikit_scheme()` (or W&B hyperopt).
 6. **Write results:** Metrics are written to a TSV in `results_dir`.
 7. **Plots:** `create_plots()` generates radar, bar, and heatmap PNGs in `plots_dir`.
@@ -100,13 +101,13 @@ If you pass `--proteingym` and no datasets, only the ProteinGym zero-shot scorin
 Minimal probe-only run (one model, one dataset, two epochs):
 
 ```bash
-py -m src.protify.main --model_names ESM2-8 --data_names DeepLoc-2 --num_epochs 2
+python -m protify.main --model_names ESM2-8 --data_names DeepLoc-2 --num_epochs 2
 ```
 
 The reference config in `src/protify/yamls/base.yaml` runs the recommended stack instead: ESMC 300M read through its sparse autoencoder, max-pooled, into a gradient-boosted probe.
 
 ```bash
-py -m src.protify.main --yaml_path src/protify/yamls/base.yaml --data_names DeepLoc-2
+python -m protify.main --yaml_path src/protify/yamls/base.yaml --data_names DeepLoc-2
 ```
 
 Command-line defaults:
@@ -136,14 +137,41 @@ Results appear in `results/` (TSV of metrics) and `logs/` (session log). Plots a
 3. Run:
 
    ```bash
-   py -m src.protify.main --yaml_path src/protify/yamls/base.yaml
+   python -m protify.main --yaml_path src/protify/yamls/base.yaml
    ```
 
 CLI flags override YAML. For example:
 
 ```bash
-py -m src.protify.main --yaml_path src/protify/yamls/base.yaml --num_epochs 5
+python -m protify.main --yaml_path src/protify/yamls/base.yaml --num_epochs 5
 ```
+
+---
+
+## The sparse autoencoder recipe
+
+[`yamls/production_sae.yaml`](../src/protify/yamls/production_sae.yaml) is the whole
+sparse-autoencoder pipeline as one config: ESMC-6B features through a Biohub codebook, max
+pooled to one vector per protein, joined symmetrically for pair datasets, dead columns
+dropped, and an XGBoost probe whose hyperparameters are searched against the validation
+split. Point it at a dataset:
+
+```bash
+python -m protify.main --yaml_path src/protify/yamls/production_sae.yaml \
+  --data_names gold-ppi
+```
+
+The file comments say why each value is what it is. Two are worth knowing before changing
+them:
+
+- `sae_k: 16` with `sae_codebook_dim: 131072` is the sparse corner of the published grid.
+  Max pooling unions the top-k features of every residue, so pooled sparsity follows `k`
+  rather than width. At `sae_k: 512` the same codebook pools to about a third non-zero,
+  its cache costs about twenty-five times more per protein, and the support prune has
+  almost nothing left to remove.
+- `pair_feature_mode: minmax` makes a pair row independent of which protein the dataset
+  listed first, so `random_pair_flipping` is off: under a symmetric row it would emit the
+  row that is already there.
 
 ---
 

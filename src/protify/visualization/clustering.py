@@ -8,15 +8,14 @@ import importlib.metadata
 import json
 import math
 import os
-import sqlite3
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
-
-import matplotlib.pyplot as plt
-import numpy as np
-import torch
 from scipy.cluster.hierarchy import dendrogram
 from sklearn.cluster import (
     AgglomerativeClustering,
@@ -39,21 +38,18 @@ from sklearn.metrics import (
 from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
 
+
 try:
     from sklearn.cluster import HDBSCAN
 except ImportError:  # pragma: no cover - Protify pins a version that provides it.
     HDBSCAN = None
 
-try:
-    from data.dataset_classes import EmbeddingStandardizer
-    from pooler import Pooler
-    from seed_utils import set_global_seed
-    from utils import embedding_blob_to_tensor, torch_load
-except ImportError:
-    from ..data.dataset_classes import EmbeddingStandardizer
-    from ..pooler import Pooler
-    from ..seed_utils import set_global_seed
-    from ..utils import embedding_blob_to_tensor, torch_load
+from ..data.dataset_classes import EmbeddingStandardizer
+from ..feature_cache import row_lookup
+from ..legacy_cache import sqlite_rows
+from ..pooler import Pooler
+from ..seed_utils import set_global_seed
+from ..legacy_cache import torch_load
 
 
 plt.ioff()
@@ -209,7 +205,7 @@ def _to_numpy(value: Any) -> np.ndarray:
         raise ValueError("Embeddings must be numeric arrays or tensors.") from error
     if not np.isfinite(array).all():
         raise ValueError("Embedding contains NaN or infinite values.")
-    return array
+    return array  # the input's shape, (d,) or (l, d)
 
 
 def vectorize_embedding(
@@ -228,7 +224,7 @@ def vectorize_embedding(
     if array.ndim == 1:
         if array.size == 0:
             raise ValueError("Embedding vectors cannot be empty.")
-        return array.astype(np.float32, copy=False)
+        return array.astype(np.float32, copy=False)  # (d,)
     if array.ndim != 2:
         raise ValueError(
             f"Each embedding must have shape (d,) or (l, d), got {array.shape}."
@@ -243,7 +239,7 @@ def vectorize_embedding(
     vector = pooled.detach().cpu().float().numpy()
     if not np.isfinite(vector).all():
         raise ValueError("Pooling produced NaN or infinite values.")
-    return vector
+    return vector  # (p * d,)
 
 
 def _records_to_table(
@@ -395,37 +391,41 @@ def _load_sqlite(
     pooling_types: Sequence[str],
     legacy_embedding_dim: int | None,
 ) -> EmbeddingTable:
-    connection_uri = f"{path.resolve().as_uri()}?mode=ro"
-    with sqlite3.connect(connection_uri, uri=True, timeout=30) as connection:
-        table_row = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='embeddings'"
-        ).fetchone()
-        if table_row is None:
-            raise ValueError(
-                "SQLite input must use Protify's embeddings(sequence, embedding) schema."
-            )
-        columns = {
-            row[1]
-            for row in connection.execute("PRAGMA table_info(embeddings)").fetchall()
-        }
-        if not {"sequence", "embedding"}.issubset(columns):
-            raise ValueError(
-                "SQLite table 'embeddings' must contain sequence and embedding columns."
-            )
-        cursor = connection.execute(
-            "SELECT sequence, embedding FROM embeddings ORDER BY rowid"
+    """Read a cache in Protify's original SQLite format, only through the legacy decoder.
+
+    Nothing writes that format any more; `python -m protify.legacy_cache <file>` converts such a file
+    into a feature store, which `_load_store` reads.
+    """
+    fallback_shape = (
+        (lambda sequence: (-1, legacy_embedding_dim)) if legacy_embedding_dim is not None else None
+    )
+    return _records_to_table(sqlite_rows(path, fallback_shape=fallback_shape), pooling_types, str(path))
+
+
+def _load_store(
+    path: Path,
+    ids: Sequence[str] | None,
+    pooling_types: Sequence[str],
+) -> EmbeddingTable:
+    """Read the rows of a feature store for the given sequences, one at a time so matrices pool as they come.
+
+    A store is looked up by sequence and lists none, so ``ids`` are the sequences to load and become
+    the record identifiers.
+    """
+    if ids is None:
+        raise ValueError(
+            "A feature store is read by sequence and does not list them; pass ids, the sequences to load."
         )
-        fallback_shape = (
-            (-1, legacy_embedding_dim) if legacy_embedding_dim is not None else None
-        )
-        records = (
-            (
-                str(record_id),
-                embedding_blob_to_tensor(blob, fallback_shape=fallback_shape),
+    record_ids = tuple(str(record_id) for record_id in ids)
+    try:
+        with row_lookup(path) as lookup:
+            return _records_to_table(
+                ((record_id, lookup(record_id)) for record_id in record_ids),
+                pooling_types,
+                str(path),
             )
-            for record_id, blob in cursor
-        )
-        return _records_to_table(records, pooling_types, str(path))
+    except KeyError as error:
+        raise ValueError(f"The feature store {path} does not hold every requested id: {error.args[0]}") from error
 
 
 def load_embeddings(
@@ -436,8 +436,14 @@ def load_embeddings(
     legacy_embedding_dim: int | None = None,
     csv_id_column: str | None = None,
 ) -> EmbeddingTable:
-    """Load vectors from memory, standard files, Protify SQLite, or an adapter."""
+    """Load vectors from memory, standard files, a feature store, an old Protify SQLite cache, or an adapter.
 
+    A directory is a feature store (`fastplms.features`) and needs ``ids``: the sequences to load.
+    A ``.db`` file is an old Protify cache, read only through the legacy decoder. A ``.pth`` file is
+    any mapping of identifier to tensor, whether or not Protify wrote it.
+    """
+
+    # source: (n, d) when an array or tensor
     if isinstance(ids, (str, bytes, bytearray)):
         raise TypeError("ids must be a sequence of complete record IDs, not a string.")
     if isinstance(source, VectorSource):
@@ -446,6 +452,8 @@ def load_embeddings(
         return _records_to_table(source.iter_vectors(), pooling_types, type(source).__name__)
     if isinstance(source, (str, os.PathLike)):
         path = Path(source)
+        if path.is_dir():
+            return _load_store(path, ids, pooling_types)
         if not path.is_file():
             raise FileNotFoundError(f"Embedding source does not exist: {path}.")
         suffix = path.suffix.lower()
@@ -470,14 +478,15 @@ def load_embeddings(
 
 
 def _cluster_count(labels: np.ndarray) -> int:
+    # labels: (n,)
     return len(set(labels.tolist()) - {-1})
 
 
 def _sample_indices(sample_count: int, limit: int, seed: int) -> np.ndarray:
     if sample_count <= limit:
-        return np.arange(sample_count)
+        return np.arange(sample_count)  # (n,)
     generator = np.random.default_rng(seed)
-    return np.sort(generator.choice(sample_count, size=limit, replace=False))
+    return np.sort(generator.choice(sample_count, size=limit, replace=False))  # (m,)
 
 
 def evaluate_clustering(
@@ -489,6 +498,7 @@ def evaluate_clustering(
 ) -> dict[str, int | float | str | None]:
     """Compute internal validation metrics while excluding noise label ``-1``."""
 
+    # vectors: (n, d), labels: (n,)
     labels = np.asarray(labels, dtype=np.int64)
     full_labels = labels
     full_non_noise = full_labels != -1
@@ -536,6 +546,7 @@ def fit_clusterer(
 ) -> AlgorithmResult:
     """Fit one supported clusterer and return its labels and metrics."""
 
+    # vectors: (n, d)
     name = _normalize_name(name)
     if name not in SUPPORTED_ALGORITHMS:
         raise ValueError(f"Unsupported clustering algorithm: {name}.")
@@ -625,18 +636,19 @@ def _reduce_vectors(
     method: str,
     seed: int,
 ) -> np.ndarray:
+    # vectors: (n, d)
     method = _normalize_name(method)
     if method == "pca":
         if vectors.shape[1] == 1:
-            return np.column_stack([vectors[:, 0], np.zeros(vectors.shape[0])])
+            return np.column_stack([vectors[:, 0], np.zeros(vectors.shape[0])])  # (n, 2)
         if np.unique(vectors, axis=0).shape[0] == 1:
-            return np.zeros((vectors.shape[0], 2), dtype=np.float64)
-        return PCA(n_components=2, random_state=seed).fit_transform(vectors)
+            return np.zeros((vectors.shape[0], 2), dtype=np.float64)  # (n, 2)
+        return PCA(n_components=2, random_state=seed).fit_transform(vectors)  # (n, 2)
     if method == "tsne":
         if vectors.shape[0] < 3:
             raise ValueError("t-SNE requires at least three samples.")
         perplexity = min(30.0, max(1.0, (vectors.shape[0] - 1) / 3.0))
-        return TSNE(
+        return TSNE(  # (n, 2)
             n_components=2,
             perplexity=perplexity,
             init="pca",
@@ -652,7 +664,7 @@ def _reduce_vectors(
             ) from error
         if vectors.shape[0] < 3:
             raise ValueError("UMAP requires at least three samples.")
-        return umap.UMAP(
+        return umap.UMAP(  # (n, 2)
             n_components=2,
             n_neighbors=min(15, vectors.shape[0] - 1),
             min_dist=0.1,
@@ -662,6 +674,7 @@ def _reduce_vectors(
 
 
 def _cluster_labels(labels: np.ndarray) -> list[int]:
+    # labels: (n,)
     return sorted(set(labels.tolist()), key=lambda label: (label == -1, label))
 
 
@@ -671,6 +684,7 @@ def _scatter_on_axis(
     labels: np.ndarray,
     title: str,
 ) -> None:
+    # coordinates: (n, 2), labels: (n,)
     unique_labels = _cluster_labels(labels)
     color_map = plt.get_cmap("tab20", max(1, len(unique_labels)))
     for index, label in enumerate(unique_labels):
@@ -705,6 +719,7 @@ def _plot_scatter(
     output_dir: Path,
     dpi: int,
 ) -> Path:
+    # coordinates: (n, 2), labels: (n,)
     figure, axis = plt.subplots(figsize=(8, 6))
     _scatter_on_axis(axis, coordinates, labels, f"{algorithm}: {reduction.upper()}")
     return _save_figure(figure, output_dir / f"{algorithm}_{reduction}.png", dpi)
@@ -716,6 +731,7 @@ def _plot_cluster_sizes(
     output_dir: Path,
     dpi: int,
 ) -> Path:
+    # labels: (n,)
     unique_labels, counts = np.unique(labels, return_counts=True)
     names = ["noise" if label == -1 else str(label) for label in unique_labels]
     figure, axis = plt.subplots(figsize=(8, 5))
@@ -733,6 +749,7 @@ def _plot_silhouette(
     output_dir: Path,
     dpi: int,
 ) -> Path | None:
+    # vectors: (n, d), labels: (n,)
     non_noise = labels != -1
     filtered_vectors = vectors[non_noise]
     filtered_labels = labels[non_noise]
@@ -771,6 +788,7 @@ def _plot_centroid_distances(
     output_dir: Path,
     dpi: int,
 ) -> Path | None:
+    # vectors: (n, d), labels: (n,)
     unique_labels = np.asarray([label for label in np.unique(labels) if label != -1])
     if len(unique_labels) < 2:
         return None
@@ -827,11 +845,12 @@ def _plot_algorithm_overview(
     output_dir: Path,
     dpi: int,
 ) -> Path:
+    # coordinates: (m, 2), sample_indices: (m,)
     columns = min(3, len(results))
     rows = math.ceil(len(results) / columns)
     figure, axes = plt.subplots(rows, columns, figsize=(6 * columns, 5 * rows), squeeze=False)
-    for axis, result in zip(axes.flat, results.values()):
-        _scatter_on_axis(axis, coordinates, result.labels[sample_indices], result.name)
+    for axis, fitted in zip(axes.flat, results.values(), strict=False):
+        _scatter_on_axis(axis, coordinates, fitted.labels[sample_indices], fitted.name)
     for axis in list(axes.flat)[len(results):]:
         axis.axis("off")
     figure.suptitle("PCA overview across clustering algorithms")
@@ -842,6 +861,7 @@ def _plot_kmeans_diagnostics(
     vectors: np.ndarray,
     config: ClusteringConfig,
 ) -> Path | None:
+    # vectors: (n, d)
     distinct_vector_count = np.unique(vectors, axis=0).shape[0]
     if distinct_vector_count < 2:
         figure, axis = plt.subplots(figsize=(8, 5))
@@ -898,6 +918,7 @@ def _plot_density_diagnostics(
     vectors: np.ndarray,
     config: ClusteringConfig,
 ) -> Path | None:
+    # vectors: (n, d)
     neighbor_count = min(config.min_samples, vectors.shape[0])
     if neighbor_count < 2:
         return None
@@ -918,11 +939,11 @@ def _plot_density_diagnostics(
 
 
 def _plot_optics_reachability(
-    result: AlgorithmResult,
+    fitted: AlgorithmResult,
     config: ClusteringConfig,
 ) -> Path | None:
-    reachability = getattr(result.estimator, "reachability_", None)
-    ordering = getattr(result.estimator, "ordering_", None)
+    reachability = getattr(fitted.estimator, "reachability_", None)
+    ordering = getattr(fitted.estimator, "ordering_", None)
     if reachability is None or ordering is None:
         return None
     ordered = reachability[ordering]
@@ -940,14 +961,14 @@ def _plot_optics_reachability(
 
 
 def _plot_agglomerative_dendrogram(
-    result: AlgorithmResult,
+    fitted: AlgorithmResult,
     config: ClusteringConfig,
 ) -> Path | None:
-    children = getattr(result.estimator, "children_", None)
-    distances = getattr(result.estimator, "distances_", None)
+    children = getattr(fitted.estimator, "children_", None)
+    distances = getattr(fitted.estimator, "distances_", None)
     if children is None or distances is None:
         return None
-    sample_count = len(result.labels)
+    sample_count = len(fitted.labels)
     counts = np.zeros(children.shape[0])
     for index, merge in enumerate(children):
         count = 0
@@ -1030,6 +1051,7 @@ def _write_outputs(
     errors: Mapping[str, str],
     plot_paths: Sequence[Path],
 ) -> None:
+    # vectors: (n, d)
     np.savez_compressed(
         config.output_dir / "vectors.npz",
         ids=np.asarray(table.ids, dtype=str),
@@ -1048,7 +1070,7 @@ def _write_outputs(
         writer.writerow(["id", *results.keys()])
         for index, record_id in enumerate(table.ids):
             writer.writerow(
-                [record_id, *(int(result.labels[index]) for result in results.values())]
+                [record_id, *(int(fitted.labels[index]) for fitted in results.values())]
             )
 
     metric_fields = (
@@ -1073,8 +1095,8 @@ def _write_outputs(
             lineterminator="\n",
         )
         writer.writeheader()
-        for name, result in results.items():
-            writer.writerow({"algorithm": name, **result.metrics})
+        for name, fitted in results.items():
+            writer.writerow({"algorithm": name, **fitted.metrics})
 
     configuration = asdict(config)
     configuration["output_dir"] = str(config.output_dir)
@@ -1108,8 +1130,8 @@ def _write_outputs(
             "torch": torch.__version__,
         },
         "estimators": {
-            name: _json_safe(result.estimator.get_params(deep=False))
-            for name, result in results.items()
+            name: _json_safe(fitted.estimator.get_params(deep=False))
+            for name, fitted in results.items()
         },
     }
     with (config.output_dir / "manifest.json").open("w", encoding="utf-8") as handle:
@@ -1125,6 +1147,7 @@ def run_clustering_workflow(
 ) -> ClusteringWorkflowResult:
     """Run loading, vectorization, optional scaling, clustering, and plotting."""
 
+    # source: (n, d) when an array or tensor
     config = config or ClusteringConfig()
     set_global_seed(config.seed)
     table = load_embeddings(
@@ -1148,7 +1171,7 @@ def run_clustering_workflow(
     for algorithm in config.algorithms:
         try:
             results[algorithm] = fit_clusterer(algorithm, vectors, config)
-        except Exception as error:
+        except Exception as error:  # noqa: broad-except a failed algorithm is recorded in the manifest errors and the others still run
             errors[f"algorithm:{algorithm}"] = f"{type(error).__name__}: {error}"
     if not results:
         messages = "; ".join(errors.values())
@@ -1164,7 +1187,7 @@ def run_clustering_workflow(
     for method in config.reductions:
         try:
             reductions[method] = _reduce_vectors(plot_vectors, method, config.seed)
-        except Exception as error:
+        except Exception as error:  # noqa: broad-except a failed reduction is recorded in the manifest errors and the others still run
             errors[f"reduction:{method}"] = f"{type(error).__name__}: {error}"
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -1185,19 +1208,19 @@ def run_clustering_workflow(
     def attempt_plot(key: str, build_plot: Callable[[], Path | None]) -> None:
         try:
             path = build_plot()
-        except Exception as error:
+        except Exception as error:  # noqa: broad-except a failed plot is recorded in the manifest errors and the others still draw
             plt.close("all")
             errors[f"plot:{key}"] = f"{type(error).__name__}: {error}"
             return
         if path is not None:
             plot_paths.append(path)
 
-    for algorithm, result in results.items():
-        plot_labels = result.labels[plot_indices]
+    for algorithm, fitted in results.items():
+        plot_labels = fitted.labels[plot_indices]
         attempt_plot(
             f"{algorithm}:cluster_sizes",
-            lambda result=result, algorithm=algorithm: _plot_cluster_sizes(
-                result.labels,
+            lambda fitted=fitted, algorithm=algorithm: _plot_cluster_sizes(
+                fitted.labels,
                 algorithm,
                 config.output_dir,
                 config.dpi,
@@ -1215,9 +1238,9 @@ def run_clustering_workflow(
         )
         attempt_plot(
             f"{algorithm}:centroid_distances",
-            lambda result=result, algorithm=algorithm: _plot_centroid_distances(
+            lambda fitted=fitted, algorithm=algorithm: _plot_centroid_distances(
                 vectors,
-                result.labels,
+                fitted.labels,
                 algorithm,
                 config.output_dir,
                 config.dpi,
@@ -1298,7 +1321,22 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Cluster precomputed protein embeddings and save diagnostic plots."
     )
-    parser.add_argument("--input", required=True, help="Embedding .pth, .npy, .npz, CSV/TSV, or SQLite file.")
+    parser.add_argument(
+        "--input",
+        required=True,
+        help=(
+            "Embedding feature store directory (with --ids_file), .pth, .npy, .npz, CSV/TSV, "
+            "or an old Protify SQLite cache."
+        ),
+    )
+    parser.add_argument(
+        "--ids_file",
+        default=None,
+        help=(
+            "Text file with one sequence per line: the rows to read from a feature store, "
+            "which is looked up by sequence and lists none."
+        ),
+    )
     parser.add_argument(
         "--output_dir",
         default=None,
@@ -1388,14 +1426,18 @@ def main(argv: Sequence[str] | None = None) -> ClusteringWorkflowResult:
         csv_id_column=arguments.csv_id_column,
         diagnostics=not arguments.no_diagnostics,
     )
-    result = run_clustering_workflow(input_path, config)
+    ids = None
+    if arguments.ids_file is not None:
+        with Path(arguments.ids_file).open("r", encoding="utf-8") as handle:
+            ids = [line.strip() for line in handle if line.strip()]
+    workflow = run_clustering_workflow(input_path, config, ids=ids)
     print(
-        f"Clustered {len(result.table.ids)} records with "
-        f"{len(result.algorithms)} algorithms. Artifacts: {result.output_dir}"
+        f"Clustered {len(workflow.table.ids)} records with "
+        f"{len(workflow.algorithms)} algorithms. Artifacts: {workflow.output_dir}"
     )
-    if result.errors:
-        print(f"Completed with {len(result.errors)} skipped algorithm/reduction steps.")
-    return result
+    if workflow.errors:
+        print(f"Completed with {len(workflow.errors)} skipped algorithm/reduction steps.")
+    return workflow
 
 
 if __name__ == "__main__":

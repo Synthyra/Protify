@@ -4,35 +4,13 @@ from dataclasses import dataclass
 from typing import Any
 from torch import nn
 from torch.nn import functional as F
-from transformers import PreTrainedModel, PretrainedConfig
+from transformers import PretrainedConfig
 from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassifierOutput
 
-
-try:
-    from ..pooler import Pooler
-except ImportError:
-    try:
-        from protify.pooler import Pooler
-    except ImportError:
-        from pooler import Pooler
-
-try:
-    from ..model_components.mlp import intermediate_correction_fn
-except ImportError:
-    try:
-        from protify.model_components.mlp import intermediate_correction_fn
-    except ImportError:
-        from model_components.mlp import intermediate_correction_fn
-
-try:
-    from ..model_components.transformer import Transformer, _UNSET, _resolve_head_size
-except ImportError:
-    try:
-        from protify.model_components.transformer import Transformer, _UNSET, _resolve_head_size
-    except ImportError:
-        from model_components.transformer import Transformer, _UNSET, _resolve_head_size
-
 from .losses import get_loss_fct
+from ..model_components.mlp import intermediate_correction_fn
+from ..model_components.transformer import Transformer, TransformerPreTrainedModel, HEAD_SIZE_UNSET, resolve_head_size
+from ..pooler import Pooler
 
 
 class BoMPooling(nn.Module):
@@ -167,11 +145,11 @@ class TransformerProbeConfig(PretrainedConfig):
         classifier_dropout: float = 0.2,
         num_labels: int = 2,
         n_layers: int = 1,
-        head_size: Any = _UNSET,
+        head_size: Any = HEAD_SIZE_UNSET,
         task_type: str = "singlelabel",
         rotary: bool = True,
         pre_ln: bool = True,
-        probe_pooling_types: list[str] = ["mean", "cls"],
+        probe_pooling_types: list[str] | None = None,
         use_bias: bool = False,
         add_token_ids: bool = False,
         attention_backend: str = "flex",
@@ -181,7 +159,16 @@ class TransformerProbeConfig(PretrainedConfig):
         **kwargs: Any,
     ) -> None:
         legacy_n_heads = kwargs.pop("n_heads", None)
-        head_size = _resolve_head_size(hidden_size, head_size, legacy_n_heads, default_head_size=128)
+        head_size = resolve_head_size(hidden_size, head_size, legacy_n_heads, default_head_size=128)
+        # Transformers 5 saves the label count only as `id2label`, which `super().__init__` restores
+        # from a saved config. The default here would otherwise overwrite it on every load.
+        if kwargs.get("id2label") and num_labels == 2:
+            num_labels = len(kwargs["id2label"])
+        # ProbeArguments and a saved config pass the pooling under its stored name, `pooling_types`.
+        # The default applies only when neither name carries a value.
+        pooling_types = kwargs.pop("pooling_types", None)
+        if probe_pooling_types is not None:
+            pooling_types = probe_pooling_types
         super().__init__(**kwargs)
         self.input_size = input_size
         self.hidden_size = hidden_size  # d
@@ -195,7 +182,7 @@ class TransformerProbeConfig(PretrainedConfig):
         self.n_layers = n_layers
         self.rotary = rotary
         self.pre_ln = pre_ln
-        self.pooling_types = probe_pooling_types
+        self.pooling_types = ["mean", "cls"] if pooling_types is None else pooling_types
         self.use_bias = use_bias
         self.add_token_ids = add_token_ids
         self.attention_backend = attention_backend
@@ -204,9 +191,8 @@ class TransformerProbeConfig(PretrainedConfig):
         self.bom_k = bom_k
 
 
-class TransformerForSequenceClassification(PreTrainedModel):
+class TransformerForSequenceClassification(TransformerPreTrainedModel):
     config_class = TransformerProbeConfig
-    all_tied_weights_keys = {}
 
     def __init__(self, config: TransformerProbeConfig) -> None:
         super().__init__(config)
@@ -275,6 +261,7 @@ class TransformerForSequenceClassification(PreTrainedModel):
     ) -> ProbeSequenceClassifierOutput:
         # embeddings: (b, l, d_in); attention_mask/token_type_ids: (b, l) or None.
         # labels: (b,), (b, 1), or (b, c), depending on the task.
+        # attention_mask: (b, l) or None
         embeddings = embeddings.to(next(self.input_layer.parameters()).dtype)  # (b, l, d_in)
         hidden_states = self.input_layer(embeddings)  # (b, l, d)
 
@@ -305,12 +292,7 @@ class TransformerForSequenceClassification(PreTrainedModel):
 
         loss = None
         if labels is not None:
-            if self.task_type == "regression":
-                loss = self.loss_fct(
-                    logits.view(-1),  # (b * c,)
-                    labels.view(-1).float(),  # (b * c,)
-                )  # ()
-            elif self.task_type == "sigmoid_regression":
+            if self.task_type in ("regression", "sigmoid_regression"):
                 loss = self.loss_fct(
                     logits.view(-1),  # (b * c,)
                     labels.view(-1).float(),  # (b * c,)
@@ -333,9 +315,8 @@ class TransformerForSequenceClassification(PreTrainedModel):
         )
 
 
-class TransformerForTokenClassification(PreTrainedModel):
+class TransformerForTokenClassification(TransformerPreTrainedModel):
     config_class = TransformerProbeConfig
-    all_tied_weights_keys = {}
 
     def __init__(self, config: TransformerProbeConfig) -> None:
         super().__init__(config)
@@ -403,12 +384,7 @@ class TransformerForTokenClassification(PreTrainedModel):
 
         loss = None
         if labels is not None:
-            if self.task_type == "regression":
-                loss = self.loss_fct(
-                    logits.view(-1),  # (b * l * c,)
-                    labels.view(-1).float(),  # (b * l * c,)
-                )  # ()
-            elif self.task_type == "sigmoid_regression":
+            if self.task_type in ("regression", "sigmoid_regression"):
                 loss = self.loss_fct(
                     logits.view(-1),  # (b * l * c,)
                     labels.view(-1).float(),  # (b * l * c,)

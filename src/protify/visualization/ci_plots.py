@@ -1,12 +1,12 @@
 import os
-
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
+
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import r2_score
 
-from visualization.pauc_plot import plot_roc_with_ci
+from .pauc_plot import plot_roc_with_ci
 
 
 def regression_ci_plot(
@@ -85,7 +85,7 @@ def classification_ci_plot(
 
     try:
         plot_roc_with_ci(y_true, y_pred, save_path, fig_title=title)
-    except Exception as error:
+    except Exception as error:  # noqa: broad-except a plotting failure of any kind is reported and the run continues
         print(f"Error plotting pAUC curve, likely the wrong version: {error}")
 
 

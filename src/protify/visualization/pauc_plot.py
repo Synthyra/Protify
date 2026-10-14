@@ -1,10 +1,11 @@
+import math
+import matplotlib.pyplot as plt
 import numpy as np
 import scipy.stats as stats
-import matplotlib.pyplot as plt
-import math
+
 from sklearn.metrics import roc_curve, roc_auc_score
-from typing import Tuple, Optional
 from sklearn.preprocessing import label_binarize
+
 
 # from https://github.com/PatWalters/comparing_classifiers/blob/master/delong_ci.py
 # from https://github.com/yandexdataschool/roc_comparison/blob/master/compare_auc_delong_xu.py
@@ -20,6 +21,7 @@ def compute_midrank(
     Returns:
        array of midranks
     """
+    # x: (n,)
     J = np.argsort(x)
     Z = x[J]
     N = len(x)
@@ -35,7 +37,7 @@ def compute_midrank(
     # Note(kazeevn) +1 is due to Python using 0-based indexing
     # instead of 1-based in the AUC formula in the paper
     T2[J] = T + 1
-    return T2
+    return T2  # (n,)
 
 
 def compute_midrank_weight(
@@ -48,6 +50,7 @@ def compute_midrank_weight(
     Returns:
        array of midranks
     """
+    # x: (n,), sample_weight: (n,)
     J = np.argsort(x)
     Z = x[J]
     cumulative_weight = np.cumsum(sample_weight[J])
@@ -62,13 +65,13 @@ def compute_midrank_weight(
         i = j
     T2 = np.empty(N, dtype=float)
     T2[J] = T
-    return T2
+    return T2  # (n,)
 
 
-def fastDeLong(
+def fast_delong(
         predictions_sorted_transposed: np.ndarray,
         label_1_count: int
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray]:
     """
     The fast version of DeLong's method for computing the covariance of
     unadjusted AUC.
@@ -91,6 +94,7 @@ def fastDeLong(
      }
     """
     # Short variables are named as they are in the paper
+    # predictions_sorted_transposed: (k, n_examples)
     m = label_1_count
     n = predictions_sorted_transposed.shape[1] - m
     positive_examples = predictions_sorted_transposed[:, :m]
@@ -110,7 +114,7 @@ def fastDeLong(
     sx = np.cov(v01)
     sy = np.cov(v10)
     delongcov = sx / m + sy / n
-    return aucs, delongcov
+    return aucs, delongcov  # (k,), (k, k)
 
 
 def calc_pvalue(
@@ -124,6 +128,7 @@ def calc_pvalue(
     Returns:
        log10(pvalue)
     """
+    # aucs: (k,), sigma: (k, k)
     l = np.array([[1, -1]])
     z = np.abs(np.diff(aucs)) / np.sqrt(np.dot(np.dot(l, sigma), l.T))
     return float(np.log10(2) + stats.norm.logsf(z, loc=0, scale=1).item() / np.log(10))
@@ -132,8 +137,9 @@ def calc_pvalue(
 
 def compute_ground_truth_statistics(
         ground_truth: np.ndarray,
-        sample_weight: Optional[np.ndarray] = None
-    ) -> Tuple[np.ndarray, int, Optional[np.ndarray]]:
+        sample_weight: np.ndarray | None = None
+    ) -> tuple[np.ndarray, int, np.ndarray | None]:
+    # ground_truth: (n,), sample_weight: (n,) or None
     assert np.array_equal(np.unique(ground_truth), [0, 1])
     order = (-ground_truth).argsort()
     label_1_count = int(ground_truth.sum())
@@ -142,26 +148,27 @@ def compute_ground_truth_statistics(
     else:
         ordered_sample_weight = sample_weight[order]
 
-    return order, label_1_count, ordered_sample_weight
+    return order, label_1_count, ordered_sample_weight  # (n,) order, then the positive count, then (n,) or None
 
 
 def delong_roc_variance(
         ground_truth: np.ndarray,
         predictions: np.ndarray
-    ) -> Tuple[float, np.ndarray]:
+    ) -> tuple[float, np.ndarray]:
     """
     Computes ROC AUC variance for a single set of predictions
     Args:
        ground_truth: np.array of 0 and 1
        predictions: np.array of floats of the probability of being class 1
     """
+    # ground_truth: (n,), predictions: (n,)
     sample_weight = None
     order, label_1_count, ordered_sample_weight = compute_ground_truth_statistics(
         ground_truth, sample_weight)
     predictions_sorted_transposed = predictions[np.newaxis, order]
-    aucs, delongcov = fastDeLong(predictions_sorted_transposed, label_1_count)
+    aucs, delongcov = fast_delong(predictions_sorted_transposed, label_1_count)
     assert len(aucs) == 1, "There is a bug in the code, please forward this to the developers"
-    return aucs[0], delongcov
+    return aucs[0], delongcov  # (), (): the AUC and its DeLong variance
 
 
 def delong_roc_test(
@@ -178,14 +185,15 @@ def delong_roc_test(
        predictions_two: predictions of the second model,
           np.array of floats of the probability of being class 1
     """
-    sample_weight = None
+    # ground_truth: (n,), predictions_one: (n,), predictions_two: (n,)
     order, label_1_count, _ = compute_ground_truth_statistics(ground_truth)
     predictions_sorted_transposed = np.vstack((predictions_one, predictions_two))[:, order]
-    aucs, delongcov = fastDeLong(predictions_sorted_transposed, label_1_count)
+    aucs, delongcov = fast_delong(predictions_sorted_transposed, label_1_count)
     return calc_pvalue(aucs, delongcov)
 
 
-def roc_auc_ci_score(y_true: np.ndarray, y_pred: np.ndarray, alpha: float = 0.95) -> Tuple[float, np.ndarray]:
+def roc_auc_ci_score(y_true: np.ndarray, y_pred: np.ndarray, alpha: float = 0.95) -> tuple[float, np.ndarray]:
+    # y_true: (n,), y_pred: (n,)
     auc, auc_cov = delong_roc_variance(y_true, y_pred)
     auc_std = np.sqrt(auc_cov)
 
@@ -209,7 +217,7 @@ def roc_auc_ci_score(y_true: np.ndarray, y_pred: np.ndarray, alpha: float = 0.95
         ci[ci > 1] = 1
         ci[ci < 0] = 0
 
-    return auc, ci
+    return auc, ci  # (), (2,): the AUC and its lower and upper bounds
 
 
 def bootstrap_auc_ci(
@@ -217,7 +225,8 @@ def bootstrap_auc_ci(
         y_score: np.ndarray,
         n_bootstraps: int = 1000,
         seed: int = 42
-    ) -> Tuple[float, np.ndarray]:
+    ) -> tuple[float, np.ndarray]:
+    # y_true: (n,), y_score: (n,)
     rng = np.random.RandomState(seed)
     aucs = []
 
@@ -232,7 +241,7 @@ def bootstrap_auc_ci(
     print("This gives an empirical confidence interval of the AUC using bootstrapping. It may differ slightly due to randomness.")
     
     aucs = np.array(aucs)
-    return np.mean(aucs), np.percentile(aucs, [2.5, 97.5])
+    return np.mean(aucs), np.percentile(aucs, [2.5, 97.5])  # (), (2,): the mean AUC and its 2.5 and 97.5 percentiles
     
 
 def bootstrap_roc_curve_ci(
@@ -240,7 +249,8 @@ def bootstrap_roc_curve_ci(
         y_score: np.ndarray,
         n_bootstraps: int = 1000,
         seed: int = 42
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    # y_true: (n,), y_score: (n,)
     rng = np.random.RandomState(seed)
     tpr_list = []
     fpr_linspace = np.linspace(0, 1, 100)
@@ -262,13 +272,13 @@ def bootstrap_roc_curve_ci(
     tpr_lower = np.percentile(tpr_arr, 2.5, axis=0)
     tpr_upper = np.percentile(tpr_arr, 97.5, axis=0)
 
-    return fpr_linspace, tpr_mean, tpr_lower, tpr_upper
+    return fpr_linspace, tpr_mean, tpr_lower, tpr_upper  # (100,), (100,), (100,), (100,)
 
 
 def _prepare_targets_scores(
     y_true: np.ndarray,
     y_score: np.ndarray
-):
+) -> tuple[np.ndarray, np.ndarray, int, str]:
     """
     Detect task type & return (Y_onehot, Y_score_2D, n_classes, task_name)
     Works for binary, multiclass and multilabel.  For binary we make sure
@@ -276,6 +286,7 @@ def _prepare_targets_scores(
     classes [0, 1] is always valid.
     """
     # ---------- binary or multiclass (single-label) ----------
+    # y_true: (n,) or (n, c), y_score: (n,), (n, 1), (n, 2) or (n, c)
     if y_true.ndim == 1:
         n_classes = int(np.max(y_true)) + 1          # assumes labels start at 0
         if n_classes == 2:
@@ -305,15 +316,15 @@ def _prepare_targets_scores(
         y_true_1hot = y_true.astype(int)
         y_score_2d  = y_score
 
-    return y_true_1hot, y_score_2d, n_classes, task_name
+    return y_true_1hot, y_score_2d, n_classes, task_name  # (n, c), (n, c), then the class count and task name
 
 
 
 def plot_roc_with_ci(
     y_true:  np.ndarray,
     y_score: np.ndarray,
-    save_path: Optional[str] = None,
-    fig_title: Optional[str] = None,
+    save_path: str | None = None,
+    fig_title: str | None = None,
     n_bootstraps: int = 1000,
     seed: int = 42,
 ) -> None:
@@ -334,6 +345,7 @@ def plot_roc_with_ci(
     fig_title : str | None
         custom super-title.  Defaults to "ROC curves".
     """
+    # y_true: (n,) or (n, c), y_score: (n,) or (n, c)
     Y, S, C, task = _prepare_targets_scores(y_true, y_score)
 
     # -------- set up subplot grid -------------
@@ -393,6 +405,3 @@ def plot_roc_with_ci(
         print(f"Saved ROC panel ➜ {save_path}")
     else:
         plt.show()
-
-
-

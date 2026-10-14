@@ -9,20 +9,12 @@ the inverse transforms, and the multi-label case where a label never varies in t
 import numpy as np
 import pytest
 
-try:
-    from src.protify.probes.estimator_probe import (
-        EstimatorProbeArguments,
-        _predictions,
-        build_estimator,
-        train_estimator_probe,
-    )
-except ImportError:
-    from protify.probes.estimator_probe import (
-        EstimatorProbeArguments,
-        _predictions,
-        build_estimator,
-        train_estimator_probe,
-    )
+from protify.probes.estimator_probe import (
+    EstimatorProbeArguments,
+    _predictions,
+    build_estimator,
+    train_estimator_probe,
+)
 
 
 def _sigmoid(x: np.ndarray) -> np.ndarray:
@@ -103,3 +95,20 @@ def test_single_label_scores_invert_the_metric_softmax() -> None:
     # Log probabilities sum to one after softmax, so the metric recovers them exactly rather
     # than distorting the one-vs-rest ranking the multiclass AUC reads.
     assert np.allclose(_softmax(scores), estimator.predict_proba(X), atol=1e-6)
+
+
+@pytest.mark.parametrize("seen,num_labels", [((0,), 2), ((1,), 2), ((0, 1), 3), ((0, 2), 3)])
+def test_a_class_training_never_saw_gets_no_probability(seen, num_labels) -> None:
+    """predict_proba covers only the classes training held; each column must land on its own class."""
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(40, 3))  # (n, d)
+    y = np.array([seen[index % len(seen)] for index in range(40)])  # (n,)
+    args = EstimatorProbeArguments(probe_type="random_forest", task_type="singlelabel", num_labels=num_labels)
+    estimator = build_estimator(args).fit(X, y)
+
+    probabilities = _softmax(_predictions(estimator, X, "singlelabel", num_labels))  # (n, c)
+
+    assert probabilities.shape == (40, num_labels)
+    unseen = [label for label in range(num_labels) if label not in seen]
+    assert np.all(probabilities[:, unseen] < 1e-6)
+    assert np.allclose(probabilities[:, list(seen)], estimator.predict_proba(X), atol=1e-6)

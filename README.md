@@ -9,8 +9,8 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/Gleghorn-Lab/Protify">
-    <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/github_banner.png" alt="Logo">
+  <a href="https://github.com/Synthyra/Protify">
+    <img src="https://github.com/Synthyra/Protify/blob/main/assets/github_banner.png" alt="Logo">
   </a>
 
   <h3 align="center">Protify</h3>
@@ -18,14 +18,14 @@
   <p align="center">
     A low code solution for computationally predicting the properties of chemicals.
     <br />
-    <a href="https://github.com/Gleghorn-Lab/Protify/tree/main/docs"><strong>Explore the docs »</strong></a>
+    <a href="https://github.com/Synthyra/Protify/tree/main/docs"><strong>Explore the docs »</strong></a>
     <br />
     <br />
-    <a href="https://github.com/Gleghorn-Lab/Protify">View Demo</a>
+    <a href="https://github.com/Synthyra/Protify">View Demo</a>
     &middot;
-    <a href="https://github.com/Gleghorn-Lab/Protify/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
+    <a href="https://github.com/Synthyra/Protify/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
     &middot;
-    <a href="https://github.com/Gleghorn-Lab/Protify/issues/new?labels=enhancement&template=feature-request---.md">Request Feature</a>
+    <a href="https://github.com/Synthyra/Protify/issues/new?labels=enhancement&template=feature-request---.md">Request Feature</a>
   </p>
 </div>
 
@@ -232,9 +232,9 @@ For more details about supported models and datasets, including programmatic acc
 - **Advanced interaction modeling**: Support for protein-protein interaction datasets
   - Coming soon: Protein-small molecule interaction capabilities
 - **ProteinGym zero-shot benchmarking**: Run zero-shot DMS scoring against 217+ ProteinGym substitution assays with multiple scoring methods
-- **Cloud compute**: Run GPU jobs via the Synthyra API or self-hosted Modal compute
+- **Cloud compute**: Run GPU jobs through the Synthyra API
 - **Multi-GPU embedding**: Split sequences across GPUs for parallel embedding generation
-- **SQL embedding storage**: Compact binary blob storage with async writer for efficient embedding caching
+- **Feature-store embedding caches**: Embeddings are cached as exact rows in a resumable feature store (a run that dies keeps every committed window), and caches from earlier Protify releases convert with `python -m protify.legacy_cache` (see [Models and embeddings](docs/models_and_embeddings.md))
 
 ### Support Protify's Development
 
@@ -251,47 +251,56 @@ From pip
 
 To get started locally
 ```bash
-git clone https://github.com/Gleghorn-Lab/Protify.git
+git clone https://github.com/Synthyra/Protify.git
 cd Protify
-git submodule update --init --remote --recursive
+git submodule update --init --recursive
 python -m pip install -r requirements.txt
-cd src/protify
+python -m pip install --no-deps -e .
 ```
 
 With a Python VM (linux)
 ```bash
-git clone https://github.com/Gleghorn-Lab/Protify.git
+git clone https://github.com/Synthyra/Protify.git
 cd Protify
-git submodule update --init --remote --recursive
+git submodule update --init --recursive
 chmod +x setup_protify.sh
 ./setup_protify.sh
 source ~/protify_venv/bin/activate
-cd src/protify
 ```
 
 With Docker
 
-Run all commands from the **repository root** on your host (no need to `cd src/protify`). Build the image once, then run the CLI with the project mounted at `/workspace` and the container working directory set to `/workspace/src/protify` so that `python -m main` runs correctly.
+Run all commands from the **repository root** on your host. Build the image once, then run the CLI with the project mounted at `/workspace` and the container working directory set to `/workspace`; the image puts `src/` and the repository root on `PYTHONPATH`, so `python -m protify.main` runs there.
 
 **Linux / macOS:**
 ```bash
-git clone https://github.com/Gleghorn-Lab/Protify.git
+git clone https://github.com/Synthyra/Protify.git
 cd Protify
-git submodule update --init --remote --recursive
+git submodule update --init --recursive
 docker build -t protify .
-docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify protify python -m main --data_names EC --model_names ESM2 --probe_type transformer --max_length 128 --probe_batch_size 4
+docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace protify python -m protify.main --data_names EC --model_names ESM2 --probe_type transformer --max_length 128 --probe_batch_size 4
 ```
 
 **Windows (PowerShell or cmd):**
 ```bash
-git clone https://github.com/Gleghorn-Lab/Protify.git
+git clone https://github.com/Synthyra/Protify.git
 cd Protify
-git submodule update --init --remote --recursive
+git submodule update --init --recursive
 docker build -t protify .
-docker run --rm -it --gpus all -v "%CD%":/workspace -w /workspace/src/protify protify py -m main --data_names EC --model_names ESM2 --probe_type transformer --max_length 128 --probe_batch_size 4
+docker run --rm -it --gpus all -v "%CD%":/workspace -w /workspace protify python -m protify.main --data_names EC --model_names ESM2 --probe_type transformer --max_length 128 --probe_batch_size 4
 ```
 
-Omit the `--data_names` and other CLI args to see help, or add any options you need. Output paths like `--log_dir` and `--results_dir` are relative to `/workspace/src/protify`; use e.g. `--log_dir /workspace/logs` to write at project root. Note: you may need `sudo` before the docker commands on Linux.
+Omit the `--data_names` and other CLI args to see help, or add any options you need. Output paths like `--log_dir` and `--results_dir` are relative to `/workspace`, the repository root. Note: you may need `sudo` before the docker commands on Linux.
+
+### Log in once
+
+Protify takes no token on the command line. Log in to Hugging Face once, and every run finds your token:
+
+```bash
+hf auth login   # Hugging Face: gated models, private datasets, and Hub uploads
+```
+
+Or set `HF_TOKEN` in the environment. Weights & Biases runs and sweeps read `WANDB_API_KEY` from the environment, so a key that only `wandb login` stored is not enough, and cloud runs read your Synthyra API key from `SYNTHYRA_API_KEY`. In a clone, a gitignored `.secrets.env` at the repository root, with lines such as `WANDB_API_KEY=...`, sets any of these three that your shell has not; Protify loads no other name from it. An installed Protify looks for that file only where `FOUNDRY_SECRETS` points. A Docker container does not see the login on your host, so pass the variables by name, as in `docker run -e HF_TOKEN -e WANDB_API_KEY ...`, which copies their values from your shell.
 
 ### Optional: xformers for AMPLIFY
 
@@ -317,7 +326,7 @@ pip install -v -U git+https://github.com/facebookresearch/xformers.git@main#egg=
   To launch the gui, run
   
   ```bash
-  python -m gui
+  python -m protify.gui
   ```
   
   It's recommended to use the user interface alongside an open terminal, as helpful messages and progressbars will show in the terminal while you press the GUI buttons.
@@ -329,13 +338,13 @@ pip install -v -U git+https://github.com/facebookresearch/xformers.git@main#egg=
   1. Get your API key at [synthyra.com](https://synthyra.com)
   2. In the GUI **Info** tab, enter your Synthyra API key
   3. Configure your data, models, probe, and trainer settings
-  4. Click **Submit Remote Run** to launch your job on cloud GPUs
+  4. In the **Cloud** tab, choose a GPU type and click **Submit Remote Run** to launch your job on cloud GPUs
   5. Use **Poll Status** (or auto polling) to monitor job progress
-  6. Click **Fetch Logs/Results/Plots** to download artifacts locally
+  6. Click **Fetch Results** to download its logs, results, and plots to the artifact output directory
 
-  From the CLI:
+  From the CLI, with your key in `SYNTHYRA_API_KEY`:
   ```bash
-  python -m main --synthyra_api_key YOUR_KEY --model_names ESM2-8 --data_names EC
+  python -m protify.main --cloud --model_names ESM2-8 --data_names EC
   ```
 
   Notes:
@@ -346,113 +355,81 @@ pip install -v -U git+https://github.com/facebookresearch/xformers.git@main#egg=
   When embeddings are already cached, pooled sequence-level MLP probes can train many seeds together instead of launching one Hugging Face Trainer run per seed:
 
   ```bash
-  python -m main --model_names ESM2-8 --data_names DeepLoc-2 --num_runs 8 --parallel_probe_runs --parallel_probe_batch_mode run_specific --parallel_probe_index_strategy permutation --parallel_probe_max_group_size 8
+  python -m protify.main --model_names ESM2-8 --data_names DeepLoc-2 --num_runs 8 --parallel_probe_runs --parallel_probe_batch_mode run_specific --parallel_probe_index_strategy permutation --parallel_probe_max_group_size 8
   ```
 
-  Protify infers `num_labels` from the dataset during normal `python -m main` runs. Do not pass `--num_labels` to `main`; that flag only exists on the synthetic benchmark and static planning helper scripts.
+  Protify infers `num_labels` from the dataset during normal `python -m protify.main` runs. Do not pass `--num_labels` to `main`; that flag only exists on the synthetic benchmark and static planning helper scripts.
 
   Before a larger workstation sweep, generate a no-training launch plan:
 
   ```bash
-  python -m scripts.plan_parallel_probes --model_names ESM2-8 --data_names DeepLoc-2 --input_size 640 --num_runs 8 --parallel_batch_mode run_specific --parallel_index_strategy permutation --parallel_max_group_size 8 --probe_batch_size 512 --train_dataset_size 5473
+  python -m protify.scripts.plan_parallel_probes --model_names ESM2-8 --data_names DeepLoc-2 --input_size 640 --num_runs 8 --parallel_batch_mode run_specific --parallel_index_strategy permutation --parallel_max_group_size 8 --probe_batch_size 512 --train_dataset_size 5473
   ```
 
   See [Probes and training](docs/probes_and_training.md#num_runs-aggregation) for eligibility, validation, telemetry, and comparison commands.
 
-  ### Run jobs on Modal (advanced / self-hosted)
-
-  For users who want to manage their own Modal compute directly, Protify also supports a dedicated **Modal** tab in the Tk GUI.
-
-  1. Install Modal locally (same environment as Protify):
-
-  ```bash
-  python -m pip install modal
-  ```
-
-  2. Provide Modal credentials in the GUI Info tab:
-     - Preferred: `modal_token_id` + `modal_token_secret`
-     - Backward-compatible: `modal_api_key` in `token_id:token_secret` format
-
-  3. In the **Modal** tab:
-     - Set `Modal App Name` and backend path (`src/protify/modal_backend.py`)
-     - Select GPU type and timeout
-     - Click **Deploy Modal Backend**
-
-  4. Click **Submit Remote Run** to launch the current GUI configuration on Modal.
-
-  5. Use **Poll Status** (or auto polling) to monitor:
-     - job status (`PENDING`, `RUNNING`, `SUCCESS`, `FAILED`, `TERMINATED`, `TIMEOUT`)
-     - current phase and heartbeat age
-     - live log tail
-
-  6. Click **Fetch Logs/Results/Plots** to download artifacts to your local `modal_artifacts` directory (configurable in the Modal tab).
-
-  Notes:
-  - Pass your Hugging Face and W&B tokens in the GUI Info tab so remote runs can authenticate for gated model access, experiment tracking, and Hub uploads.
-  - The Modal backend keeps heartbeat/status updates in persistent storage so the local GUI can detect stalled or failed jobs.
-  
   ### An example workflow
   
   Here, we will compare various protein models against a random vector baseline (negative control) and random transformer (homology based control).
   
   1.) Start the session
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/1.PNG">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/1.PNG">
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/2.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/2.PNG" width="500">
   
   2.) Select the models you would like to benchmark
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/3.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/3.PNG" width="500">
   
   3.) Select the datasets you are interested in. Here we chose Enzyme Commission numbers (multi-label classification), metal-ion binding (binary classification), solubility (binary classification), catalytic rate (kcat, regression), and protein localization (DeepLoc-2, binary classification).
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/4.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/4.PNG" width="500">
   
   4.) Embed the proteins in the selected datasets. If your machine does not have a GPU, you can download precomputed embeddings for many common sequences.
     Note: If you download embeddings, it will be faster to use the scikit model tab than the probe tab
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/5.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/5.PNG" width="500">
   
   5.) Select which probe and configuration you would like. Here, we will use a simple MLP probe, a small neural network. It is the **fastest** (by a large margin) but worst performing option (by a small margin usually).
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/6.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/6.PNG" width="500">
   
   6.) Select your settings for training. Like most of the tabs, the defaults are pretty good. If you need information about what setting does what, the `?` button provides a helpful note. The documentations has more extensive information
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/7.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/7.PNG" width="500">
   
   This will train your models!
   
   7.) After training, you can render helpful visualizations by passing the log ID from before. If you forget it, you can look for the file generated in the `logs` folder.
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/8.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/8.PNG" width="500">
   
   Here's a sample of the many plots produced. You can find them all inside `plots/your_log_id/*`
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/9.png" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/9.png" width="500">
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/10.png" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/10.png" width="500">
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/11.png" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/11.png" width="500">
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/13.png" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/13.png" width="500">
 
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/12.png" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/12.png" width="500">
   
   8.) Need to replicate your findings for a report or paper? Just input the generated log into the replay tab
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/14.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/14.PNG" width="500">
 
   To run the same session from the command line instead, you would simply execute
   ```
-  python -m main --model_names ESM2-8 ESM2-35 ESMC-300 ProtBert ANKH-Base Random Random-Transformer --data_names EC DeepLoc-2 enzyme-kcat MB solubility --patience 3
+  python -m protify.main --model_names ESM2-8 ESM2-35 ESMC-300 ProtBert ANKH-Base Random Random-Transformer --data_names EC DeepLoc-2 enzyme-kcat MB solubility --patience 3
   ```
 
   With Docker (from the repo root on your host):
   ```
-  docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify protify python -m main --model_names ESM2-8 ESM2-35 ESMC-300 ProtBert ANKH-Base Random Random-Transformer --data_names EC DeepLoc-2 enzyme-kcat MB solubility --patience 3
+  docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace protify python -m protify.main --model_names ESM2-8 ESM2-35 ESMC-300 ProtBert ANKH-Base Random Random-Transformer --data_names EC DeepLoc-2 enzyme-kcat MB solubility --patience 3
   ```
-  On Windows use `-v "%CD%":/workspace` and `py -m main` instead of `python -m main`.
+  On Windows use `-v "%CD%":/workspace` and `python -m protify.main` instead of `python -m protify.main`.
 
   ### Using custom or non-preset models
 
@@ -460,55 +437,29 @@ pip install -v -U git+https://github.com/facebookresearch/xformers.git@main#egg=
 
   Load a custom model via `AutoModel`:
   ```
-  python -m main --model_paths answerdotai/ModernBERT-base --model_types custom --data_names DeepLoc-2
+  python -m protify.main --model_paths answerdotai/ModernBERT-base --model_types custom --data_names DeepLoc-2
   ```
 
   Load a fine-tuned version of a known architecture:
   ```
-  python -m main --model_paths my-org/finetuned-esm2 --model_types esm2 --data_names DeepLoc-2
+  python -m protify.main --model_paths my-org/finetuned-esm2 --model_types esm2 --data_names DeepLoc-2
   ```
 
   Mix multiple models of different types:
   ```
-  python -m main --model_paths Synthyra/ESM2-8M answerdotai/ModernBERT-base --model_types esm2 custom --data_names DeepLoc-2
+  python -m protify.main --model_paths Synthyra/ESM2-8M answerdotai/ModernBERT-base --model_types esm2 custom --data_names DeepLoc-2
   ```
 
   Valid `--model_types` values: `esm2`, `dsm`, `esmc`, `protbert`, `prott5`, `ankh`, `glm`, `dplm`, `dplm2`, `protclm`, `onehot`, `amplify`, `e1`, `calm`, `custom`, `random`.
 
   Or, set up a yaml file with your desired settings (so you don't have to type out everything in the CLI)
   ```
-  python -m main --yaml_path yamls/your_custom_yaml_path.yaml
+  python -m protify.main --yaml_path yamls/your_custom_yaml_path.yaml
   ```
   Replaying from the CLI is just as simple
   ```
-  python -m main --replay_path logs/your_log_id.txt
+  python -m protify.main --replay_path logs/your_log_id.txt
   ```
-
-  ### CLI auto-run on Modal (advanced)
-
-  For self-hosted Modal compute, pass Modal credentials as CLI arguments to run remotely on Modal instead of local execution. Most users should use `--synthyra_api_key` instead (see above).
-
-  ```bash
-  python -m main \
-    --modal_token_id YOUR_MODAL_TOKEN_ID \
-    --modal_token_secret YOUR_MODAL_TOKEN_SECRET \
-    --rebuild_modal \
-    --delete_modal_embeddings \
-    --model_names ESM2-8 \
-    --data_names EC
-  ```
-
-  Behavior:
-  - Triggers only when Modal credentials are explicitly provided in CLI args (`--modal_token_id` / `--modal_token_secret` or `--modal_api_key`).
-  - `--rebuild_modal` forces a fresh deploy of `src/protify/modal_backend.py` before execution.
-  - `--delete_modal_embeddings` clears `/data/embeddings` on the Modal volume before job submission (or can be run as a maintenance-only command when no dataset/proteingym run is requested).
-  - Automatically deploys `src/protify/modal_backend.py` if submit/delete fails before app/function lookup succeeds.
-  - Submits the remote job, streams incremental remote logs to your local terminal, and uses the Modal `FunctionCall` result as the terminal source of truth.
-  - Requires the currently deployed backend to provide `get_job_log_delta` (no legacy log-tail fallback).
-  - On completion, fetches artifacts and exits with:
-    - `0` on success
-    - non-zero on failed/terminated/timeout jobs
-  - Saves fetched artifacts to `modal_artifacts/<job_id>` by default.
 
 </details>
 
@@ -529,7 +480,7 @@ Protify uses Weights & Biases (W&B) for automated hyperparameter optimization ac
 To use W&B hyperparameter optimization, simply add the `--use_wandb_hyperopt` flag to any run:
 
 ```bash
-python -m main \
+python -m protify.main \
   --use_wandb_hyperopt \
   --model_names ESM2-8 ESM2-35 \
   --data_names DeepLoc-2 MB
@@ -605,8 +556,7 @@ parameters:
 
 The following arguments control hyperparameter optimization:
 
-- `--use_wandb_hyperopt`: Enable W&B hyperparameter optimization (flag)
-- `--wandb_api_key`: Your Weights & Biases API key (alternatively set via environment variable, or the terminal when prompted)
+- `--use_wandb_hyperopt`: Enable W&B hyperparameter optimization (flag). Needs `WANDB_API_KEY` in the environment or a `.secrets.env` (see Log in once); a key that only `wandb login` stored is not enough
 - `--wandb_project`: W&B project name (default: "Protify")
 - `--wandb_entity`: W&B team/user entity (optional)
 - `--sweep_config_path`: Path to sweep configuration YAML (default: "yamls/sweep.yaml")
@@ -638,7 +588,7 @@ Protify includes a zero-shot pipeline for the ProteinGym DMS benchmark with a st
 
 - Run zero-shot scoring on ProteinGym substitutions
   ```console
-  python -m main --proteingym \
+  python -m protify.main --proteingym \
     --model_names ESM2-8 ESM2-35 ProtBert \
     --dms_ids all \
     --scoring_method masked_marginal \
@@ -662,7 +612,7 @@ Protify includes a zero-shot pipeline for the ProteinGym DMS benchmark with a st
 
 - Compare performance & time for each scoring method for one or more models
   ```console
-  python -m main --proteingym --compare_scoring_methods \
+  python -m protify.main --proteingym --compare_scoring_methods \
     --model_names ESM2-650 \
     --dms_ids AACC1_PSEAI_Dandage_2018 A4_HUMAN_Seuma_2022 \
     --results_dir results
@@ -695,10 +645,10 @@ To run only CPU tests (no GPU required):
 docker run --rm -v "${PWD}":/workspace -w /workspace protify python -m pytest src/protify/testing_suite/ -v -m "not gpu and not slow"
 ```
 
-For vectorized multi-seed MLP probe changes, run the focused Docker suite from `src/protify`:
+For vectorized multi-seed MLP probe changes, run the focused Docker suite from the repository root:
 
 ```bash
-docker run --rm --gpus all -v "${PWD}":/workspace -e PYTHONPATH=/workspace -w /workspace/src/protify protify python -m pytest testing_suite/test_parallel_probe_benchmark.py testing_suite/test_parallel_probe_batches.py testing_suite/test_parallel_probe_compare.py testing_suite/test_parallel_probe_hardware_monitor.py testing_suite/test_parallel_probe_launch_manifest_runner.py testing_suite/test_parallel_probe_plan.py testing_suite/test_parallel_linear_probe.py testing_suite/test_parallel_probe_logger.py testing_suite/test_parallel_probe_preflight.py testing_suite/test_trainer_arguments.py -v
+docker run --rm --gpus all -v "${PWD}":/workspace -w /workspace protify python -m pytest src/protify/testing_suite/test_parallel_probe_benchmark.py src/protify/testing_suite/test_parallel_probe_batches.py src/protify/testing_suite/test_parallel_probe_compare.py src/protify/testing_suite/test_parallel_probe_hardware_monitor.py src/protify/testing_suite/test_parallel_probe_launch_manifest_runner.py src/protify/testing_suite/test_parallel_probe_plan.py src/protify/testing_suite/test_parallel_linear_probe.py src/protify/testing_suite/test_parallel_probe_logger.py src/protify/testing_suite/test_parallel_probe_preflight.py src/protify/testing_suite/test_trainer_arguments.py -v
 ```
 
 See [docs/testing.md](docs/testing.md) for full details.
@@ -713,7 +663,7 @@ We work with a [bounty system](https://gleghornlab.notion.site/1de62a314a2e808bb
 
 Simply open a pull request with the bounty ID in the title to claim one. For additional features not on the bounty list simply use a descriptive title.
 
-For bugs and general suggestions please use [GitHub issues](https://github.com/Gleghorn-Lab/Protify/issues).
+For bugs and general suggestions please use [GitHub issues](https://github.com/Synthyra/Protify/issues).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -757,14 +707,14 @@ If you use this package, please cite the following papers. (Coming soon)
 
 <!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
-[contributors-shield]: https://img.shields.io/github/contributors/Gleghorn-Lab/Protify.svg?style=for-the-badge
-[contributors-url]: https://github.com/Gleghorn-Lab/Protify/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/Gleghorn-Lab/Protify.svg?style=for-the-badge
-[forks-url]: https://github.com/Gleghorn-Lab/Protify/network/members
-[stars-shield]: https://img.shields.io/github/stars/Gleghorn-Lab/Protify.svg?style=for-the-badge
-[stars-url]: https://github.com/Gleghorn-Lab/Protify/stargazers
-[issues-shield]: https://img.shields.io/github/issues/Gleghorn-Lab/Protify.svg?style=for-the-badge
-[issues-url]: https://github.com/Gleghorn-Lab/Protify/issues
+[contributors-shield]: https://img.shields.io/github/contributors/Synthyra/Protify.svg?style=for-the-badge
+[contributors-url]: https://github.com/Synthyra/Protify/graphs/contributors
+[forks-shield]: https://img.shields.io/github/forks/Synthyra/Protify.svg?style=for-the-badge
+[forks-url]: https://github.com/Synthyra/Protify/network/members
+[stars-shield]: https://img.shields.io/github/stars/Synthyra/Protify.svg?style=for-the-badge
+[stars-url]: https://github.com/Synthyra/Protify/stargazers
+[issues-shield]: https://img.shields.io/github/issues/Synthyra/Protify.svg?style=for-the-badge
+[issues-url]: https://github.com/Synthyra/Protify/issues
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
 [linkedin-url]: https://www.linkedin.com/company/synthyra
 [product-screenshot]: assets/screenshot.png

@@ -6,11 +6,11 @@ This page documents how to run Protify jobs on cloud GPUs via the cloud backend 
 
 ## Quick Start
 
-Get your API key at [synthyra.com](https://synthyra.com), then run:
+Get your API key at [synthyra.com](https://synthyra.com) and put it in the `SYNTHYRA_API_KEY` environment variable, never on the command line, then run:
 
 **CLI:**
 ```bash
-python -m main --cloud_api_key YOUR_KEY --model_names ESM2-8 --data_names EC
+python -m protify.main --cloud --model_names ESM2-8 --data_names EC
 ```
 
 **GUI:** Enter your API key in the **Info** tab under "Cloud API Key", configure your run in other tabs, then go to the **Cloud** tab and click **Submit Remote Run**.
@@ -23,7 +23,7 @@ No local GPU or cloud provider setup required. Jobs are billed through your acco
 
 | Argument | Default | Description |
 |---|---|---|
-| `--cloud_api_key` | None | API key for cloud backend. When provided, jobs auto-dispatch to cloud. |
+| `--cloud` | False | Dispatch the job to the cloud backend, authenticated by `SYNTHYRA_API_KEY`. |
 | `--cloud_url` | `https://api.synthyra.com` | Cloud backend URL. |
 | `--cloud_gpu_type` | `A10` | GPU type (H200, H100, A100-80GB, A100, L40S, A10, L4, T4). |
 | `--cloud_timeout_seconds` | `86400` | Maximum job runtime in seconds (24h default). |

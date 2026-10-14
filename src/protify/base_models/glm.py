@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+
 from typing import Any
 from transformers import (
     AutoModel,
@@ -10,7 +11,7 @@ from transformers import (
 )
 
 from .base_tokenizer import BaseSequenceTokenizer
-from .utils import select_hidden_state
+from .hidden_state_selection import select_hidden_state
 
 
 presets = {
@@ -39,7 +40,7 @@ class GLMTokenizerWrapper(BaseSequenceTokenizer):
         return token_batch  # default tensor fields: (b, l)
 
 
-class gLM2ForEmbedding(nn.Module):
+class Glm2ForEmbedding(nn.Module):
     def __init__(self, model_path: str, dtype: torch.dtype | None = None) -> None:
         super().__init__()
         self.glm2 = AutoModel.from_pretrained(model_path, dtype=dtype, trust_remote_code=True)
@@ -54,10 +55,10 @@ class gLM2ForEmbedding(nn.Module):
         token_type_ids: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        # input_ids, attention_mask, and token_type_ids: (b, l); masks/type ids may be None.
+        # input_ids, attention_mask, token_type_ids: (b, l); the last two may be None.
         output_hidden_states = output_hidden_states or hidden_state_index != -1
         assert not output_attentions or not output_hidden_states, (
-            "output_attentions=True and output_hidden_states=True are not supported by gLM2ForEmbedding."
+            "output_attentions=True and output_hidden_states=True are not supported by Glm2ForEmbedding."
         )
 
         model_output = self.glm2(
@@ -73,7 +74,7 @@ class gLM2ForEmbedding(nn.Module):
         return hidden_state  # (b, l, d)
 
 
-class gLM2GAIAForEmbedding(nn.Module):
+class Glm2GaiaForEmbedding(nn.Module):
     def __init__(self, model_path: str, dtype: torch.dtype | None = None) -> None:
         super().__init__()
         self.glm2_embed = AutoModel.from_pretrained(model_path, dtype=dtype, trust_remote_code=True)
@@ -89,10 +90,10 @@ class gLM2GAIAForEmbedding(nn.Module):
         token_type_ids: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> torch.Tensor:
-        # input_ids, attention_mask, and token_type_ids: (b, l); masks/type ids may be None.
+        # input_ids, attention_mask, token_type_ids: (b, l); the last two may be None.
         output_hidden_states = output_hidden_states or hidden_state_index != -1
         assert not output_attentions or not output_hidden_states, (
-            "output_attentions=True and output_hidden_states=True are not supported by gLM2ForEmbedding."
+            "output_attentions=True and output_hidden_states=True are not supported by Glm2ForEmbedding."
         )
 
         model_output = self.glm2(
@@ -124,9 +125,9 @@ def build_glm2_model(
         model = AutoModelForMaskedLM.from_pretrained(model_path, dtype=dtype, trust_remote_code=True).eval()
     else:
         if preset == "GLM2-GAIA":
-            model = gLM2GAIAForEmbedding(model_path, dtype=dtype).eval()
+            model = Glm2GaiaForEmbedding(model_path, dtype=dtype).eval()
         else:
-            model = gLM2ForEmbedding(model_path, dtype=dtype).eval()
+            model = Glm2ForEmbedding(model_path, dtype=dtype).eval()
     tokenizer = get_glm2_tokenizer(preset)
     return model, tokenizer
 

@@ -1,15 +1,9 @@
-from types import SimpleNamespace
-
 import pytest
 import torch
 
-try:
-    from src.protify.scripts import benchmark_parallel_probes as benchmark
-except ImportError:
-    try:
-        from protify.scripts import benchmark_parallel_probes as benchmark
-    except ImportError:
-        from ..scripts import benchmark_parallel_probes as benchmark
+from types import SimpleNamespace
+
+from protify.scripts import benchmark_parallel_probes as benchmark
 
 
 def _args(**overrides: int | float | str | bool | None) -> SimpleNamespace:
@@ -96,17 +90,17 @@ def test_benchmark_plan_only_result_reports_static_plan_without_timings() -> Non
     args = _args(num_runs=4, plan_only=True, device="cuda")
     plan = benchmark.build_synthetic_plan(args)
 
-    result = benchmark.plan_only_result(args, plan)
+    plan_report = benchmark.plan_only_result(args, plan)
 
-    assert result["plan_only"] is True
-    assert result["requested_device"] == "cuda"
-    assert result["num_runs"] == 4
-    assert result["plan"]["total_runs"] == 4
-    assert result["plan"]["trainer_invocations"] == 1
-    assert result["comparison"]["sequential_trainer_invocations"] == 4
-    assert result["comparison"]["parallel_trainer_invocations"] == 1
-    assert result["comparison"]["trainer_invocation_speedup_ceiling"] == pytest.approx(4.0)
-    assert result["comparison"]["speedup_formulas"] == {
+    assert plan_report["plan_only"] is True
+    assert plan_report["requested_device"] == "cuda"
+    assert plan_report["num_runs"] == 4
+    assert plan_report["plan"]["total_runs"] == 4
+    assert plan_report["plan"]["trainer_invocations"] == 1
+    assert plan_report["comparison"]["sequential_trainer_invocations"] == 4
+    assert plan_report["comparison"]["parallel_trainer_invocations"] == 1
+    assert plan_report["comparison"]["trainer_invocation_speedup_ceiling"] == pytest.approx(4.0)
+    assert plan_report["comparison"]["speedup_formulas"] == {
         "sequential_total_seconds": "sequential_seconds",
         "parallel_total_seconds": "parallel_seconds",
         "sequential_seconds_per_run": "sequential_seconds / num_runs",
@@ -115,7 +109,7 @@ def test_benchmark_plan_only_result_reports_static_plan_without_timings() -> Non
         "per_run_speedup": "sequential_seconds_per_run / parallel_seconds_per_run",
         "trainer_invocation_speedup_ceiling": "sequential_trainer_invocations / parallel_trainer_invocations",
     }
-    assert result["comparison"]["runtime_metric_keys"] == [
+    assert plan_report["comparison"]["runtime_metric_keys"] == [
         "sequential_seconds",
         "parallel_seconds",
         "sequential_seconds_per_run",
@@ -126,7 +120,7 @@ def test_benchmark_plan_only_result_reports_static_plan_without_timings() -> Non
         "parallel_peak_memory_bytes",
         "parallel_index_memory_bytes",
     ]
-    assert result["comparison"]["hardware_metric_keys"] == [
+    assert plan_report["comparison"]["hardware_metric_keys"] == [
         "gpu_utilization_percent",
         "sm_occupancy_percent",
         "memory_bandwidth_percent",
@@ -134,10 +128,10 @@ def test_benchmark_plan_only_result_reports_static_plan_without_timings() -> Non
         "cpu_utilization_percent",
         "dataloader_wait_seconds",
     ]
-    assert "device" not in result
-    assert "sequential_seconds" not in result
-    assert "parallel_seconds" not in result
-    assert "speedup" not in result
+    assert "device" not in plan_report
+    assert "sequential_seconds" not in plan_report
+    assert "parallel_seconds" not in plan_report
+    assert "speedup" not in plan_report
 
 
 def test_benchmark_builds_chunked_synthetic_plan_summary() -> None:

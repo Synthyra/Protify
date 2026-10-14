@@ -286,3 +286,15 @@ ALL_INDEL_DMS_IDS = [
     "VRPI_BPT7_Tsuboyama_2023_2WNM_indels",
     "YNZC_BACSU_Tsuboyama_2023_2JVD_indels"
 ]
+
+
+def expand_dms_ids_all(dms_ids: list[str], mode: str | None = None) -> list[str]:
+    """
+    Expand 'all' to actual DMS IDs from benchmarks.proteingym.dms_ids.
+    """
+    if any(str(x).lower() == 'all' for x in dms_ids):
+        if mode == 'indels':
+            dms_ids = list(ALL_INDEL_DMS_IDS)
+        else:
+            dms_ids = list(ALL_SUBSTITUTION_DMS_IDS)
+    return dms_ids

@@ -1,50 +1,29 @@
 import argparse
 import json
+
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-try:
-    from probes.parallel_probe_plan import (
-        ParallelProbeCompatibilityKey,
-        ParallelProbeExecutionPlan,
-        ParallelProbeExecutionWave,
-        ParallelProbeGroup,
-        ParallelProbeGroupEstimate,
-        ParallelProbePlanEstimate,
-        ParallelProbeRunSpec,
-        ParallelProbeWaveSchedule,
-        build_seed_run_specs,
-        estimate_parallel_probe_plan,
-        linear_probe_batch_activation_count,
-        linear_probe_forward_flop_count,
-        linear_probe_parameter_count,
-        max_linear_probe_runs_for_estimated_peak_budget,
-        max_linear_probe_runs_for_training_state_budget,
-        plan_parallel_probe_runs,
-        schedule_parallel_probe_execution_waves,
-    )
-    from probes.get_probe import normalize_probe_type
-except ImportError:
-    from protify.probes.parallel_probe_plan import (
-        ParallelProbeCompatibilityKey,
-        ParallelProbeExecutionPlan,
-        ParallelProbeExecutionWave,
-        ParallelProbeGroup,
-        ParallelProbeGroupEstimate,
-        ParallelProbePlanEstimate,
-        ParallelProbeRunSpec,
-        ParallelProbeWaveSchedule,
-        build_seed_run_specs,
-        estimate_parallel_probe_plan,
-        linear_probe_batch_activation_count,
-        linear_probe_forward_flop_count,
-        linear_probe_parameter_count,
-        max_linear_probe_runs_for_estimated_peak_budget,
-        max_linear_probe_runs_for_training_state_budget,
-        plan_parallel_probe_runs,
-        schedule_parallel_probe_execution_waves,
-    )
-    from protify.probes.get_probe import normalize_probe_type
+from ..probes.get_probe import normalize_probe_type
+from ..probes.parallel_probe_plan import (
+    ParallelProbeCompatibilityKey,
+    ParallelProbeExecutionPlan,
+    ParallelProbeExecutionWave,
+    ParallelProbeGroup,
+    ParallelProbeGroupEstimate,
+    ParallelProbePlanEstimate,
+    ParallelProbeRunSpec,
+    ParallelProbeWaveSchedule,
+    build_seed_run_specs,
+    estimate_parallel_probe_plan,
+    linear_probe_batch_activation_count,
+    linear_probe_forward_flop_count,
+    linear_probe_parameter_count,
+    max_linear_probe_runs_for_estimated_peak_budget,
+    max_linear_probe_runs_for_training_state_budget,
+    plan_parallel_probe_runs,
+    schedule_parallel_probe_execution_waves,
+)
 
 
 GroupSizeCaps = dict[ParallelProbeCompatibilityKey, int]
@@ -67,7 +46,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=2,
         help=(
             "Planner-only label count for memory and FLOP estimates. "
-            "Generated python -m main commands do not include this because Protify "
+            "Generated python -m protify.main commands do not include this because Protify "
             "infers num_labels from the dataset."
         ),
     )
@@ -823,7 +802,7 @@ def execution_recommendation_candidate(
     }
 
 
-def _recommendation_sort_key(candidate):
+def _recommendation_sort_key(candidate: dict[str, object]) -> tuple[object, ...]:
     feasible_rank = 1 if candidate["feasible"] else 0
     memory_rank = 1 if candidate["memory_fit"] else 0
     target_rank = 1 if candidate["target_fit"] else 0
@@ -1167,13 +1146,6 @@ def _base_group_cli_args(
     return cli_args
 
 
-def sequential_group_cli_args(
-    args: argparse.Namespace,
-    group: ParallelProbeGroup,
-) -> list[str]:
-    return _base_group_cli_args(args, group)
-
-
 def parallel_group_cli_args(
     args: argparse.Namespace,
     group: ParallelProbeGroup,
@@ -1210,7 +1182,7 @@ def parallel_group_cli_args(
 
 
 def protify_command(cli_args: Sequence[str]) -> list[str]:
-    return ["python", "-m", "main"] + list(cli_args)
+    return ["python", "-m", "protify.main"] + list(cli_args)
 
 
 def embedding_kind_for_args(args: argparse.Namespace) -> str:
@@ -1365,7 +1337,7 @@ def monitor_command(
     monitor_args = [
         "python",
         "-m",
-        "scripts.monitor_parallel_probe_hardware",
+        "protify.scripts.monitor_parallel_probe_hardware",
         "--output_jsonl",
         telemetry_file_path(args, command_id, variant, "jsonl"),
         "--summary_json",
@@ -1389,7 +1361,7 @@ def group_launch_manifest(
 ) -> dict[str, object]:
     representative = group.runs[0]
     command_id = f"group-{group_index + 1}"
-    sequential_cli_args = sequential_group_cli_args(args, group)
+    sequential_cli_args = _base_group_cli_args(args, group)
     parallel_cli_args = parallel_group_cli_args(args, group)
     sequential_command = protify_command(sequential_cli_args)
     if len(parallel_cli_args) == 0:
@@ -1501,13 +1473,9 @@ def launch_manifest_report(
             group,
             group_estimate,
             group_index,
-            assigned_gpu_index=(
-                gpu_assignments[group_index]
-                if group_index in gpu_assignments
-                else None
-            ),
+            assigned_gpu_index=gpu_assignments.get(group_index),
         )
-        for group_index, (group, group_estimate) in enumerate(zip(plan.groups, estimate.group_estimates))
+        for group_index, (group, group_estimate) in enumerate(zip(plan.groups, estimate.group_estimates, strict=True))
     ]
     wave_manifests = []
     total_gpu_assignment_count = 0
@@ -1552,8 +1520,8 @@ def launch_manifest_report(
             }
         )
     return {
-        "entrypoint": "python -m main",
-        "monitor_entrypoint": "python -m scripts.monitor_parallel_probe_hardware",
+        "entrypoint": "python -m protify.main",
+        "monitor_entrypoint": "python -m protify.scripts.monitor_parallel_probe_hardware",
         "telemetry_dir": args.telemetry_dir,
         "monitor_interval_seconds": args.monitor_interval_seconds,
         "monitor_gpu_index": args.monitor_gpu_index,
@@ -1710,7 +1678,7 @@ def build_plan_report(args: argparse.Namespace) -> dict[str, object]:
     estimate_summary = estimate.summary_dict()
     group_reports = [
         group_report(group, group_estimate, max_group_size_by_key=max_group_size_by_key)
-        for group, group_estimate in zip(plan.groups, estimate.group_estimates)
+        for group, group_estimate in zip(plan.groups, estimate.group_estimates, strict=True)
     ]
     schedule = execution_wave_schedule(args, estimate)
     embedding_prerequisites = embedding_prerequisite_report(args, plan)

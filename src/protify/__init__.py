@@ -1,52 +1,46 @@
-import os
-import sys
+"""Protify: train and benchmark probes on protein and chemical language model embeddings.
 
-_src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if _src_dir not in sys.path:
-    sys.path.insert(0, _src_dir)
-
-"""Top-level package for Protify.
-
-Exposes common subpackages for convenient imports whether Protify is used
-as a submodule (installed or added to PYTHONPATH) or executed from source.
+Importing the package loads nothing heavy and changes no import path; each name below loads its
+module on first use, so `import protify.feature_cache` costs only that module and its imports.
 """
 
-# Re-export subpackages
-from . import probes  # noqa: F401
-from . import data  # noqa: F401
-from . import base_models  # noqa: F401
+from importlib import import_module
+from typing import Any
 
-# Re-export commonly used classes and functions
-from .pooler import Pooler  # noqa: F401
-from .utils import torch_load, print_message  # noqa: F401
-from .seed_utils import (  # noqa: F401
-    set_global_seed,
-    get_global_seed,
-    seed_worker,
-    dataloader_generator,
-    set_determinism,
-)
-from .data.data_mixin import DataArguments, DataMixin  # noqa: F401
-from .embedder import Embedder, EmbeddingArguments  # noqa: F401
+from .version import PROTIFY_VERSION
 
-__all__ = [
-    # Subpackages
-    "probes",
-    "data",
-    "base_models",
-    # Classes
-    "Embedder",
-    "EmbeddingArguments",
-    "Pooler",
-    "DataArguments",
-    "DataMixin",
-    # Utility functions
-    "torch_load",
-    "print_message",
-    # Seed utilities
-    "set_global_seed",
-    "get_global_seed",
-    "seed_worker",
-    "dataloader_generator",
-    "set_determinism",
-]
+
+__version__ = PROTIFY_VERSION
+
+# Each public name, by the module that defines it.
+_EXPORTS = {
+    "Embedder": ".embedder",
+    "EmbeddingArguments": ".embedder",
+    "Pooler": ".pooler",
+    "DataArguments": ".data.data_mixin",
+    "DataMixin": ".data.data_mixin",
+    "torch_load": ".legacy_cache",
+    "print_message": ".console_output",
+    "set_global_seed": ".seed_utils",
+    "get_global_seed": ".seed_utils",
+    "seed_worker": ".seed_utils",
+    "dataloader_generator": ".seed_utils",
+    "set_determinism": ".seed_utils",
+}
+_SUBPACKAGES = ("probes", "data", "base_models")
+
+__all__ = ["__version__", *_SUBPACKAGES, *_EXPORTS]
+
+
+def __getattr__(name: str) -> Any:
+    if name in _SUBPACKAGES:
+        return import_module(f".{name}", __name__)
+    if name in _EXPORTS:
+        value = getattr(import_module(_EXPORTS[name], __name__), name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted({*globals(), *__all__})

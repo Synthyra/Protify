@@ -1,15 +1,8 @@
 import csv
 import json
-
 import pytest
 
-try:
-    from src.protify.scripts import compare_parallel_probe_runs as compare
-except ImportError:
-    try:
-        from protify.scripts import compare_parallel_probe_runs as compare
-    except ImportError:
-        from ..scripts import compare_parallel_probe_runs as compare
+from protify.scripts import compare_parallel_probe_runs as compare
 
 
 def _write_results_tsv(path, dataset: str, model: str, metrics) -> None:
@@ -544,8 +537,8 @@ def test_compare_parallel_probe_validation_verdict_checks_manifest_speedup_effic
                             "command_id": "group-1",
                             "data_name": "EC",
                             "model_name": "ESM2-35",
-                            "sequential_command": ["python", "-m", "main"],
-                            "parallel_command": ["python", "-m", "main", "--parallel_probe_runs"],
+                            "sequential_command": ["python", "-m", "protify.main"],
+                            "parallel_command": ["python", "-m", "protify.main", "--parallel_probe_runs"],
                         }
                     ]
                 },
@@ -623,15 +616,15 @@ def test_compare_parallel_probe_validation_verdict_requires_manifest_result_cove
                             "command_id": "group-1",
                             "data_name": "EC",
                             "model_name": "ESM2-35",
-                            "sequential_command": ["python", "-m", "main"],
-                            "parallel_command": ["python", "-m", "main", "--parallel_probe_runs"],
+                            "sequential_command": ["python", "-m", "protify.main"],
+                            "parallel_command": ["python", "-m", "protify.main", "--parallel_probe_runs"],
                         },
                         {
                             "command_id": "group-2",
                             "data_name": "DeepLoc-2",
                             "model_name": "ESM2-8",
-                            "sequential_command": ["python", "-m", "main"],
-                            "parallel_command": ["python", "-m", "main", "--parallel_probe_runs"],
+                            "sequential_command": ["python", "-m", "protify.main"],
+                            "parallel_command": ["python", "-m", "protify.main", "--parallel_probe_runs"],
                         },
                     ]
                 },
@@ -738,8 +731,8 @@ def test_compare_parallel_probe_validation_verdict_requires_manifest_probe_resul
                             "n_layers": 0,
                             "task_type": "singlelabel",
                             "num_labels": 3,
-                            "sequential_command": ["python", "-m", "main"],
-                            "parallel_command": ["python", "-m", "main", "--parallel_probe_runs"],
+                            "sequential_command": ["python", "-m", "protify.main"],
+                            "parallel_command": ["python", "-m", "protify.main", "--parallel_probe_runs"],
                         },
                         {
                             "command_id": "group-2",
@@ -751,8 +744,8 @@ def test_compare_parallel_probe_validation_verdict_requires_manifest_probe_resul
                             "n_layers": 0,
                             "task_type": "singlelabel",
                             "num_labels": 3,
-                            "sequential_command": ["python", "-m", "main"],
-                            "parallel_command": ["python", "-m", "main", "--parallel_probe_runs"],
+                            "sequential_command": ["python", "-m", "protify.main"],
+                            "parallel_command": ["python", "-m", "protify.main", "--parallel_probe_runs"],
                         },
                     ]
                 },
@@ -843,8 +836,8 @@ def test_compare_parallel_probe_manifest_probe_result_coverage_uses_tsv_cell_ide
                             "n_layers": 0,
                             "task_type": "singlelabel",
                             "num_labels": 3,
-                            "sequential_command": ["python", "-m", "main"],
-                            "parallel_command": ["python", "-m", "main", "--parallel_probe_runs"],
+                            "sequential_command": ["python", "-m", "protify.main"],
+                            "parallel_command": ["python", "-m", "protify.main", "--parallel_probe_runs"],
                         },
                     ]
                 },
@@ -984,7 +977,7 @@ def test_compare_parallel_probe_validation_verdict_accepts_successful_runner_rep
                             "command_id": "group-1",
                             "data_name": "EC",
                             "model_name": "ESM2-35",
-                            "parallel_command": ["python", "-m", "main"],
+                            "parallel_command": ["python", "-m", "protify.main"],
                         }
                     ]
                 }
@@ -1128,13 +1121,13 @@ def test_compare_parallel_probe_runner_report_requires_manifest_command_coverage
                             "command_id": "group-1",
                             "data_name": "EC",
                             "model_name": "ESM2-35",
-                            "parallel_command": ["python", "-m", "main"],
+                            "parallel_command": ["python", "-m", "protify.main"],
                         },
                         {
                             "command_id": "group-2",
                             "data_name": "EC",
                             "model_name": "ESM2-35",
-                            "parallel_command": ["python", "-m", "main"],
+                            "parallel_command": ["python", "-m", "protify.main"],
                         },
                     ]
                 }
@@ -1207,13 +1200,13 @@ def test_compare_parallel_probe_runner_report_counts_completed_skips_as_manifest
                             "command_id": "group-1",
                             "data_name": "EC",
                             "model_name": "ESM2-35",
-                            "parallel_command": ["python", "-m", "main"],
+                            "parallel_command": ["python", "-m", "protify.main"],
                         },
                         {
                             "command_id": "group-2",
                             "data_name": "EC",
                             "model_name": "ESM2-35",
-                            "parallel_command": ["python", "-m", "main"],
+                            "parallel_command": ["python", "-m", "protify.main"],
                         },
                     ]
                 }
@@ -1291,7 +1284,7 @@ def test_compare_parallel_probe_runner_manifest_coverage_ignores_embedding_comma
                         "embedding_jobs": [
                             {
                                 "command_id": "embedding-1",
-                                "command": ["python", "-m", "main", "--save_embeddings"],
+                                "command": ["python", "-m", "protify.main", "--save_embeddings"],
                                 "command_environment": {"_PROTIFY_EMBED_PHASE": "1"},
                             }
                         ]
@@ -1301,7 +1294,7 @@ def test_compare_parallel_probe_runner_manifest_coverage_ignores_embedding_comma
                             "command_id": "group-1",
                             "data_name": "EC",
                             "model_name": "ESM2-35",
-                            "parallel_command": ["python", "-m", "main"],
+                            "parallel_command": ["python", "-m", "protify.main"],
                         }
                     ],
                 }

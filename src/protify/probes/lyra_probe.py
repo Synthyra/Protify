@@ -6,22 +6,10 @@ from typing import Any
 from einops import rearrange, repeat
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassifierOutput
-try:
-    from ..model_components.mlp import intermediate_correction_fn
-except ImportError:
-    try:
-        from protify.model_components.mlp import intermediate_correction_fn
-    except ImportError:
-        from model_components.mlp import intermediate_correction_fn
 
-try:
-    from ..pooler import Pooler
-except ImportError:
-    try:
-        from protify.pooler import Pooler
-    except ImportError:
-        from pooler import Pooler
 from .losses import get_loss_fct
+from ..model_components.mlp import intermediate_correction_fn
+from ..pooler import Pooler
 
 
 class PGC(nn.Module):
@@ -74,7 +62,6 @@ class DropoutNd(nn.Module):
         self.p = p
         self.tie = tie
         self.transposed = transposed
-        self.binomial = torch.distributions.binomial.Binomial(probs=1 - self.p)
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         # X: (b, d, ...) when transposed, otherwise (b, ..., d).
@@ -86,8 +73,8 @@ class DropoutNd(nn.Module):
             X = X * mask * (1.0 / (1 - self.p))  # (b, d, ...)
             if not self.transposed:
                 X = rearrange(X, 'b d ... -> b ... d')  # (b, ..., d)
-            return X  # same shape as input
-        return X  # same shape as input
+            return X  # (b, ..., d)
+        return X  # (b, d, ...) or (b, ..., d), as the input
 
 
 class S4DKernel(nn.Module):
@@ -111,13 +98,13 @@ class S4DKernel(nn.Module):
         self.C = nn.Parameter(torch.view_as_real(C))  # (d, n / 2, 2)
         self.register("log_dt", log_dt, lr)
 
-        log_A_real = torch.log(0.5 * torch.ones(hidden_size, N // 2))  # (d, n / 2)
+        initial_log_a_real = torch.log(0.5 * torch.ones(hidden_size, N // 2))  # (d, n / 2)
         A_imag = math.pi * repeat(
             torch.arange(N // 2),
             'n -> h n',
             h=hidden_size,
         )  # (d, n / 2)
-        self.register("log_A_real", log_A_real, lr)
+        self.register("log_A_real", initial_log_a_real, lr)
         self.register("A_imag", A_imag, lr)
 
     def forward(self, L: int) -> torch.Tensor:
@@ -125,10 +112,10 @@ class S4DKernel(nn.Module):
         dt = torch.exp(self.log_dt)  # (d,)
         C = torch.view_as_complex(self.C)  # (d, n / 2)
         A = -torch.exp(self.log_A_real) + 1j * self.A_imag  # (d, n / 2)
-        dtA = A * dt.unsqueeze(-1)  # (d, n / 2)
+        dt_a = A * dt.unsqueeze(-1)  # (d, n / 2)
         time_steps = torch.arange(L, device=A.device)  # (l,)
-        vandermonde = dtA.unsqueeze(-1) * time_steps  # (d, n / 2, l)
-        C = C * (torch.exp(dtA) - 1.0) / A  # (d, n / 2)
+        vandermonde = dt_a.unsqueeze(-1) * time_steps  # (d, n / 2, l)
+        C = C * (torch.exp(dt_a) - 1.0) / A  # (d, n / 2)
         kernel = 2 * torch.einsum(
             'dn,dnl->dl',
             C,
@@ -144,6 +131,7 @@ class S4DKernel(nn.Module):
     ) -> None:
         """Register a tensor with a configurable learning rate and 0 weight decay"""
 
+        # tensor: (d,) or (d, n / 2)
         if lr == 0.0:
             self.register_buffer(name, tensor)
         else:
@@ -152,7 +140,7 @@ class S4DKernel(nn.Module):
             optim = {"weight_decay": 0.0}
             if lr is not None:
                 optim["lr"] = lr
-            setattr(getattr(self, name), "_optim", optim)
+            getattr(self, name)._optim = optim
 
 
 class S4D(nn.Module):
@@ -201,7 +189,7 @@ class S4D(nn.Module):
         y = self.output_linear(y)  # (b, d, l)
         if not self.transposed:
             y = y.transpose(-1, -2)  # (b, l, d)
-        return y  # same shape as input
+        return y  # (b, l, d) or (b, d, l), as the input
 
 
 class LyraLayer(nn.Module):
@@ -234,6 +222,7 @@ class LyraLayer(nn.Module):
         # The composed LyraLayer contract supports transposed=False: x is (b, l, d).
         # transposed=True remains exposed for compatibility, but PGC still emits (b, l, d)
         # while S4D expects (b, d, l), so that historical mode is layout-inconsistent.
+        # x: (b, l, d)
         x = self.pgc1(x)  # (b, l, d)
         x = self.pgc2(x)  # (b, l, d)
         residual = x  # (b, l, d)
@@ -292,16 +281,33 @@ class LyraConfig(PretrainedConfig):
         dropout: float = 0.2,
         n_layers: int = 1,
         task_type: str = 'singlelabel',
-        probe_pooling_types: list[str] = ['mean'],
+        probe_pooling_types: list[str] | None = None,
         **kwargs: Any,
     ) -> None:
+        # Transformers 5 saves the label count only as `id2label`, which `super().__init__` restores
+        # from a saved config. The default here would otherwise overwrite it on every load.
+        if kwargs.get("id2label") and num_labels == 2:
+            num_labels = len(kwargs["id2label"])
+        # ProbeArguments and a saved config pass the pooling under its stored name, `pooling_types`.
+        # The default applies only when neither name carries a value.
+        pooling_types = kwargs.pop("pooling_types", None)
+        if probe_pooling_types is not None:
+            pooling_types = probe_pooling_types
+        if pooling_types is None:
+            pooling_types = ['mean']
+        if len(pooling_types) != 1:
+            raise ValueError(
+                f"Lyra takes exactly one pooling type, because its classifier reads one pooled vector "
+                f"of width hidden_size. Got {list(pooling_types)}. Pass one type with "
+                f"--probe_pooling_types, or leave it unset for mean pooling."
+            )
         super().__init__(**kwargs)
         self.input_size = input_size
         self.hidden_size = hidden_size
         self.dropout = dropout
         self.num_labels = num_labels
         self.task_type = task_type
-        self.pooling_types = probe_pooling_types
+        self.pooling_types = pooling_types
         self.n_layers = n_layers
 
 
@@ -341,20 +347,14 @@ class LyraForSequenceClassification(PreTrainedModel):
         # labels: (b,), (b, 1), or (b, c), depending on the task.
         embeddings = embeddings.to(next(self.lyra.parameters()).dtype)  # (b, l, d_in)
         hidden_states = self.lyra(embeddings)  # (b, l, d)
-        # p is the configured number of pooling operations. The existing classifier contract assumes p == 1.
-        pooled = self.pooler(hidden_states, attention_mask)  # (b, p * d)
-        logits = self.classifier(pooled)  # (b, c), when p == 1
+        pooled = self.pooler(hidden_states, attention_mask)  # (b, d); LyraConfig allows one pooling type
+        logits = self.classifier(pooled)  # (b, c)
         if self.task_type == 'sigmoid_regression':
             logits = logits.sigmoid()  # (b, c)
 
         loss = None
         if labels is not None:
-            if self.task_type == 'regression':
-                loss = self.loss_fct(
-                    logits.view(-1),  # (b * c,)
-                    labels.view(-1).float(),  # (b * c,)
-                )  # ()
-            elif self.task_type == 'sigmoid_regression':
+            if self.task_type in ('regression', 'sigmoid_regression'):
                 loss = self.loss_fct(
                     logits.view(-1),  # (b * c,)
                     labels.view(-1).float(),  # (b * c,)
@@ -409,6 +409,7 @@ class LyraForTokenClassification(PreTrainedModel):
     ) -> TokenClassifierOutput:
         # embeddings: (b, l, d_in); attention_mask is accepted but unused.
         # labels: (b, l), (b, l, 1), or (b, l, c), depending on the task.
+        # attention_mask: (b, l), accepted but unused
         embeddings = embeddings.to(next(self.lyra.parameters()).dtype)  # (b, l, d_in)
         hidden_states = self.lyra(embeddings)  # (b, l, d)
         logits = self.classifier(hidden_states)  # (b, l, c)

@@ -1,17 +1,16 @@
+import time
+import warnings
+import lightgbm
 ### Modified version of lazy predict from https://github.com/shankarpandala/lazypredict
 import numpy as np
 import pandas as pd
-import time
-import warnings
 import xgboost
-import lightgbm
-from tqdm import tqdm
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder
+
+from collections.abc import Callable, Sequence
+from typing import Any
+from sklearn.base import BaseEstimator, RegressorMixin, ClassifierMixin
 from sklearn.compose import ColumnTransformer
-from sklearn.utils import all_estimators
-from sklearn.base import RegressorMixin, ClassifierMixin
+from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
     accuracy_score,
     balanced_accuracy_score,
@@ -20,9 +19,14 @@ from sklearn.metrics import (
     r2_score,
     mean_squared_error,
 )
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder
+from sklearn.utils import all_estimators
+from tqdm import tqdm
 
-from ..utils import print_message
+from ..console_output import print_message
 from ..seed_utils import get_global_seed
+
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.precision", 2)
@@ -233,7 +237,7 @@ categorical_transformer_high = Pipeline(
 
 
 # Helper function
-def get_card_split(df, cols, n=11):
+def get_card_split(df: pd.DataFrame, cols: pd.Index, n: int=11) -> tuple[pd.Index, pd.Index]:
     """
     Splits categorical columns into 2 lists based on cardinality (i.e # of unique values)
     Parameters
@@ -278,14 +282,15 @@ class LazyClassifier:
 
     def __init__(
         self,
-        verbose=0,
-        ignore_warnings=True,
-        custom_metric=None,
-        predictions=False,
-        random_state=None,
-        n_jobs=1,
-        classifiers="all",
-    ):
+        verbose: int=0,
+        ignore_warnings: bool=True,
+        custom_metric: Callable[[np.ndarray, np.ndarray], float] | None=None,
+        predictions: bool=False,
+        random_state: int | None=None,
+        n_jobs: int=1,
+        classifiers: str="all",
+    ) -> None:
+        # custom_metric: (n,) y_true and (n,) y_pred in, a scalar out
         self.verbose = verbose
         self.ignore_warnings = ignore_warnings
         self.custom_metric = custom_metric
@@ -295,7 +300,7 @@ class LazyClassifier:
         self.n_jobs = n_jobs
         self.classifiers = classifiers
 
-    def fit(self, X_train, X_test, y_train, y_test):
+    def fit(self, X_train: np.ndarray | pd.DataFrame, X_test: np.ndarray | pd.DataFrame, y_train: np.ndarray, y_test: np.ndarray) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
         """Fit Classification algorithms to X_train and y_train, predict and score on X_test, y_test.
         Parameters
         ----------
@@ -318,16 +323,17 @@ class LazyClassifier:
         predictions : Pandas DataFrame
             Returns predictions of all the models in a Pandas DataFrame.
         """
-        Accuracy = []
-        B_Accuracy = []
-        ROC_AUC = []
-        F1 = []
+        # X_train: (n_train, f), X_test: (n_test, f), y_train: (n_train,), y_test: (n_test,)
+        accuracy_scores = []
+        balanced_accuracy_scores = []
+        roc_auc_scores = []
+        f1_scores = []
         names = []
-        TIME = []
+        fit_times = []
         predictions = {}
 
         if self.custom_metric is not None:
-            CUSTOM_METRIC = []
+            custom_metric_scores = []
 
         if isinstance(X_train, np.ndarray):
             X_train = pd.DataFrame(X_train)
@@ -364,7 +370,7 @@ class LazyClassifier:
                     full_name = (classifier.__name__, classifier)
                     temp_list.append(full_name)
                 self.classifiers = temp_list
-            except Exception as exception:
+            except (TypeError, AttributeError) as exception:
                 print_message(exception)
                 print_message("Invalid Classifier(s)")
 
@@ -378,10 +384,10 @@ class LazyClassifier:
             try:
                 # Build model kwargs
                 model_kwargs = {}
-                if "random_state" in model().get_params().keys():
+                if "random_state" in model().get_params():
                     model_kwargs["random_state"] = self.random_state
                 # Enable parallelization for models that support it
-                if "n_jobs" in model().get_params().keys():
+                if "n_jobs" in model().get_params():
                     model_kwargs["n_jobs"] = self.n_jobs
                 # Enable verbose for boosting models to show iteration progress
                 if name in ("XGBClassifier", "LGBMClassifier"):
@@ -397,29 +403,29 @@ class LazyClassifier:
                 f1 = f1_score(y_test, y_pred, average="weighted")
                 try:
                     roc_auc = roc_auc_score(y_test, y_pred)
-                except Exception as exception:
+                except Exception as exception:  # noqa: broad-except any estimator may fail to fit or score; the failure is reported and the other models still run
                     roc_auc = None
                     if self.ignore_warnings is False:
                         print_message("ROC AUC couldn't be calculated for " + name)
                         print_message(exception)
                 fit_time = time.time() - start
                 names.append(name)
-                Accuracy.append(accuracy)
-                B_Accuracy.append(b_accuracy)
-                ROC_AUC.append(roc_auc)
-                F1.append(f1)
-                TIME.append(fit_time)
+                accuracy_scores.append(accuracy)
+                balanced_accuracy_scores.append(b_accuracy)
+                roc_auc_scores.append(roc_auc)
+                f1_scores.append(f1)
+                fit_times.append(fit_time)
                 
                 print_message(f"  {name} completed in {fit_time:.1f}s | Acc: {accuracy:.3f} | F1: {f1:.3f}")
 
                 if self.custom_metric is not None:
                     custom_metric = self.custom_metric(y_test, y_pred)
-                    CUSTOM_METRIC.append(custom_metric)
+                    custom_metric_scores.append(custom_metric)
 
                 if self.predictions:
                     predictions[name] = y_pred
 
-            except Exception as exception:
+            except Exception as exception:  # noqa: broad-except any estimator may fail to fit or score; the failure is reported and the other models still run
                 failed_models.append(name)
                 if self.ignore_warnings is False:
                     print_message(f'\n{name} model failed to execute')
@@ -429,23 +435,23 @@ class LazyClassifier:
             scores = pd.DataFrame(
                 {
                     "Model": names,
-                    "Accuracy": Accuracy,
-                    "Balanced Accuracy": B_Accuracy,
-                    "ROC AUC": ROC_AUC,
-                    "F1 Score": F1,
-                    "Time Taken": TIME,
+                    "Accuracy": accuracy_scores,
+                    "Balanced Accuracy": balanced_accuracy_scores,
+                    "ROC AUC": roc_auc_scores,
+                    "F1 Score": f1_scores,
+                    "Time Taken": fit_times,
                 }
             )
         else:
             scores = pd.DataFrame(
                 {
                     "Model": names,
-                    "Accuracy": Accuracy,
-                    "Balanced Accuracy": B_Accuracy,
-                    "ROC AUC": ROC_AUC,
-                    "F1 Score": F1,
-                    "Custom Metric": CUSTOM_METRIC,
-                    "Time Taken": TIME,
+                    "Accuracy": accuracy_scores,
+                    "Balanced Accuracy": balanced_accuracy_scores,
+                    "ROC AUC": roc_auc_scores,
+                    "F1 Score": f1_scores,
+                    "Custom Metric": custom_metric_scores,
+                    "Time Taken": fit_times,
                 }
             )
         scores = scores.sort_values(by="Balanced Accuracy", ascending=False).set_index(
@@ -475,7 +481,7 @@ class LazyClassifier:
             return scores, predictions_df
         return scores
 
-    def provide_models(self, X_train, X_test, y_train, y_test):
+    def provide_models(self, X_train: np.ndarray | pd.DataFrame, X_test: np.ndarray | pd.DataFrame, y_train: np.ndarray, y_test: np.ndarray) -> dict[str, Any]:
         """
         This function returns all the model objects trained in fit function.
         If fit is not called already, then we call fit and then return the models.
@@ -499,13 +505,14 @@ class LazyClassifier:
             Returns a dictionary with each model pipeline as value 
             with key as name of models.
         """
+        # X_train: (n_train, f), X_test: (n_test, f), y_train: (n_train,), y_test: (n_test,)
         if len(self.models.keys()) == 0:
             self.fit(X_train, X_test, y_train, y_test)
 
         return self.models
 
 
-def adjusted_rsquared(r2, n, p):
+def adjusted_rsquared(r2: float, n: int, p: int) -> float:
     return 1 - (1 - r2) * ((n - 1) / (n - p - 1))
 
 
@@ -530,14 +537,15 @@ class LazyRegressor:
 
     def __init__(
         self,
-        verbose=0,
-        ignore_warnings=True,
-        custom_metric=None,
-        predictions=False,
-        random_state=None,
-        n_jobs=1,
-        regressors="all",
-    ):
+        verbose: int=0,
+        ignore_warnings: bool=True,
+        custom_metric: Callable[[np.ndarray, np.ndarray], float] | None=None,
+        predictions: bool=False,
+        random_state: int | None=None,
+        n_jobs: int=1,
+        regressors: str | Sequence[type[BaseEstimator]]="all",
+    ) -> None:
+        # custom_metric: (n,) y_true and (n,) y_pred in, a scalar out
         self.verbose = verbose
         self.ignore_warnings = ignore_warnings
         self.custom_metric = custom_metric
@@ -547,7 +555,7 @@ class LazyRegressor:
         self.n_jobs = n_jobs
         self.regressors = regressors
 
-    def fit(self, X_train, X_test, y_train, y_test):
+    def fit(self, X_train: np.ndarray | pd.DataFrame, X_test: np.ndarray | pd.DataFrame, y_train: np.ndarray, y_test: np.ndarray) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
         """Fit Regression algorithms to X_train and y_train, predict and score on X_test, y_test.
         Parameters
         ----------
@@ -570,16 +578,17 @@ class LazyRegressor:
         predictions : Pandas DataFrame
             Returns predictions of all the models in a Pandas DataFrame.
         """
-        R2 = []
-        ADJR2 = []
-        RMSE = []
+        # X_train: (n_train, f), X_test: (n_test, f), y_train: (n_train,), y_test: (n_test,)
+        r_squared_scores = []
+        adjusted_r_squared_scores = []
+        rmse_scores = []
         # WIN = []
         names = []
-        TIME = []
+        fit_times = []
         predictions = {}
 
         if self.custom_metric:
-            CUSTOM_METRIC = []
+            custom_metric_scores = []
 
         if isinstance(X_train, np.ndarray):
             X_train = pd.DataFrame(X_train)
@@ -616,7 +625,7 @@ class LazyRegressor:
                     full_name = (regressor.__name__, regressor)
                     temp_list.append(full_name)
                 self.regressors = temp_list
-            except Exception as exception:
+            except (TypeError, AttributeError) as exception:
                 print_message(exception)
                 print_message("Invalid Regressor(s)")
 
@@ -630,10 +639,10 @@ class LazyRegressor:
             try:
                 # Build model kwargs
                 model_kwargs = {}
-                if "random_state" in model().get_params().keys():
+                if "random_state" in model().get_params():
                     model_kwargs["random_state"] = self.random_state
                 # Enable parallelization for models that support it
-                if "n_jobs" in model().get_params().keys():
+                if "n_jobs" in model().get_params():
                     model_kwargs["n_jobs"] = self.n_jobs
                 # Enable verbose for boosting models to show iteration progress
                 if name in ("XGBRegressor", "LGBMRegressor"):
@@ -653,21 +662,21 @@ class LazyRegressor:
 
                 fit_time = time.time() - start
                 names.append(name)
-                R2.append(r_squared)
-                ADJR2.append(adj_rsquared)
-                RMSE.append(rmse)
-                TIME.append(fit_time)
+                r_squared_scores.append(r_squared)
+                adjusted_r_squared_scores.append(adj_rsquared)
+                rmse_scores.append(rmse)
+                fit_times.append(fit_time)
                 
                 print_message(f"  {name} completed in {fit_time:.1f}s | R²: {r_squared:.3f} | RMSE: {rmse:.3f}")
 
                 if self.custom_metric:
                     custom_metric = self.custom_metric(y_test, y_pred)
-                    CUSTOM_METRIC.append(custom_metric)
+                    custom_metric_scores.append(custom_metric)
 
                 if self.predictions:
                     predictions[name] = y_pred
 
-            except Exception as exception:
+            except Exception as exception:  # noqa: broad-except any estimator may fail to fit or score; the failure is reported and the other models still run
                 failed_models.append(name)
                 if self.ignore_warnings is False:
                     print_message(f'\n{name} model failed to execute')
@@ -675,14 +684,14 @@ class LazyRegressor:
 
         scores = {
             "Model": names,
-            "Adjusted R-Squared": ADJR2,
-            "R-Squared": R2,
-            "RMSE": RMSE,
-            "Time Taken": TIME,
+            "Adjusted R-Squared": adjusted_r_squared_scores,
+            "R-Squared": r_squared_scores,
+            "RMSE": rmse_scores,
+            "Time Taken": fit_times,
         }
 
         if self.custom_metric:
-            scores[self.custom_metric.__name__] = CUSTOM_METRIC
+            scores[self.custom_metric.__name__] = custom_metric_scores
 
         scores = pd.DataFrame(scores)
         scores = scores.sort_values(by="Adjusted R-Squared", ascending=False).set_index(
@@ -712,7 +721,7 @@ class LazyRegressor:
             return scores, predictions_df
         return scores
 
-    def provide_models(self, X_train, X_test, y_train, y_test):
+    def provide_models(self, X_train: np.ndarray | pd.DataFrame, X_test: np.ndarray | pd.DataFrame, y_train: np.ndarray, y_test: np.ndarray) -> dict[str, Any]:
         """
         This function returns all the model objects trained in fit function.
         If fit is not called already, then we call fit and then return the models.
@@ -736,6 +745,7 @@ class LazyRegressor:
             Returns a dictionary with each model pipeline as value 
             with key as name of models.
         """
+        # X_train: (n_train, f), X_test: (n_test, f), y_train: (n_train,), y_test: (n_test,)
         if len(self.models.keys()) == 0:
             self.fit(X_train, X_test, y_train, y_test)
 

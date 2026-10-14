@@ -2,12 +2,14 @@ import os
 import sys
 import numpy as np
 import torch
+
 from collections import defaultdict
 from collections.abc import Sequence
-from enum import Enum
+from enum import StrEnum
 from typing import TypedDict
 from tqdm import tqdm
 from transformers.utils import logging
+
 
 _FASTPLMS = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -23,7 +25,7 @@ from .e1_predictor import E1Predictor
 logger = logging.get_logger(__name__)
 
 
-class EncoderScoreMethod(str, Enum):
+class EncoderScoreMethod(StrEnum):
     WILDTYPE_MARGINAL = "wildtype_marginal"
     MASKED_MARGINAL = "masked_marginal"
 
@@ -39,7 +41,7 @@ def find_mismatches(s1: str | np.ndarray, s2: str) -> np.ndarray:
     assert isinstance(s2, str), f"s2 must be a string, got {type(s2)}"
     assert len(s1) == len(s2), f"s1 and s2 must have the same length, got {len(s1)} and {len(s2)}"
     # l is sequence length and u is the number of mismatched positions.
-    # s1: str of length l or (l,); s2: str of length l
+    # s1: (l,) when an array, else a string of length l; s2: a string of length l
     s1_arr = np.frombuffer(s1.encode(), dtype=np.uint8) if isinstance(s1, str) else s1  # (l,)
     s2_arr = np.frombuffer(s2.encode(), dtype=np.uint8)  # (l,)
     mismatch_positions = np.where(s1_arr != s2_arr)[0]  # (u,)
@@ -216,12 +218,9 @@ class E1Scorer:
         mask_token = self.predictor.batch_preparer.mask_token
 
         # pos_tuple -> list of (variant, parent, variant_aa_ids, parent_aa_ids)
-        position_groups: dict[
-            tuple[int, ...],
-            list[tuple[int, int | str, list[int], list[int]]],
-        ] = defaultdict(list)
+        position_groups: dict[tuple[int, ...], list[tuple[int, int | str, list[int], list[int]]]] = defaultdict(list)
 
-        for variant, (seq, parent) in enumerate(zip(sequences, sequence_ids)):
+        for variant, (seq, parent) in enumerate(zip(sequences, sequence_ids, strict=True)):
             mismatches = tuple(sorted(find_mismatches(encoded_parent, seq)))
             variant_aa_ids = [self.vocab[seq[p]] for p in mismatches]
             parent_aa_ids = [self.vocab[parent_sequence[p]] for p in mismatches]
@@ -230,7 +229,7 @@ class E1Scorer:
         masked_seqs_to_score: list[str] = []
         pos_tuple_to_group_idx: dict[tuple[int, ...], int] = {}
 
-        for pos_tuple in position_groups.keys():
+        for pos_tuple in position_groups:
             s_list = list(parent_sequence)
             for p in pos_tuple:
                 s_list[p] = mask_token
@@ -257,7 +256,7 @@ class E1Scorer:
             idx = pos_tuple_to_group_idx[pos_tuple]
             context_log_probs = log_probs_by_group[idx]
 
-            for variant, parent, variant_aa_ids, parent_aa_ids in variants:
+            for variant, _parent, variant_aa_ids, parent_aa_ids in variants:
                 for context_id, log_probs in context_log_probs.items():
                     # Positions follow the sorted order in pos_tuple.
                     mut_log_probs = log_probs[range(len(pos_tuple)), variant_aa_ids]  # (u_g,)
@@ -314,7 +313,7 @@ class E1Scorer:
         # is 1 after mean reduction and q otherwise.
         num_contexts = len(context_id_to_index)  # q
         logger.info(f"Predicting for {len(records_for_prediction)} records with {num_contexts} contexts")
-        records, record_ids = zip(*records_for_prediction)
+        records, record_ids = zip(*records_for_prediction, strict=True)
         predictions = list(self.predictor.predict(records, record_ids, context_seqs=context_seqs))
         parent_length = len(parent_sequence)  # l
 

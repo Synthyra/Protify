@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+
 from torch import nn
 
 
@@ -79,14 +80,14 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0) -> torch.Te
 
 
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    # freqs_cis: (l, d_r); x has rank k with x.shape[1] = l and x.shape[-1] = d_r.
+    # freqs_cis: (l, d_r); x: (b, l, ..., d_r), rank k with x.shape[1] = l and x.shape[-1] = d_r.
     ndim = x.ndim
     assert 0 <= 1 < ndim
     assert freqs_cis.shape == (x.shape[1], x.shape[-1])
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     # (l, d_r) for k=2; otherwise (1, l, ..., 1, d_r), with k - 2 singleton axes.
     broadcast_freqs = freqs_cis.view(*shape)
-    return broadcast_freqs
+    return broadcast_freqs  # (1, l, ..., 1, d_r)
 
 
 def apply_rotary_emb(

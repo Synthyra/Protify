@@ -1,22 +1,16 @@
 """Tests for seed_utils.py reproducibility utilities."""
 
 import random
-
 import numpy as np
+import pytest
 import torch
 
-try:
-    from src.protify.seed_utils import set_global_seed, get_global_seed, seed_worker, dataloader_generator
-except ImportError:
-    try:
-        from protify.seed_utils import set_global_seed, get_global_seed, seed_worker, dataloader_generator
-    except ImportError:
-        from ..seed_utils import set_global_seed, get_global_seed, seed_worker, dataloader_generator
+from protify.seed_utils import set_global_seed, get_global_seed, seed_worker, dataloader_generator
 
 
 def test_set_global_seed_returns_seed() -> None:
-    result = set_global_seed(42)
-    assert result == 42
+    returned_seed = set_global_seed(42)
+    assert returned_seed == 42
 
 
 def test_get_global_seed_after_set() -> None:
@@ -25,9 +19,9 @@ def test_get_global_seed_after_set() -> None:
 
 
 def test_set_global_seed_none_generates_seed() -> None:
-    result = set_global_seed(None)
-    assert isinstance(result, int)
-    assert result >= 0
+    returned_seed = set_global_seed(None)
+    assert isinstance(returned_seed, int)
+    assert returned_seed >= 0
 
 
 def test_reproducibility_torch() -> None:
@@ -72,3 +66,42 @@ def test_seed_worker_deterministic() -> None:
 def test_dataloader_generator_returns_generator() -> None:
     generator = dataloader_generator(42)
     assert isinstance(generator, torch.Generator)
+
+
+def _replayed_arguments(tmp_path, lines: list[str]):
+    from protify.logger import LogReplayer
+
+    log = tmp_path / "run.txt"
+    log.write_text("\n".join(["header", *lines, ""]), encoding="utf-8")
+    return LogReplayer(log).parse_log()
+
+
+def test_a_replay_draws_from_the_logged_seed_not_the_command_line(tmp_path, monkeypatch) -> None:
+    """The reseed once passed set_global_seed an argument it does not take, and a suppressed
+    TypeError left the replay drawing from the replaying command's seed."""
+    from protify import main
+
+    determinism = []
+    monkeypatch.setattr(main, "set_determinism", lambda: determinism.append(True))
+    replay_args = _replayed_arguments(tmp_path, ["seed:\t7", "deterministic:\tTrue"])
+
+    set_global_seed(42)  # what main() seeds from the replaying command
+    main.seed_replayed_run(replay_args)
+    replayed_draw = torch.randn(3)  # (n=3,)
+    set_global_seed(7)
+
+    assert get_global_seed() == 7
+    assert torch.equal(replayed_draw, torch.randn(3))
+    assert determinism == [True]
+
+
+def test_a_replayed_log_without_a_seed_records_the_one_it_drew(tmp_path, monkeypatch) -> None:
+    from protify import main
+
+    monkeypatch.setattr(main, "set_determinism", lambda: pytest.fail("the log asked for no deterministic kernels"))
+    replay_args = _replayed_arguments(tmp_path, ["probe_type:\tmlp"])
+
+    main.seed_replayed_run(replay_args)
+
+    assert isinstance(replay_args.seed, int)
+    assert get_global_seed() == replay_args.seed

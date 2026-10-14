@@ -1,6 +1,6 @@
 # GUI
 
-This page documents the Tk-based GUI: structure (tabs, settings_vars, full_args), the recommended flow (Start session, Get data, Get embeddings, Run trainer), and how background tasks keep the UI responsive. For Modal submission from the GUI, see [Modal](modal.md).
+This page documents the Tk-based GUI: structure (tabs, settings_vars, full_args), the recommended flow (Start session, Get data, Get embeddings, Run trainer), and how background tasks keep the UI responsive. For cloud submission from the GUI, see [Cloud Compute](cloud.md).
 
 ---
 
@@ -12,7 +12,7 @@ The GUI is the same **MainProcess** as the CLI, run with `GUI=True` and an initi
 
 ## How it works
 
-1. **Entry:** `py -m src.protify.gui` (or `py -m gui` from `src/protify`) creates `tk.Tk()` and `GUI(root)` (MainProcess with empty args and GUI=True), then `root.mainloop()`.
+1. **Entry:** `python -m protify.gui` creates `tk.Tk()` and `GUI(root)` (MainProcess with empty args and GUI=True), then `root.mainloop()`.
 2. **Tabs** update `self.settings_vars` (Tk variables) and, when the user applies or runs something, write into `self.full_args`. Buttons then build *Arguments from `full_args.__dict__` and call the corresponding MainProcess methods (optionally via run_in_background).
 3. **BackgroundTask** and **check_task_queue:** Blocking work (session start, get data, get embeddings, run trainer, ProteinGym, scikit, replay, generate plots, Modal deploy/submit/poll/fetch) is run in a `ThreadPoolExecutor`. The GUI polls the task queue every 100 ms and updates the UI when tasks complete.
 
@@ -65,7 +65,7 @@ Alternatively, run **ProteinGym** (ProteinGym tab) or **Scikit** (Scikit tab) in
 
 ## See also
 
-- [Modal](modal.md) for the Modal tab and backend
+- [Cloud Compute](cloud.md) for the Cloud tab and backend
 - [Getting started](getting_started.md) for how to launch the GUI
 - [Configuration](cli_and_config.md) for the meaning of options (same as GUI)
 - [Logging and replay](logging_and_replay.md) for session log and replay

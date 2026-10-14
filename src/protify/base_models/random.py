@@ -1,18 +1,17 @@
 import torch
 import torch.nn as nn
+
 from dataclasses import dataclass
 from typing import Any
 from transformers import EsmConfig, EsmTokenizer
 from transformers.utils import ModelOutput
 
-try:
-    from ..model_components.transformer import TransformerConfig, TransformerForMaskedLM
-except ImportError:
-    from protify.model_components.transformer import TransformerConfig, TransformerForMaskedLM
+from ..model_components.transformer import TransformerConfig, TransformerForMaskedLM
 
 
+# The `Random` noise control is not here: its rows are generated where they are read and never stored
+# (`control_bases`). What stays is the untrained networks, which have weights and so a store.
 presets = {
-    'Random': 'random',
     'Random-Transformer': 'facebook/esm2_t12_35M_UR50D', # default is 35M version
     'Random-ESM2-8': 'facebook/esm2_t6_8M_UR50D',
     'Random-ESM2-35': 'facebook/esm2_t12_35M_UR50D',
@@ -25,36 +24,6 @@ presets = {
 class RandomModelOutput(ModelOutput):
     last_hidden_state: torch.Tensor | None = None
     logits: torch.Tensor | None = None
-
-
-class RandomModel(nn.Module):
-    def __init__(self, config: EsmConfig) -> None:
-        super().__init__()
-        self.config = config
-        self.hidden_size = config.hidden_size  # d
-        self.holder_param = torch.nn.Parameter(torch.randn(1, 1, self.hidden_size))  # (1, 1, d)
-        self.lm_head = nn.Linear(self.hidden_size, config.vocab_size)  # v is config.vocab_size.
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-        return_logits: bool = False,
-    ) -> torch.Tensor | RandomModelOutput:
-        # input_ids: (b, l); attention_mask: (b, l) or None
-        device = self.holder_param.device
-        b, l = input_ids.shape
-        last_hidden_state = torch.randn(
-            b,
-            l,
-            self.hidden_size,
-            device=device,
-            dtype=self.holder_param.dtype,
-        )  # (b, l, d)
-        if return_logits:
-            logits = self.lm_head(last_hidden_state)  # (b, l, v)
-            return RandomModelOutput(last_hidden_state=last_hidden_state, logits=logits)
-        return last_hidden_state  # (b, l, d)
 
 
 class RandomTransformer(nn.Module):
@@ -128,14 +97,11 @@ def build_random_model(
     **kwargs: Any,
 ) -> tuple[nn.Module, EsmTokenizer]:
     tokenizer = EsmTokenizer.from_pretrained('facebook/esm2_t12_35M_UR50D')
-    if preset == 'Random':
-        model = RandomModel(EsmConfig.from_pretrained('facebook/esm2_t12_35M_UR50D'))
+    config = _build_random_transformer_config(preset)
+    if masked_lm:
+        model = RandomTransformerForMaskedLM(config).eval()
     else:
-        config = _build_random_transformer_config(preset)
-        if masked_lm:
-            model = RandomTransformerForMaskedLM(config).eval()
-        else:
-            model = RandomTransformer(config).eval()
+        model = RandomTransformer(config).eval()
     return model, tokenizer
 
 

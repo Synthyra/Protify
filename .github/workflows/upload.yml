@@ -14,6 +14,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+      with:
+        # The wheel packages src/protify, and Protify loads FastPLMs from this submodule.
+        submodules: recursive
     - name: Set up Python
       uses: actions/setup-python@v3
       with:

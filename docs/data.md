@@ -15,8 +15,8 @@ Data is specified either by **dataset names** (HuggingFace IDs or special preset
 1. **DataArguments** is built from config (`data_names`, `data_dirs`, `delimiter`, `max_length`, etc.). From `data_names`, the code resolves `data_paths` (HuggingFace dataset IDs) and sets `protein_gym` when the name is `protein_gym`.
 2. **DataMixin.get_data()** loads each path: for HuggingFace it uses `load_dataset(path)`; for `data_dirs` it globs split files and reads tabular files with pandas or labeled FASTA directly into HuggingFace `Dataset`.
 3. **Splits:** Train is required; at least one of valid or test is required. Valid aliases are `valid`, `validation`, `val`, and `dev`; test aliases are `test` and `testing`. If valid is missing, 10% of train is used; if test is missing, 10% of train is used.
-4. **process_datasets()** normalizes column names, drops missing sequence/label, optionally translates sequences, removes zero-length translated outputs, applies trim or truncation to the tokenizer-facing sequence, and infers `label_type` (e.g. singlelabel, multilabel, regression, tokenwise).
-5. For **embedding-based training**, datasets are later built from precomputed embeddings (SQLite or `.pth`) via `build_vector_numpy_dataset_from_embeddings` or the PPI/multi-column variants.
+4. **process_datasets()** normalizes column names, drops missing sequence/label, optionally translates sequences, removes zero-length translated outputs, applies trim or truncation to the tokenizer-facing sequence, caps each split's rows when a [row cap](#split-row-caps) is set, and infers `label_type` (e.g. singlelabel, multilabel, regression, tokenwise).
+5. For **embedding-based training**, datasets are later built from precomputed embeddings in the feature store (see [Models and embeddings](models_and_embeddings.md#the-feature-store)) via `build_vector_numpy_dataset_from_embeddings` or the PPI/multi-column variants.
 
 ---
 
@@ -39,6 +39,8 @@ Defined in [data_mixin.py](../src/protify/data/data_mixin.py). All arguments tha
 | `rna_to_aa` | bool | False | Translate RNA to amino acid. |
 | `codon_to_aa` | bool | False | Map codon tokens to amino acid. |
 | `aa_to_codon` | bool | False | Map amino acid to codon tokens. |
+| `max_train_rows`, `max_valid_rows`, `max_test_rows` | Optional[int] | None | Most rows each split of each dataset keeps. A larger split keeps a deterministic subsample of exactly that many rows; see [Split row caps](#split-row-caps). |
+| `split_row_cap_seed` | int | 0 | Seed of those subsamples, independent of the global and training seeds. |
 
 Only one of the translation flags may be True. Setting `data_names[0]` to `standard_benchmark` or `vector_benchmark` expands to the corresponding list in [supported_datasets.py](../src/protify/data/supported_datasets.py).
 
@@ -55,8 +57,8 @@ Only one of the translation flags may be True. Setting `data_names[0]` to `stand
 To list datasets and get info from the CLI:
 
 ```bash
-py -m src.protify.data.dataset_utils --list
-py -m src.protify.data.dataset_utils --info EC
+python -m protify.data.dataset_utils --list
+python -m protify.data.dataset_utils --info EC
 ```
 
 See [Resource listing](resource_listing.md) for programmatic access and combined model/dataset listing.
@@ -83,6 +85,21 @@ Tabular files are read with pandas (`read_csv` or `read_excel` by extension) and
 
 ---
 
+## Split row caps
+
+`max_train_rows`, `max_valid_rows`, and `max_test_rows` (`--max_train_rows` and so on) bound how many rows each split of each dataset keeps, which bounds embedding and training cost on a large dataset. A split with more rows than its cap keeps exactly the cap:
+
+- Integer-valued scalar labels are classes, as label typing reads them, and each class keeps its share, rounded by largest remainder so every class count is within one row of its exact share. Other numeric scalars are regression targets and keep each decile of the split's own labels in proportion. List labels (multilabel) and strings (tokenwise) are drawn uniformly.
+- Kept rows stay in their original order, and a split at or under its cap is untouched, so an uncapped dataset keeps identical rows.
+- The draw uses `numpy.random.default_rng`, seeded by `split_row_cap_seed` and a CRC-32 of the split name, never by the global seed or Python's per-process `hash`. The same rows therefore survive every `--seed`, a rerun in another process, and loading the dataset alone or beside other datasets.
+- The cap applies after the missing-value, sanitization, translation, empty-sequence, and length steps, so it counts rows that survive them, and before `all_seqs` is collected and `label_type` is inferred, so no dropped row is ever embedded.
+
+A dataset without a validation or test split first has one carved from train with the global seed (42 when none is set), so for that dataset the kept rows also follow the global seed.
+
+Each capped split prints one line, `<dataset> <split>: capped <before> rows to <after> (split_row_cap_seed <seed>)`. `main.py` and any other code that reads data through `DataMixin` get the same rows from the same caps, so a run that fills caches with the training runs' caps fills exactly the sequences they read.
+
+---
+
 ## Dataset classes
 
 Used when building PyTorch datasets from embeddings or raw sequences ([dataset_classes.py](../src/protify/data/dataset_classes.py)):
@@ -90,10 +107,10 @@ Used when building PyTorch datasets from embeddings or raw sequences ([dataset_c
 | Class | Use case |
 |-------|----------|
 | **EmbedsLabelsDataset** | Single-sequence, embeddings from in-memory dict. |
-| **EmbedsLabelsDatasetFromDisk** | Single-sequence, embeddings from SQLite (batched reads). |
+| **EmbedsLabelsDatasetFromDisk** | Single-sequence, embeddings streamed from the feature store (batched reads through one `FeatureReader`). |
 | **PairEmbedsLabelsDataset** | PPI, embeddings from in-memory dict. |
-| **PairEmbedsLabelsDatasetFromDisk** | PPI, embeddings from SQLite; optional pair flipping. |
-| **MultiEmbedsLabelsDataset** / **MultiEmbedsLabelsDatasetFromDisk** | Multi-column sequence inputs, embeddings from dict or SQLite. |
+| **PairEmbedsLabelsDatasetFromDisk** | PPI, embeddings streamed from the feature store; optional pair flipping. |
+| **MultiEmbedsLabelsDataset** / **MultiEmbedsLabelsDatasetFromDisk** | Multi-column sequence inputs, embeddings from dict or streamed from the feature store. |
 | **StringLabelDataset** | Single-sequence, raw sequences and labels. |
 | **PairStringLabelDataset** | PPI, raw pairs and labels; optional pair flipping. |
 | **SimpleProteinDataset** | Wrapper over a list of sequence strings (e.g. for embedding). |
@@ -127,7 +144,7 @@ data_names: [standard_benchmark]
 ### Local directory
 
 ```bash
-py -m src.protify.main --data_dirs path/to/my_data --delimiter "," --model_names ESM2-8 --data_names []
+python -m protify.main --data_dirs path/to/my_data --delimiter "," --model_names ESM2-8 --data_names []
 ```
 
 Ensure `path/to/my_data` contains `train.csv` and at least one valid/test split such as `validation.csv` or `testing.tsv`.

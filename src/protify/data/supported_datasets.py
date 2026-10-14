@@ -1,4 +1,3 @@
-from typing import Dict
 
 supported_datasets = {
     'EC': 'GleghornLab/EC_reg',
@@ -28,6 +27,8 @@ supported_datasets = {
     'fluorescence-prediction': 'GleghornLab/fluorescence_prediction',
     'plastic': 'GleghornLab/plastic_degradation_benchmark',
     'gold-ppi': 'Synthyra/bernett_gold_ppi',
+    'designed-binder': 'Synthyra/designed_binder_metrics',  # private, needs HF_TOKEN
+    'GO-rigor': 'Synthyra/GO-Rigorous',  # private, needs HF_TOKEN
     'human-ppi-pinui': 'GleghornLab/HPPI_PiNUI',
     'yeast-ppi-pinui': 'GleghornLab/YPPI_PiNUI',
     'shs27-ppi-raw': 'Synthyra/SHS27k',
@@ -63,7 +64,7 @@ supported_datasets = {
     'million_full': 'GleghornLab/millionfull_round_1_oct_2025',
     'soluprot': 'GleghornLab/soluprot',
     'ecoli_expression': 'GleghornLab/ecoli_expression',
-    'KSMoFinder-clustered': 'GleghornLab/ksmo_clustered',
+    'KSMoFinder-clustered': 'GleghornLab/KSmo_clustered',
     'KSMoFinder': 'GleghornLab/KSmo_fixed',
     # bom-pooling paper (Hoang & Singh 2025) datasets
     'FLUO': 'GleghornLab/bom_fluorescence',
@@ -76,7 +77,7 @@ internal_datasets = {
     'plastic': 'GleghornLab/plastic_degradation_benchmark',
 }
 
-dataset_aliases: Dict[str, str] = {
+dataset_aliases: dict[str, str] = {
     'SL13': 'Subcellular',
     'SS3': 'SecondaryStructure-3',
     'SS8': 'SecondaryStructure-8',
@@ -177,6 +178,27 @@ standard_data_benchmark = [
     'optimal-temperature',
     'optimal-ph',
     'fitness-prediction',
+]
+
+
+# The rigorous benchmark: datasets whose splits are built to resist the leakage that
+# makes an easy split flatter every model equally. Two are private under the Synthyra
+# organization, so a run over this list needs HF_TOKEN in the environment.
+#
+# Task coverage is deliberate rather than incidental: binary PPI, PPI regression, binary
+# designed-binder classification, sparse multilabel GO, 13-way subcellular localization,
+# and two scalar regressions.
+rigorous_benchmark = [
+    ### ppi
+    'gold-ppi',  # binary interaction, Bernett gold standard
+    'PPA-ppi',  # binding affinity regression
+    'designed-binder',  # binary, private
+    ### multi-label
+    'GO-rigor',  # sparse GO term indices, private
+    'Subcellular',  # 13-way localization
+    ### regression
+    'optimal-ph-rigor',
+    'enzyme-kcat',
 ]
 
 

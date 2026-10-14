@@ -1,15 +1,10 @@
 """Tests for probes/losses.py loss function dispatch and custom losses."""
 
 import torch
+
 from torch import nn
 
-try:
-    from src.protify.probes.losses import get_loss_fct, SoftBCELoss, SoftBCEWithLogitsLoss
-except ImportError:
-    try:
-        from protify.probes.losses import get_loss_fct, SoftBCELoss, SoftBCEWithLogitsLoss
-    except ImportError:
-        from ..probes.losses import get_loss_fct, SoftBCELoss, SoftBCEWithLogitsLoss
+from protify.probes.losses import get_loss_fct, SoftBCELoss, SoftBCEWithLogitsLoss
 
 
 def test_get_loss_fct_singlelabel() -> None:

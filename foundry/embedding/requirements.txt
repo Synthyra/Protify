@@ -1,0 +1,9 @@
+filelock>=4.0.1
+huggingface-hub>=1.32.0
+modal>=1.5.5
+numpy>=2.5.3
+pyarrow>=25.0.1
+safetensors>=0.8.0
+torch>=2.14.0
+tqdm>=4.70.1
+transformers>=5.17.0

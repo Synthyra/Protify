@@ -1,17 +1,8 @@
 import json
-
 import pytest
 
-try:
-    from src.protify.scripts import plan_parallel_probes as preflight
-    from src.protify.scripts import run_parallel_probe_launch_manifest as runner
-except ImportError:
-    try:
-        from protify.scripts import plan_parallel_probes as preflight
-        from protify.scripts import run_parallel_probe_launch_manifest as runner
-    except ImportError:
-        from ..scripts import plan_parallel_probes as preflight
-        from ..scripts import run_parallel_probe_launch_manifest as runner
+from protify.scripts import plan_parallel_probes as preflight
+from protify.scripts import run_parallel_probe_launch_manifest as runner
 
 
 def _preflight_report():
@@ -99,7 +90,7 @@ def test_launch_manifest_runner_builds_parallel_dry_run_plan(tmp_path) -> None:
     assert plan["waves"][0]["commands"][0]["command_id"] == "group-1"
     assert plan["waves"][0]["commands"][0]["variant"] == "parallel"
     assert plan["waves"][0]["commands"][0]["command_field"] == "parallel_command"
-    assert plan["waves"][0]["commands"][0]["command"][:3] == ["python", "-m", "main"]
+    assert plan["waves"][0]["commands"][0]["command"][:3] == ["python", "-m", "protify.main"]
     assert plan["waves"][0]["commands"][0]["completion_summary_path"] == (
         "telemetry/group-1_parallel.summary.json"
     )
@@ -133,7 +124,7 @@ def test_launch_manifest_runner_builds_embedding_prerequisite_dry_run_plan(tmp_p
     assert plan["waves"][0]["commands"][0]["command_field"] == "embedding_command"
     assert plan["waves"][0]["commands"][0]["environment"] == {"_PROTIFY_EMBED_PHASE": "1"}
     assert plan["waves"][0]["commands"][0]["completion_summary_path"] is None
-    assert plan["waves"][0]["commands"][0]["command"][:3] == ["python", "-m", "main"]
+    assert plan["waves"][0]["commands"][0]["command"][:3] == ["python", "-m", "protify.main"]
     assert "--save_embeddings" in plan["waves"][0]["commands"][0]["command"]
 
 
@@ -213,7 +204,7 @@ def test_launch_manifest_runner_selects_monitored_both_variant_by_wave_and_comma
     assert [command["variant"] for command in plan["waves"][0]["commands"]] == ["sequential", "parallel"]
     for command in plan["waves"][0]["commands"]:
         assert command["command_field"].endswith("_monitor_command")
-        assert command["command"][:3] == ["python", "-m", "scripts.monitor_parallel_probe_hardware"]
+        assert command["command"][:3] == ["python", "-m", "protify.scripts.monitor_parallel_probe_hardware"]
         assert "--command" in command["command"]
         assert command["environment"] == {}
 
@@ -270,7 +261,7 @@ def test_launch_manifest_runner_skip_completed_uses_summary_paths(tmp_path) -> N
     manifest["groups"][0]["parallel_monitor_command"] = [
         "python",
         "-m",
-        "scripts.monitor_parallel_probe_hardware",
+        "protify.scripts.monitor_parallel_probe_hardware",
         "--output_jsonl",
         str(tmp_path / "group-1_parallel.jsonl"),
         "--summary_json",
@@ -299,7 +290,7 @@ def test_launch_manifest_runner_skip_completed_uses_summary_paths(tmp_path) -> N
     assert command["skipped"] is True
     assert command["skip_reason"] == "completed_summary_exists"
     assert command["completion_summary_path"] == str(summary_path)
-    assert command["command"][:3] == ["python", "-m", "main"]
+    assert command["command"][:3] == ["python", "-m", "protify.main"]
 
 
 def test_launch_manifest_runner_writes_report_output_path(tmp_path) -> None:
@@ -477,15 +468,15 @@ def test_launch_manifest_runner_concurrent_execution_waits_for_wave(monkeypatch)
         ],
     }
 
-    result = runner.execute_launch_plan(plan)
+    execution = runner.execute_launch_plan(plan)
 
     assert started_commands == [["ok", "first"], ["fail", "second"]]
     assert started_envs[0]["CUDA_VISIBLE_DEVICES"] == "0"
     assert started_envs[1]["CUDA_VISIBLE_DEVICES"] == "1"
-    assert result["executed"] is True
-    assert result["failure_count"] == 1
-    assert len(result["waves"]) == 1
-    assert [command["returncode"] for command in result["waves"][0]["commands"]] == [0, 7]
+    assert execution["executed"] is True
+    assert execution["failure_count"] == 1
+    assert len(execution["waves"]) == 1
+    assert [command["returncode"] for command in execution["waves"][0]["commands"]] == [0, 7]
 
 
 def test_launch_manifest_runner_rejects_invalid_manifest(tmp_path) -> None:
