@@ -192,10 +192,19 @@ is the MCC at the one threshold that maximizes its mean over ten class-balanced 
 downsampled to the minority's size, view i from seed 11 (i + 1)); a balanced split is its own single view.
 `--pair-local-data DIR` reads `DIR/<task>/<split>.parquet` in place of the Hub.
 
+Pairs that share a protein are not independent (one `ppi2` test protein sits in 2,540 of its 112,402 pairs), so
+intervals over pairs would be far too narrow. `intervals` restores a finished pair task's full-width probes and takes
+1,000 bootstrap draws of each test split's proteins, with replacement; a draw weighs each pair by the product of its two
+partners' counts, so the pairs that share a protein move together. `intervals.parquet` holds each probe's ROC AUC and
+average precision on each test split, the 2.5% and 97.5% quantiles over the draws and the chance level (0.5, and the
+split's share of positives); `bootstrap.safetensors` holds the draws themselves. The draws depend only on the split and
+`--draw-seed`, so every run shares them, and two probes or models compare on paired draws.
+
 ```bash
 python -m protify.interpretability embed --root RUN --tasks ppi2 --controls
 python -m protify.interpretability sweep --root RUN --label ppi2_b1024 --tasks ppi2 --batch-size 1024 --lr 1e-4 1e-3 1e-2 --wd 0 0.1
 python -m protify.interpretability train --root RUN --label linear --tasks ppi2 --batch-size 1024 --lr 1e-3 --wd 0
+python -m protify.interpretability intervals --root RUN --tasks ppi2
 ```
 
 ## Seed replicates
@@ -276,10 +285,12 @@ secondary structure, sorting and topology, InterPro membership, function, residu
 | `state_rankings.png` | each site's best state minus the best residual-stream state, median and quartiles over tasks, per model |
 | `controls_summary.png` | each task's best residual-stream score for every model, the random-init model and the baselines, with the first model's controls |
 | `model_size.png` | each task's best score and the relative depth of its best stream state, joined across models |
-| `ppi.png`, `ppi2.png` | each pair task along relative depth (MCC; ROC AUC, dashed on an extra test split) for every model and control, and by site |
+| `ppi.png`, `ppi2.png` | each pair task along relative depth (MCC; ROC AUC, dashed on an extra test split and shaded over the first replicate's interval) for every model and control, and by site |
 
 `stream_profiles.csv`, `category_profiles.csv`, `site_rankings.csv`, `best_states_by_model.csv`,
-`pair_best_states.csv` and `pair_ranking.csv` hold the numbers behind them.
+`pair_best_states.csv` and `pair_ranking.csv` hold the numbers behind them. Where the pair runs have `intervals`,
+`pair_chance.csv` gives each model's best full-width pair state, chosen on validation, with every replicate's interval
+on each test split against the chance level.
 
 ```bash
 python -m protify.interpretability trends --models ESMC-300=RUN,RUN_2,RUN_3 ESMC-600=RUN_600 --random "ESMC-300 random init=RANDOM" \

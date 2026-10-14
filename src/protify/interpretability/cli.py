@@ -5,6 +5,7 @@
     python -m protify.interpretability select --root RUN --labels B256 B1024
     python -m protify.interpretability train  --root RUN [--tasks all] [--lr 1e-3 ...] [--probe linear]
     python -m protify.interpretability validate --root RUN [--label linear]
+    python -m protify.interpretability intervals --root RUN [--tasks ppi,ppi2] [--draws 1000]
     python -m protify.interpretability phospho --root RUN [--proteins 1000]
     python -m protify.interpretability pca    --root RUN --tasks interpro_family --sites resid_post --layers 0,5,10,15,20
     python -m protify.interpretability figures --roots RUN [RUN_2 ...] [--random-roots RANDOM ...] --out FIGURES
@@ -19,7 +20,8 @@ that costs the probes least validation score, preferring the fastest batch when 
 and scores every probe of each task: protein tasks from the stores, residue tasks by streaming from the model.
 Results go to `RUN/results/<label>/<task>/` as parquet tables and a safetensors file of the selected probe weights;
 `validation.parquet` holds each probe's validation score, which best states are chosen by, and `validate` adds it to
-runs trained before `train` wrote it.
+runs trained before `train` wrote it. `intervals` adds bootstrap intervals over the test proteins to finished pair
+tasks (`intervals.parquet`).
 `phospho` runs the phosphomimetic scanning test, `pca` writes principal coordinates of pooled states by label set,
 `figures` draws every figure and summary table the runs' tables support, `compare` sets variants of the analysis
 (normalized inputs, mean-only pooling) against a reference, and `trends` sets models side by side on a relative depth
@@ -53,7 +55,7 @@ from .concepts import ALL_TASKS, DEFAULT_REPO, PROTEIN_TASKS, RESIDUE_TASKS, Con
 from .capture import model_dims
 from .interventions import paired_tests, run_phospho_interventions
 from .latent import label_sets, project_layers
-from .pairs import PAIR_SOURCES, PAIR_TASK, PAIR_TASKS, PairData, load_pairs, pair_prefix, sweep_pair_task, train_pair_task, validate_pair_task
+from .pairs import INTERVAL_DRAWS, INTERVAL_SEED, PAIR_SOURCES, PAIR_TASK, PAIR_TASKS, PairData, load_pairs, pair_intervals, pair_prefix, sweep_pair_task, train_pair_task, validate_pair_task
 from .pooled_store import PooledTapStore, embed_pooled
 from .probe_bank import ProbeBank, ProbeSettings
 from .protein_probing import ControlStores, sweep_protein_task, train_protein_task, validate_protein_task
@@ -479,6 +481,43 @@ def validate_tasks(
     return written
 
 
+def interval_tasks(
+    root: Path,
+    label: str,
+    tasks: Sequence[str],
+    device: torch.device,
+    read_task: Callable[[str], PairData],
+    draws: int = INTERVAL_DRAWS,
+    seed: int = INTERVAL_SEED,
+    overwrite: bool = False,
+) -> list[Path]:
+    """Bootstrap intervals over the test proteins (`pairs.pair_intervals`) for every finished pair task under
+    `root/results/<label>/`: `intervals.parquet` beside the scores, and the draws behind it in `bootstrap.safetensors`,
+    which paired comparisons of probes and models read (every run shares the draws of a seed)."""
+    written = []
+    for name in tasks:
+        folder = root / "results" / label / name
+        if name not in PAIR_TASKS or not (folder / "run.json").exists():
+            continue
+        if (folder / "intervals.parquet").exists() and not overwrite:
+            print(f"have {folder / 'intervals.parquet'}")
+            continue
+        record = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+        settings, spec, data = recorded_settings(record), recorded_spec(record), read_task(name)
+        store = PooledTapStore(store_path(root, "trained", "original", pair_prefix(name)))
+        if store.manifest.normalized != settings.normalize:
+            raise SystemExit(f"{store.root} does not pool the token states {folder} was trained on (normalize={settings.normalize}).")
+        layouts = stored_layouts(store, spec)
+        started = time.time()
+        selected = restore_selected(load_file(str(folder / "probes.safetensors")), layouts, data, settings, device)
+        table, values = pair_intervals(data, store, layouts, selected, settings, device, draws, seed)
+        save_file(values, str(folder / "bootstrap.safetensors"), metadata={"draws": str(draws), "seed": str(seed)})
+        table.to_parquet(folder / "intervals.parquet", index=False)
+        written.append(folder / "intervals.parquet")
+        print(f"{name}: {table['probe_name'].nunique()} probes, {draws} draws of the test proteins in {time.time() - started:.0f} s -> {folder / 'intervals.parquet'}")
+    return written
+
+
 def write_sweep(folder: Path, results: TaskResults, meta: dict[str, object]) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     results.sweep_frame().to_parquet(folder / "sweep.parquet", index=False)
@@ -522,6 +561,13 @@ def command_validate(args: argparse.Namespace) -> None:
         read_model=lambda random_init, seed: load_model(args.model, device, random_init=random_init, seed=seed),
         overwrite=args.overwrite,
     )
+
+
+def command_intervals(args: argparse.Namespace) -> None:
+    device = torch.device(args.device)
+    torch.backends.cuda.matmul.allow_tf32 = True  # as in training
+    interval_tasks(Path(args.root), args.label, parse_tasks(args.tasks), device, read_task=lambda name: load_task(name, args),
+                   draws=args.draws, seed=args.draw_seed, overwrite=args.overwrite)
 
 
 def command_select(args: argparse.Namespace) -> None:
@@ -715,6 +761,17 @@ def build_parser() -> argparse.ArgumentParser:
     data_sources(validated)
     validated.add_argument("--overwrite", action="store_true")
     validated.set_defaults(handler=command_validate)
+
+    intervals = commands.add_parser("intervals", help="bootstrap intervals over the test proteins of the full-width probes of finished pair tasks")
+    intervals.add_argument("--root", required=True)
+    intervals.add_argument("--label", default="linear", help="results label")
+    intervals.add_argument("--tasks", default=",".join(PAIR_TASKS))
+    intervals.add_argument("--draws", type=int, default=INTERVAL_DRAWS, help="bootstrap draws of the test proteins")
+    intervals.add_argument("--draw-seed", type=int, default=INTERVAL_SEED, help="seed of the draws; every run that shares it shares the draws")
+    intervals.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    data_sources(intervals)
+    intervals.add_argument("--overwrite", action="store_true")
+    intervals.set_defaults(handler=command_intervals)
 
     select = commands.add_parser("select", help="choose one global setting from the sweeps of one or more labels")
     select.add_argument("--root", required=True)

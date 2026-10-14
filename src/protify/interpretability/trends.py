@@ -104,6 +104,35 @@ def model_ranking(runs: ModelRuns, blocks: int) -> pd.DataFrame | None:
     return _with_relative_depth(figures.with_probe_parts(ranking), blocks).assign(model=runs.name)
 
 
+def model_intervals(runs: ModelRuns, blocks: int) -> pd.DataFrame | None:
+    """The pair tasks' bootstrap intervals over test proteins (`intervals.parquet`), one row per replicate (its index
+    among the roots), probe, held-out split and metric; None without any."""
+    tables = [pd.read_parquet(path).assign(replicate=index) for index, root in enumerate(runs.roots) for task in PAIR_TASKS
+              if (path := Path(root) / "results" / runs.label / task / "intervals.parquet").exists()]
+    if not tables:
+        return None
+    return _with_relative_depth(figures.with_probe_parts(pd.concat(tables, ignore_index=True)), blocks).assign(model=runs.name)
+
+
+def chance_table(best: pd.DataFrame, intervals: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Per model and pair task, the best full-width state chosen on validation (`best_table`'s any-site best) and, at
+    each replicate, held-out split and metric, its estimate and interval over draws of the test proteins against the
+    chance level. `above_chance` marks an interval wholly above it."""
+    rows = []
+    for _, row in best.dropna(subset=["any_site"]).iterrows():
+        table = intervals.get(row["model"])
+        if table is None:
+            continue
+        probe = f"{row['any_site']}:{int(row['any_layer'])}"
+        chosen = table[(table["task"] == row["task"]) & (table["probe_name"] == probe)]
+        rows += [{"model": row["model"], "kind": row["kind"], "task": row["task"], "probe_name": probe,
+                  "relative_depth": interval["relative_depth"], "replicate": interval["replicate"], "split": interval["split"],
+                  "metric": interval["metric"], "estimate": interval["estimate"], "low": interval["low"], "high": interval["high"],
+                  "chance": interval["chance"], "above_chance": bool(interval["low"] > interval["chance"])}
+                 for _, interval in chosen.iterrows()]
+    return pd.DataFrame(rows)
+
+
 def _ordered_models(names: Sequence[str]) -> list[str]:
     known = [name for name in names if name in MODEL_PARAMETERS]
     return sorted(known, key=MODEL_PARAMETERS.get) + [name for name in names if name not in MODEL_PARAMETERS]
@@ -378,11 +407,13 @@ def pair_figure(
     rankings: dict[str, pd.DataFrame],
     gaps: pd.DataFrame,
     path: Path,
+    intervals: dict[str, pd.DataFrame] | None = None,
 ) -> Path:
     """A: one pair task's MCC on its test pairs along the relative depth of the residual stream, for every trained
     model, the randomly initialized model and the baseline encodings (levels), with the first trained model's probes on
     scrambled partners and on an untrained model's states. B: ROC AUC along the same axis, dashed on an extra test
-    split. C: each site's best state minus the best residual-stream state, per model."""
+    split, shaded over the first replicate's interval on the test pairs (draws of the test proteins) where `intervals`
+    holds one. C: each site's best state minus the best residual-stream state, per model."""
     plt = figures._pyplot()
     trained = _ordered_models([model for model in summaries if kinds[model] == "trained"])
     colors = _model_colors(trained)
@@ -400,11 +431,22 @@ def pair_figure(
         axis.axhline(value, color=INK_SECONDARY, lw=0.8, ls=":")
         axis.text(1.0, value, f" {model}", fontsize=5, color=INK_SECONDARY, va="center", ha="left", transform=axis.get_yaxis_transform())
 
+    def band(model: str, color: str) -> None:
+        """The first replicate's interval of the test pairs' ROC AUC along the residual stream."""
+        table = (intervals or {}).get(model)
+        if table is None:
+            return
+        rows = table[(table["task"] == task) & (table["family"] == "full") & table["site"].isin(RESIDUAL) & (table["replicate"] == 0)
+                     & (table["split"] == "test") & (table["metric"] == "roc_auc")].sort_values("relative_depth")
+        axes[1].fill_between(rows["relative_depth"], rows["low"], rows["high"], color=color, alpha=0.18, lw=0)
+
     extra = False
     for model in trained + [model for model in summaries if model not in trained]:
         line = curve(summaries[model])
         if line.empty:
             continue
+        if kinds[model] in ("trained", "random-init"):
+            band(model, colors.get(model, MUTED))
         ranking = rankings.get(model)
         stream = pd.DataFrame(columns=["split", "relative_depth", "roc_auc"])
         if ranking is not None:
@@ -471,6 +513,7 @@ def trends(
     every = list(models) + list(random) + list(baselines)
     summaries = {runs.name: model_summary(runs) for runs in every}
     rankings = {runs.name: ranking for runs in every if (ranking := model_ranking(runs, int(summaries[runs.name]["blocks"].iloc[0]))) is not None}
+    intervals = {runs.name: table for runs in every if (table := model_intervals(runs, int(summaries[runs.name]["blocks"].iloc[0]))) is not None}
     concepts = {name: summary[~summary["task"].isin(PAIR_TASKS)] for name, summary in summaries.items()}
     trained = {name: summary for name, summary in concepts.items() if kinds[name] == "trained"}
     written = []
@@ -492,13 +535,16 @@ def trends(
             written.append(model_size(best, out / "model_size.png"))
     pairs = {name: summary[summary["task"].isin(PAIR_TASKS)] for name, summary in summaries.items() if summary["task"].isin(PAIR_TASKS).any()}
     if pairs:
-        written.append(figures.write_summary(best_table(pairs, kinds), out / "pair_best_states.csv"))
+        pair_best = best_table(pairs, kinds)
+        written.append(figures.write_summary(pair_best, out / "pair_best_states.csv"))
         if rankings:
             written.append(figures.write_summary(pd.concat(list(rankings.values()), ignore_index=True), out / "pair_ranking.csv"))
+        if intervals:
+            written.append(figures.write_summary(chance_table(pair_best, intervals), out / "pair_chance.csv"))
         for task in PAIR_TASKS:
             present = {name: summary for name, summary in pairs.items() if (summary["task"] == task).any()}
             if present:
                 blocked = {name: summary for name, summary in present.items() if int(summary["blocks"].iloc[0]) > 0}
                 gaps = site_rankings(blocked, (task,)) if blocked else pd.DataFrame()
-                written.append(pair_figure(task, present, kinds, rankings, gaps, out / f"{task}.png"))
+                written.append(pair_figure(task, present, kinds, rankings, gaps, out / f"{task}.png", intervals))
     return written

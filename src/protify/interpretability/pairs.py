@@ -20,7 +20,8 @@ Everything else follows the protein-level probes (`protein_probing`): one bank p
 validation loss, MCC on the full test split and its random halves, validation scores for choosing best states, layer
 chunks for wide sites, and the controls, with each pair's label kept for scrambled partners. Each kept probe also gets
 its ROC AUC, average precision, MCC at probability 0.5 and balanced MCC on the test pairs (`ranking.parquet`), and the
-full-width probes the same on every extra test split.
+full-width probes the same on every extra test split. Pairs that share a protein are not independent, so intervals
+(`pair_intervals`) come from bootstrap draws of the test proteins, never of the pairs.
 
 Symbols: n pairs; u proteins of a split; P probes of a family; w columns a probe reads of one protein; G groups.
 """
@@ -31,6 +32,7 @@ import time
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +71,10 @@ MAX_PAIR_RESIDUES = 2046
 STANDARDIZE_FLOOR = 1e-6
 BALANCED_VIEWS = 10  # class-balanced views of an unbalanced split, for balanced MCC
 METRIC_CHUNK = 32  # probes whose rankings are computed at once
+INTERVAL_DRAWS = 1000  # bootstrap draws of the test proteins, for intervals
+INTERVAL_SEED = 0  # one seed for every run, so that every probe and model shares the draws
+INTERVAL_METRICS = ("roc_auc", "average_precision")
+DRAW_BUDGET = 2 ** 25  # pair weights of one probe held at once while ranking under the draws
 
 
 def pair_prefix(task: str) -> str:
@@ -285,6 +291,38 @@ def pair_metrics(scores: Tensor, labels: Tensor) -> tuple[Tensor, Tensor, Tensor
     return roc_auc, average_precision, threshold_mcc(scores, labels), balanced_mcc(scores, labels)
 
 
+def protein_draws(proteins: int, draws: int = INTERVAL_DRAWS, seed: int = INTERVAL_SEED) -> Tensor:
+    """Each protein's count in each of `draws` bootstrap draws of a split's `proteins` proteins, taken with
+    replacement on the CPU from `seed`, so that every probe and model shares them: (draws, proteins)."""
+    picks = torch.randint(0, proteins, (draws, proteins), generator=torch.Generator().manual_seed(seed))  # (B, u)
+    return torch.zeros(draws, proteins).scatter_add_(1, picks, torch.ones(draws, proteins))  # (B, u)
+
+
+def weighted_ranking_metrics(scores: Tensor, labels: Tensor, weights: Tensor) -> tuple[Tensor, Tensor]:
+    """ROC AUC and average precision of each column of `scores` under each row of `weights`, as scikit-learn computes
+    them with sample weights (a run of tied scores is one threshold): (G, B) each, NaN where a row weighs one class
+    alone."""
+    # scores: (n, G); labels: (n,) 0 or 1; weights: (B, n), nonnegative
+    hit = labels.to(device=scores.device, dtype=torch.float64)  # (n,)
+    weights = weights.to(device=scores.device, dtype=torch.float64)
+    roc_aucs, precisions = [], []
+    for column in scores.T:
+        ordered, order = column.sort(descending=True)  # (n,)
+        ends = torch.ones_like(ordered, dtype=torch.bool)  # (n,), the last row of each run of equal scores
+        ends[:-1] = ordered[:-1] != ordered[1:]
+        weight = weights[:, order]  # (B, n)
+        tp = (weight * hit[order]).cumsum(dim=1)[:, ends]  # (B, r), positive weight at or above each threshold
+        fp = (weight * (1.0 - hit[order])).cumsum(dim=1)[:, ends]
+        tp_above, fp_above = F.pad(tp[:, :-1], (1, 0)), F.pad(fp[:, :-1], (1, 0))  # (B, r), at the threshold before
+        positives, negatives = tp[:, -1], fp[:, -1]  # (B,)
+        both = (positives > 0) & (negatives > 0)
+        area = ((fp - fp_above) * (tp + tp_above)).sum(dim=1) / 2  # trapezoids between thresholds
+        precision = torch.where(tp + fp > 0, tp / (tp + fp).clamp_min(1e-300), 0.0)  # (B, r)
+        roc_aucs.append(torch.where(both, area / (positives * negatives).clamp_min(1e-300), torch.nan))
+        precisions.append(torch.where(both, ((tp - tp_above) * precision).sum(dim=1) / positives.clamp_min(1e-300), torch.nan))
+    return torch.stack(roc_aucs), torch.stack(precisions)  # (G, B), (G, B)
+
+
 @torch.no_grad()
 def bank_scores(bank: ProbeBank, which: str, X: PairRows, batch: int = 512) -> Tensor:
     """The logit of every group of a one-output bank for every row: (n, G)."""
@@ -430,6 +468,63 @@ def validate_pair_task(
                 _validate_pairs(chunk, family, inputs.rows(view, "validation"), targets, data, plan, results)
             del inputs
     return results
+
+
+def pair_intervals(
+    data: PairData,
+    store: PooledTapStore,
+    layouts: dict[str, SiteLayout],
+    selected: dict[str, dict[str, ProbeBank]],
+    settings: TrainingSettings,
+    device: torch.device,
+    draws: int = INTERVAL_DRAWS,
+    seed: int = INTERVAL_SEED,
+    budget: int = DRAW_BUDGET,
+) -> tuple[pd.DataFrame, dict[str, Tensor]]:
+    """Bootstrap intervals of the ROC AUC and average precision of the full-width probes of a trained pair task
+    (`selected[site]["full"]`, restored from a run) on each test split. A draw takes the split's proteins with
+    replacement (`protein_draws`) and weighs each pair by the product of its two partners' counts, so the pairs that
+    share a protein move together. Returns one row per probe, split and metric (the estimate on the split itself, the
+    2.5% and 97.5% quantiles of the draws, the chance level, the draws that held both classes) and each split and
+    metric's draws as `<split>.<metric>`: (probes, draws), probes in the rows' order."""
+    splits = ("test",) + data.extra_tests
+    proteins_held = sum(len(data.splits[split].sequences) for split in ("train",) + splits)
+    counts = {split: protein_draws(len(data.splits[split].sequences), draws, seed) for split in splits}  # (B, u) each
+    names: list[str] = []
+    estimates: dict[tuple[str, str], list[Tensor]] = {(split, metric): [] for split in splits for metric in INTERVAL_METRICS}
+    drawn: dict[tuple[str, str], list[Tensor]] = {key: [] for key in estimates}
+    for site, layout in layouts.items():
+        for part, slots in layer_chunks(layout, proteins_held, settings.site_budget_gb):
+            inputs, _ = pair_inputs(data, store, site, slots, device, splits)
+            family, chunk_names, view = families(part, settings.pooling)[0]  # the full-width probes
+            first, _ = family_offset(layout, slots, family)
+            bank = selected[site][family]
+            chunk = bank if len(chunk_names) == bank.groups else bank.subset(torch.arange(first, first + len(chunk_names), device=bank.device))
+            names += chunk_names
+            for split in splits:
+                scores = bank_scores(chunk, "best", inputs.rows(view, split))  # (n, G)
+                labels = torch.tensor(data.splits[split].labels, device=device)  # (n,)
+                partner_a, partner_b = (index.to(device) for index in data.splits[split].partners())
+                point = weighted_ranking_metrics(scores, labels, torch.ones(1, scores.shape[0]))
+                step = max(1, budget // scores.shape[0])
+                blocks = [weighted_ranking_metrics(scores, labels, block[:, partner_a] * block[:, partner_b])
+                          for block in counts[split].to(device).split(step)]
+                for index, metric in enumerate(INTERVAL_METRICS):
+                    estimates[(split, metric)].append(point[index][:, 0].cpu())
+                    drawn[(split, metric)].append(torch.cat([block[index] for block in blocks], dim=1).cpu())
+            del inputs
+    rows, tensors = [], {}
+    for (split, metric), parts in drawn.items():
+        values = torch.cat(parts)  # (P, B)
+        estimate = torch.cat(estimates[(split, metric)])  # (P,)
+        low, high = torch.nanquantile(values, torch.tensor([0.025, 0.975], dtype=values.dtype), dim=1)  # (P,) each
+        chance = 0.5 if metric == "roc_auc" else float(data.splits[split].labels.mean())
+        kept = (~values.isnan()).sum(dim=1)
+        rows += [{"task": data.task.name, "family": "full", "probe_name": name, "split": split, "metric": metric,
+                  "estimate": float(estimate[index]), "low": float(low[index]), "high": float(high[index]),
+                  "chance": chance, "draws": int(kept[index])} for index, name in enumerate(names)]
+        tensors[f"{split}.{metric}"] = values.to(torch.float32).contiguous()
+    return pd.DataFrame(rows), tensors
 
 
 def _score_pair_controls(

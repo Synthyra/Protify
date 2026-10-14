@@ -19,8 +19,8 @@ try:
     from src.protify.interpretability.baselines import BASELINE_SITES, BaselineModel
     from src.protify.interpretability.capture import capture_states, model_dims
     from src.protify.interpretability import figures
-    from src.protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
-    from src.protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, ranking_metrics, threshold_mcc
+    from src.protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, interval_tasks, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
+    from src.protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, protein_draws, ranking_metrics, threshold_mcc, weighted_ranking_metrics
     from src.protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from src.protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -41,8 +41,8 @@ except ImportError:
     from protify.interpretability.baselines import BASELINE_SITES, BaselineModel
     from protify.interpretability.capture import capture_states, model_dims
     from protify.interpretability import figures
-    from protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
-    from protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, ranking_metrics, threshold_mcc
+    from protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, interval_tasks, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
+    from protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, protein_draws, ranking_metrics, threshold_mcc, weighted_ranking_metrics
     from protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -918,6 +918,30 @@ def test_pair_metrics_match_their_definitions() -> None:
     assert balanced_mcc(constant, torch.tensor([1] * 10 + [0] * 40)).item() == 0.0
 
 
+def test_weighted_rankings_match_sklearn_with_sample_weights() -> None:
+    from sklearn.metrics import average_precision_score, roc_auc_score
+
+    rng = np.random.default_rng(5)
+    labels = (rng.random(300) < 0.3).astype(np.int64)
+    scores = np.round(rng.normal(labels[:, None] * np.array([0.0, 0.7, 2.0]), 1.0), 1)  # (n, 3), rounded into ties
+    weights = rng.integers(0, 4, size=(6, 300)).astype(np.float64)  # (B, n), zeros among them
+    roc_auc, average_precision = weighted_ranking_metrics(torch.tensor(scores), torch.tensor(labels), torch.tensor(weights))
+    assert roc_auc.shape == average_precision.shape == (3, 6)
+    for column in range(3):
+        for draw in range(6):
+            assert roc_auc[column, draw].item() == pytest.approx(roc_auc_score(labels, scores[:, column], sample_weight=weights[draw]), abs=1e-12)
+            assert average_precision[column, draw].item() == pytest.approx(average_precision_score(labels, scores[:, column], sample_weight=weights[draw]), abs=1e-12)
+    # unit weights on untied scores rank as the unweighted metrics do
+    untied = torch.randn(300, 4, generator=torch.Generator().manual_seed(2), dtype=torch.float64)
+    for weighted, unweighted in zip(weighted_ranking_metrics(untied, torch.tensor(labels), torch.ones(1, 300)), ranking_metrics(untied, torch.tensor(labels))):
+        torch.testing.assert_close(weighted[:, 0], unweighted)
+    # a draw that weighs one class alone has no ranking
+    positives_only = torch.tensor(labels, dtype=torch.float64).unsqueeze(0)  # (1, n)
+    assert all(metric.isnan().all() for metric in weighted_ranking_metrics(untied, torch.tensor(labels), positives_only))
+    counts = protein_draws(7, draws=5, seed=1)
+    assert counts.shape == (5, 7) and (counts.sum(dim=1) == 7).all() and torch.equal(counts, protein_draws(7, draws=5, seed=1))
+
+
 def test_pair_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
     synthetic_pairs(tmp_path / "pairs")
     data = load_pairs(local_dir=tmp_path / "pairs")
@@ -975,6 +999,20 @@ def test_second_pair_task_ranks_its_realistic_split(tiny_model: ESMplusplusModel
     both = full.pivot_table(index="probe_name", columns="split", values="roc_auc")
     assert (both["test_realistic"] > 0.7).all()  # the same proteins, ranked against more negatives
     assert full[["roc_auc", "average_precision", "mcc", "balanced_mcc"]].notna().all().all()
+    # intervals over draws of the test proteins, for the full-width probes on both test splits
+    interval_tasks(root, "linear", ["ppi2"], CPU, read_task=lambda name: data, draws=50)
+    folder = root / "results" / "linear" / "ppi2"
+    intervals = pd.read_parquet(folder / "intervals.parquet")
+    assert len(intervals) == 4 * 2 * 2 and (intervals["draws"] == 50).all() and (intervals["low"] <= intervals["high"]).all()
+    chance = intervals.groupby(["split", "metric"])["chance"].unique()
+    assert list(chance[("test", "roc_auc")]) == [0.5] and np.allclose(chance[("test_realistic", "average_precision")], 1 / 11)
+    joined = intervals[intervals["metric"] == "roc_auc"].merge(full, on=["probe_name", "split"])
+    assert len(joined) == 8 and np.allclose(joined["estimate"], joined["roc_auc"], atol=0.02)  # ties among repeated pairs aside
+    draws = load_file(str(folder / "bootstrap.safetensors"))
+    assert set(draws) == {f"{split}.{metric}" for split in ("test", "test_realistic") for metric in ("roc_auc", "average_precision")}
+    test_auc = intervals[(intervals["split"] == "test") & (intervals["metric"] == "roc_auc")]
+    assert draws["test.roc_auc"].shape == (4, 50)
+    np.testing.assert_allclose(test_auc["low"], np.quantile(draws["test.roc_auc"].double().numpy(), 0.025, axis=1), atol=1e-6)
 
 
 # -- interventions and latent views --------------------------------------------------------------------------------
@@ -1212,7 +1250,8 @@ def test_best_states_fall_back_to_test_per_task() -> None:
 
 def write_trend_run(root: Path, seed: int, sites: tuple[str, ...], blocks: int, manifest: bool = True) -> None:
     """One synthetic replicate of a model with `blocks` blocks: the scores and validation scores of four concept tasks
-    and the pair task, the pair task's ranking table, and, with `manifest`, a store manifest giving the blocks."""
+    and the pair task, the pair task's ranking and interval tables, and, with `manifest`, a store manifest giving the
+    blocks."""
     for index, task in enumerate(("prot_param", "ssp_q8", "localization", "go_mf", PAIR_TASK)):
         folder = root / "results" / "linear" / task
         folder.mkdir(parents=True)
@@ -1225,6 +1264,9 @@ def write_trend_run(root: Path, seed: int, sites: tuple[str, ...], blocks: int, 
             full = probes[probes["family"] == "full"]
             full.assign(split="test", roc_auc=rng.uniform(0.5, 1.0, len(full)), average_precision=rng.uniform(0.5, 1.0, len(full))).to_parquet(
                 folder / "ranking.parquet", index=False)
+            estimate = rng.uniform(0.45, 0.7, 2 * len(full))
+            pd.concat([full.assign(split="test", metric=metric) for metric in ("roc_auc", "average_precision")], ignore_index=True).assign(
+                estimate=estimate, low=estimate - 0.05, high=estimate + 0.05, chance=0.5, draws=50).to_parquet(folder / "intervals.parquet", index=False)
     if manifest:
         (root / "stores" / "trained_original").mkdir(parents=True)
         (root / "stores" / "trained_original" / "manifest.json").write_text(json.dumps({"dims": {"blocks": blocks}}), encoding="utf-8")
@@ -1264,4 +1306,12 @@ def test_trends_across_models(tmp_path: Path) -> None:
     both = pd.concat([pd.read_parquet(root / "results" / "linear" / PAIR_TASK / "ranking.parquet") for root in small])
     expected = both[both["probe_name"] == "resid_post:1"]["roc_auc"].mean()
     assert rankings[(rankings["model"] == "ESMC-300") & (rankings["probe_name"] == "resid_post:1")]["roc_auc"].iloc[0] == pytest.approx(expected, abs=1e-4)
-    assert set(pd.read_csv(out / "pair_best_states.csv")["task"]) == {PAIR_TASK}
+    pair_best = pd.read_csv(out / "pair_best_states.csv")
+    assert set(pair_best["task"]) == {PAIR_TASK}
+    # each model's best pair state, chosen on validation, with every replicate's intervals against chance
+    chance = pd.read_csv(out / "pair_chance.csv")
+    assert set(chance["model"]) == set(pair_best["model"]) and set(chance["metric"]) == {"roc_auc", "average_precision"}
+    assert sorted(chance[(chance["model"] == "ESMC-300") & (chance["metric"] == "roc_auc")]["replicate"]) == [0, 1]
+    chosen = pair_best.set_index("model").loc["ESMC-600"]
+    assert set(chance[chance["model"] == "ESMC-600"]["probe_name"]) == {f"{chosen['any_site']}:{int(chosen['any_layer'])}"}
+    assert (chance["above_chance"] == (chance["low"] > chance["chance"])).all()
