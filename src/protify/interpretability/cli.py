@@ -331,6 +331,9 @@ def command_train(args: argparse.Namespace) -> None:
 def command_select(args: argparse.Namespace) -> None:
     root = Path(args.root)
     sweeps = read_sweeps(root, args.labels)
+    if args.loss != "all":
+        # squared error and cross entropy want different step sizes, so each loss can have its own global setting
+        sweeps = sweeps[(sweeps["kind"] == "regression") == (args.loss == "regression")]
     ranked = rank_settings(sweeps)
     chosen = choose_setting(ranked, args.tolerance)
     with pd.option_context("display.width", 200, "display.max_columns", 20):
@@ -339,8 +342,10 @@ def command_select(args: argparse.Namespace) -> None:
         print(task_optima(sweeps).to_string(index=False))
     choice = {name: (value.item() if hasattr(value, "item") else value) for name, value in chosen.items()}
     print(f"\nchosen: {choice}")
-    out = Path(args.out) if args.out else root / "sweeps" / f"selection_{'_'.join(args.labels)}.json"
-    record = {"labels": list(args.labels), "tolerance": args.tolerance, "chosen": choice, "ranking": ranked.to_dict(orient="records")}
+    suffix = "" if args.loss == "all" else f"_{args.loss}"
+    out = Path(args.out) if args.out else root / "sweeps" / f"selection_{'_'.join(args.labels)}{suffix}.json"
+    record = {"labels": list(args.labels), "loss": args.loss, "tasks": sorted(set(sweeps["task"])), "tolerance": args.tolerance,
+              "chosen": choice, "ranking": ranked.to_dict(orient="records")}
     out.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8", newline="\n")
 
 
@@ -362,7 +367,7 @@ def command_phospho(args: argparse.Namespace) -> None:
     folder = Path(args.root) / "interventions" / args.label
     scores = run_phospho_interventions(
         model, untrained, tokenizer, data, spec, folder / "proteins", device,
-        proteins=args.proteins, seed=args.data_seed, iterations=args.iterations, max_tokens=args.max_tokens,
+        proteins=args.proteins, seed=args.data_seed, split_seed=args.split_seed, iterations=args.iterations, max_tokens=args.max_tokens,
         watch=pilot.watch if pilot is not None else None,
     )
     if pilot is not None:
@@ -396,22 +401,14 @@ def command_pca(args: argparse.Namespace) -> None:
 def command_figures(args: argparse.Namespace) -> None:
     from . import figures
 
-    root, out = Path(args.root), Path(args.out)
-    written = []
-    if (root / "results" / args.label).exists():
-        names = {path.parent.name: json.loads(path.read_text(encoding="utf-8"))["task"] for path in (root / "results" / args.label).glob("*/run.json")}
-        written += figures.all_figures(root, args.label, out, args.blocks, names)
-    for regime, labels in (("protein", args.protein_sweeps), ("residue", args.residue_sweeps)):
-        if labels:
-            ranked = rank_settings(read_sweeps(root, labels))
-            written.append(figures.sweep_curves({regime: ranked}, out / f"sweeps_{regime}.png"))
-    tests = root / "interventions" / args.interventions / "tests.parquet"
-    if tests.exists():
-        written.append(figures.phospho_figure(pd.read_parquet(tests), args.blocks, out / "phospho.png"))
-    for path in sorted((root / "latent" / args.latent).glob("*.parquet")):
-        frame = pd.read_parquet(path)
-        for site, block in frame.groupby("site"):
-            written.append(figures.pca_panels(block, out / f"pca_{path.stem}_{site}.png"))
+    roots, random_roots = [Path(root) for root in args.roots], [Path(root) for root in args.random_roots]
+    first = roots[0]
+    metadata = {path.parent.name: json.loads(path.read_text(encoding="utf-8"))["task"] for path in (first / "results" / args.label).glob("*/run.json")}
+    rankings = {regime: rank_settings(read_sweeps(first, labels)) for regime, labels in (("protein", args.protein_sweeps), ("residue", args.residue_sweeps)) if labels}
+    phospho = [first / "interventions" / label for label in args.interventions if (first / "interventions" / label / "scores.parquet").exists()]
+    models = [("trained model", first)] + [("random-init model", root) for root in random_roots[:1]]
+    latent = {name: root / "latent" / args.latent for name, root in models if (root / "latent" / args.latent).exists()}
+    written = figures.draw(roots, Path(args.out), args.blocks, args.label, random_roots, phospho, latent, rankings, metadata)
     for path in written:
         print(path)
 
@@ -479,6 +476,8 @@ def build_parser() -> argparse.ArgumentParser:
     select.add_argument("--labels", nargs="+", required=True, help="sweep labels to compare, such as one per batch size")
     select.add_argument("--tolerance", type=float, default=0.005, help="mean validation shortfall a faster label may give up")
     select.add_argument("--show", type=int, default=20, help="ranked settings to print")
+    select.add_argument("--loss", choices=("all", "classification", "regression"), default="all",
+                        help="choose among the tasks of one loss: regression (squared error) or classification (cross entropy)")
     select.add_argument("--out", default=None, help="where to write the selection; default root/sweeps/selection_<labels>.json")
     select.set_defaults(handler=command_select)
 
@@ -490,7 +489,8 @@ def build_parser() -> argparse.ArgumentParser:
     phospho.add_argument("--revision", default=None)
     phospho.add_argument("--local-data", default=None)
     phospho.add_argument("--proteins", type=int, default=1000, help="phosphoproteins drawn at random")
-    phospho.add_argument("--data-seed", type=int, default=184502, help="seed of the protein draw and each protein's split")
+    phospho.add_argument("--data-seed", type=int, default=184502, help="seed of the protein draw, and of each protein's split unless --split-seed")
+    phospho.add_argument("--split-seed", type=int, default=None, help="seed of each protein's split and label shuffle, for replicates on the same proteins")
     phospho.add_argument("--iterations", type=int, default=100, help="most Newton steps of a logistic regression")
     phospho.add_argument("--tf32", action="store_true", help="TF32 matrix products in the float32 forward passes")
     phospho.set_defaults(handler=command_phospho)
@@ -507,14 +507,15 @@ def build_parser() -> argparse.ArgumentParser:
     pca.add_argument("--local-data", default=None)
     pca.set_defaults(handler=command_pca)
 
-    drawn = commands.add_parser("figures", help="draw the figures and summary tables of a run")
-    drawn.add_argument("--root", required=True)
+    drawn = commands.add_parser("figures", help="draw the figures and summary tables of one or more replicate runs")
+    drawn.add_argument("--roots", nargs="+", required=True, help="one root per seed replicate; sweeps, interventions and latent views are read from the first")
+    drawn.add_argument("--random-roots", nargs="*", default=[], help="the roots of the same analysis on a randomly initialized model, one per seed")
     drawn.add_argument("--out", required=True)
     drawn.add_argument("--label", default="linear", help="results label")
     drawn.add_argument("--blocks", type=int, default=30, help="blocks of the model, for the depth axis")
     drawn.add_argument("--protein-sweeps", nargs="*", default=[], help="protein sweep labels to plot")
     drawn.add_argument("--residue-sweeps", nargs="*", default=[], help="residue sweep labels to plot")
-    drawn.add_argument("--interventions", default="phospho", help="interventions label")
+    drawn.add_argument("--interventions", nargs="*", default=["phospho"], help="interventions labels, one per replicate, averaged per protein")
     drawn.add_argument("--latent", default="pca", help="principal coordinates label")
     drawn.set_defaults(handler=command_figures)
 

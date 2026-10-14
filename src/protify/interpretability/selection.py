@@ -21,7 +21,8 @@ SETTING = ["label", "learning_rate", "weight_decay"]
 
 
 def read_sweeps(root: Path, labels: Sequence[str]) -> pd.DataFrame:
-    """Every task's sweep table under `root/sweeps/<label>/`, with the label, its batch and each task's seconds."""
+    """Every task's sweep table under `root/sweeps/<label>/`, with the label, its batch, each task's seconds and its
+    kind (regression, multilabel, binary or multiclass)."""
     frames = []
     for label in labels:
         paths = sorted((root / "sweeps" / label).glob("*/sweep.parquet"))
@@ -34,6 +35,7 @@ def read_sweeps(root: Path, labels: Sequence[str]) -> pd.DataFrame:
             frame["batch_size"] = record["settings"]["batch_size"]
             frame["max_tokens"] = record["settings"]["max_tokens"]
             frame["task_seconds"] = record["seconds"]
+            frame["kind"] = record["task"]["kind"]
             frames.append(frame)
     sweeps = pd.concat(frames, ignore_index=True)
     tasks = sweeps.groupby("label")["task"].agg(lambda names: tuple(sorted(set(names))))

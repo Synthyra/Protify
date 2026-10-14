@@ -596,9 +596,14 @@ def test_sweep_then_select(tiny_model: ESMplusplusModel, tokenizer: object, tmp_
     residue = pd.read_parquet(root / "sweeps" / "b16" / "ssp_q3" / "sweep.parquet")
     assert len(residue) == 4 * (1 + 3 + 3 + 3 * 4)
     assert residue[residue["probe_name"] == "embedding:0"]["validation_score"].max() > 0.9
-    ranked = rank_settings(read_sweeps(root, ["b16", "b32"]))
+    sweeps = read_sweeps(root, ["b16", "b32"])
+    ranked = rank_settings(sweeps)
     assert len(ranked) == 8 and set(ranked["tasks"]) == {3}
     assert ranked["mean_shortfall"].min() >= 0.0
+    assert set(sweeps["kind"]) <= {"multiclass", "multilabel", "binary"}
+    main(["select", "--root", str(root), "--labels", "b16", "b32", "--loss", "classification"])
+    record = json.loads((root / "sweeps" / "selection_b16_b32_classification.json").read_text(encoding="utf-8"))
+    assert record["loss"] == "classification" and record["tasks"] == sorted(names)
 
 
 def test_residue_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
@@ -753,7 +758,7 @@ def test_principal_components_and_layer_projections(tiny_model: ESMplusplusModel
     main(["pca", "--root", str(root), "--tasks", "go_cc", "--layers", "0,2", "--top", "2", "--local-data", str(tmp_path / "data")])
     written = pd.read_parquet(root / "latent" / "pca" / "go_cc.parquet")
     pd.testing.assert_frame_equal(written.drop(columns="task"), frame)
-    main(["figures", "--root", str(root), "--out", str(tmp_path / "figures")])
+    main(["figures", "--roots", str(root), "--out", str(tmp_path / "figures")])
     assert (tmp_path / "figures" / "pca_go_cc_resid_post.png").exists()
 
 
@@ -773,36 +778,55 @@ def synthetic_scores(task: str, sites: tuple[str, ...], layers: int, heads: int,
     return pd.DataFrame(rows, columns=["task", "family", "probe_name", "resample", "plm", "probe", "control", "score"])
 
 
-def test_figures_from_result_tables(tmp_path: Path) -> None:
-    root, out = tmp_path / "run", tmp_path / "figures"
-    sites = ("embedding", "q", "mlp_act", "resid_post", "final_norm")
+def write_synthetic_run(root: Path, seed: int, sites: tuple[str, ...]) -> None:
+    """The results of one synthetic replicate: two tasks' scores and run records, and ProtParam's per-target scores."""
     for index, task in enumerate(("localization", "prot_param")):
         folder = root / "results" / "linear" / task
         folder.mkdir(parents=True)
-        scores = synthetic_scores(task, sites, layers=3, heads=4, resamples=3, seed=index)
-        scores.to_parquet(folder / "scores.parquet", index=False)
+        synthetic_scores(task, sites, layers=3, heads=4, resamples=3, seed=10 * seed + index).to_parquet(folder / "scores.parquet", index=False)
         (folder / "run.json").write_text(json.dumps({"task": {"name": task, "label_names": ["length", "mass"]}}), encoding="utf-8")
-    elementwise = synthetic_scores("prot_param", ("embedding", "resid_post"), layers=3, heads=0, resamples=3, seed=2)
+    elementwise = synthetic_scores("prot_param", ("embedding", "resid_post"), layers=3, heads=0, resamples=3, seed=10 * seed + 2)
     elementwise = elementwise[(elementwise["plm"] == "trained") & (elementwise["probe"] == "trained") & (elementwise["control"] == "original")]
     pd.concat([elementwise.assign(label_index=0), elementwise.assign(label_index=1)]).drop(columns=["plm", "probe", "control"]).to_parquet(
         root / "results" / "linear" / "prot_param" / "elementwise.parquet", index=False)
-    tests = pd.DataFrame([
-        {"inputs": inputs, "site": site, "layer": layer, "trained_true": 0.5, "trained_true_std": 0.1, "trained_shuffled": 0.0,
-         "trained_shuffled_std": 0.05, "untrained_true": 0.1, "untrained_true_std": 0.05}
-        for inputs in ("raw", "standardized") for site in sites for layer in ([0] if site in ("embedding", "final_norm") else range(3))
-    ])
-    (root / "interventions" / "phospho").mkdir(parents=True)
-    tests.to_parquet(root / "interventions" / "phospho" / "tests.parquet", index=False)
-    main(["figures", "--root", str(root), "--out", str(out), "--blocks", "3"])
-    for name in ("depth_curves", "site_maps", "best_states", "peak_layers", "controls", "heads", "prot_param_targets", "phospho"):
+
+
+def test_figures_from_result_tables(tmp_path: Path) -> None:
+    sites = ("embedding", "q", "q_rot", "mlp_act", "resid_post", "final_norm")
+    roots, random_root, out = [tmp_path / f"run_{seed}" for seed in range(2)], tmp_path / "random", tmp_path / "figures"
+    for seed, root in enumerate(roots + [random_root]):
+        write_synthetic_run(root, seed, sites)
+    rng = np.random.default_rng(5)
+    for label in ("phospho", "phospho_b"):
+        rows = [
+            {"protein": f"p{protein}", "plm": plm, "inputs": inputs, "labels": labels, "site": site, "layer": layer, "mcc": rng.uniform(-0.2, 0.6)}
+            for protein in range(6) for plm, labels in (("trained", "true"), ("trained", "shuffled"), ("untrained", "true"))
+            for inputs in ("raw", "standardized") for site in sites for layer in ([0] if site in ("embedding", "final_norm") else range(3))
+        ]
+        (roots[0] / "interventions" / label).mkdir(parents=True)
+        pd.DataFrame(rows).to_parquet(roots[0] / "interventions" / label / "scores.parquet", index=False)
+    main(["figures", "--roots", *map(str, roots), "--random-roots", str(random_root), "--out", str(out), "--blocks", "3",
+          "--interventions", "phospho", "phospho_b"])
+    for name in ("depth_curves", "selected_tasks", "controls", "site_maps", "site_gaps", "site_families", "heads",
+                 "rotation", "best_states", "random_init_maps", "random_init_summary", "replicate_spread", "prot_param_targets", "phospho"):
         assert (out / f"{name}.png").stat().st_size > 10_000, name
     table = pd.read_csv(out / "best_states.csv")
     assert list(table["task"]) == ["prot_param", "localization"]
     summary = pd.read_parquet(out / "summary.parquet")
     trained = figures.headline(summary)
-    assert len(trained[trained["family"] == "full"]) == 2 * (2 + 3 * 3)
+    assert len(trained[trained["family"] == "full"]) == 2 * (2 + 4 * 3) and (trained["replicates"] == 2).all()
+    scores = figures.read_replicates(roots, "linear")
+    full = scores[(scores["resample"] == 0) & (scores["task"] == "localization") & (scores["probe_name"] == "q:1") & (scores["plm"] == "trained")
+                  & (scores["probe"] == "trained") & (scores["control"] == "original")]["score"]
+    row = trained[(trained["task"] == "localization") & (trained["probe_name"] == "q:1")].iloc[0]
+    assert len(full) == 2 and row["full"] == pytest.approx(full.mean()) and row["full_std"] == pytest.approx(full.std())
     best = trained[(trained["task"] == "localization") & (trained["family"] == "full")]["full"].max()
     assert table.set_index("task").loc["localization", "any_score"] == pytest.approx(best, abs=1e-4)
+    margins = pd.read_csv(out / "random_init.csv").set_index("task").loc["localization"]
+    assert margins["any_margin"] == pytest.approx(margins["any_score_trained"] - margins["any_score_random"], abs=2e-4)
+    tests = pd.read_parquet(out / "phospho_tests.parquet")
+    assert (tests["proteins"] == 6).all() and len(tests) == 2 * (2 + 4 * 3)
+    assert (pd.read_csv(out / "phospho_replicates.csv")["replicates"] == 2).all()
     ranked = pd.DataFrame([
         {"label": label, "learning_rate": rate, "weight_decay": decay, "mean_shortfall": rate * decay, "batch_size": batch, "max_tokens": 0}
         for label, batch in (("b64", 64), ("b256", 256)) for rate in (1e-3, 1e-2) for decay in (0.0, 0.1)

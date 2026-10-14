@@ -322,14 +322,17 @@ def run_phospho_interventions(
     proteins: int = 1000,
     seed: int = 184502,
     max_length: int = 1022,
+    split_seed: int | None = None,
     iterations: int = 100,
     max_tokens: int = 131072,
     watch: Callable[[Iterable[tuple[int, PhosphoProtein]]], Iterable[tuple[int, PhosphoProtein]]] | None = None,
 ) -> pd.DataFrame:
     """Score `proteins` randomly chosen phosphoproteins, appending one parquet part per protein under `out`.
 
-    Proteins already written are skipped, so an interrupted run resumes. Returns every row written so far. `watch`
-    wraps the loop over proteins, as `foundry.pilot.Pilot.watch` does, so a pilot times whole proteins.
+    `seed` draws the proteins and, unless `split_seed` is given, seeds each protein's split and label shuffle (offset by
+    its position), so replicates with other split seeds score the same proteins. Proteins already written are skipped,
+    so an interrupted run resumes. Returns every row written so far. `watch` wraps the loop over proteins, as
+    `foundry.pilot.Pilot.watch` does, so a pilot times whole proteins.
     """
     out.mkdir(parents=True, exist_ok=True)
     candidates = [protein for protein in phosphoproteins(data) if len(protein.sequence) <= max_length]
@@ -340,7 +343,7 @@ def run_phospho_interventions(
     for position, protein in (watch(pending) if watch is not None else pending):
         part = out / f"{position:04d}_{protein.id}.parquet"
         sequences, classes = scanning_mutants(protein)
-        protein_seed = seed + position
+        protein_seed = (seed if split_seed is None else split_seed) + position
         train, test = stratified_split(classes, 0.3, protein_seed)
         shuffled = np.random.default_rng(protein_seed).permutation(classes[train])
         rows = []
