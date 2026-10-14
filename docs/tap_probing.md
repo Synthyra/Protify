@@ -104,7 +104,8 @@ With controls (the default for `train`), every trained probe is also scored, at 
 A probe standardizes its inputs with the training split's moments, so an input whose scale departs from those moments,
 as L2-normalized residue states do, reaches it near a constant. Scores are the Matthews correlation coefficient (cosine
 similarity for the ProtParam regression), on the full test split and on 7 random halves of it, so every score has a
-spread. Without controls (`--no-controls`), residue tasks are scored in batches that fill the token budget. Results go to `RUN/results/<label>/<task>/`:
+spread. Residue test passes run in batches that fill the token budget; with controls, a batch holds whole groups of 8
+consecutive test proteins, the groups the mean control averages. Results go to `RUN/results/<label>/<task>/`:
 `scores.parquet` (one row per probe, condition and resample), `elementwise.parquet` (per label),
 `training.parquet` (steps, epochs and selected setting of each probe), `validation.parquet` (each kept probe's score
 on the whole validation split, in the test metric, and its validation loss), `probes.safetensors` (the selected

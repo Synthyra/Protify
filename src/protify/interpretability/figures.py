@@ -501,17 +501,26 @@ def site_maps(summary: pd.DataFrame, path: Path, tasks: Sequence[str] = TASK_ORD
     return _save(figure, path)
 
 
+def site_gaps(summary: pd.DataFrame, tasks: Sequence[str] = TASK_ORDER) -> pd.DataFrame:
+    """Tasks by sites: each site's best score over depth minus the task's best residual-stream score, each best chosen
+    on validation. The embedding, lower in every task, is left out."""
+    bests = site_bests(summary)
+    tasks = _ordered(tasks, set(bests["task"]))
+    sites = [site for site in SITE_LABELS if site in set(bests["site"])]
+    scores = bests.pivot_table(index="task", columns="site", values="full").reindex(index=tasks, columns=sites)
+    residual = _choose(bests[bests["site"].isin(RESIDUAL)], ["task"]).set_index("task")["full"].reindex(tasks)
+    return scores.sub(residual, axis=0).drop(columns="embedding", errors="ignore")
+
+
 def site_gap_map(summary: pd.DataFrame, path: Path, tasks: Sequence[str] = TASK_ORDER) -> Path:
     """A: every site's best score over depth minus the task's best residual-stream score, each best chosen on validation
     (the embedding, lower in every task, is left out); cells at least 0.05 from zero are labeled. B: the block each
     site's best probe reads."""
     plt = _pyplot()
     bests = site_bests(summary)
-    tasks = _ordered(tasks, set(bests["task"]))
+    gaps = site_gaps(summary, tasks)
+    tasks = list(gaps.index)
     sites = [site for site in SITE_LABELS if site in set(bests["site"])]
-    scores = bests.pivot_table(index="task", columns="site", values="full").reindex(index=tasks, columns=sites)
-    residual = _choose(bests[bests["site"].isin(RESIDUAL)], ["task"]).set_index("task")["full"].reindex(tasks)
-    gaps = scores.sub(residual, axis=0).drop(columns="embedding", errors="ignore")
     blocks_at = bests.pivot_table(index="task", columns="site", values="layer").reindex(index=tasks, columns=[s for s in sites if s in BLOCK_SITES])
     figure, (left, right) = plt.subplots(1, 2, figsize=(7.2, 0.2 * len(tasks) + 1.3), gridspec_kw={"width_ratios": [gaps.shape[1], blocks_at.shape[1] * 0.9]})
     limit = float(np.nanmax(np.abs(gaps.to_numpy()))) or 1.0
@@ -543,10 +552,42 @@ def site_gap_map(summary: pd.DataFrame, path: Path, tasks: Sequence[str] = TASK_
     right.set_yticks([])
     _bare(right)
     bar = figure.colorbar(image, ax=right, shrink=0.5, pad=0.01, aspect=25)
-    bar.set_label("block of the peak", fontsize=5.5)
+    bar.set_label("block of the best probe", fontsize=5.5)
     bar.ax.tick_params(labelsize=5)
     _letter(right, "B", -0.02)
     figure.tight_layout(w_pad=0.8)
+    return _save(figure, path)
+
+
+def site_summary(summary: pd.DataFrame, path: Path, levels: dict[str, str] | None = None) -> Path:
+    """Each site's best score minus the task's best residual-stream score (as in `site_gap_map`), one dot per task,
+    protein tasks filled and residue tasks hollow; sites ordered by their median, which a bar marks."""
+    plt = _pyplot()
+    gaps = site_gaps(summary)
+    order = gaps.median().sort_values(ascending=False).index
+    figure, axis = plt.subplots(figsize=(4.4, 0.24 * len(order) + 0.9))
+    positions = np.arange(len(order))[::-1]
+    rng = np.random.default_rng(0)
+    for position in positions[::2]:
+        axis.axhspan(position - 0.5, position + 0.5, color="#f6f5f2", lw=0, zorder=0)
+    axis.axvline(0.0, color=INK_SECONDARY, lw=0.7, zorder=1)
+    marks = {"protein": ("protein task", {"color": PALETTE[0]}), "residue": ("residue task", {"facecolors": "none", "edgecolors": PALETTE[1], "linewidths": 0.8})}
+    for position, site in zip(positions, order):
+        column = gaps[site].dropna()
+        offsets = rng.uniform(-0.22, 0.22, len(column))
+        for level, (legend, style) in marks.items():
+            kept = np.array([(levels or {}).get(task, "protein") == level for task in column.index])
+            if kept.any():
+                axis.scatter(column[kept], position + offsets[kept], s=9, zorder=3, label=legend if position == positions[0] else None, **style)
+        axis.plot([column.median()] * 2, [position - 0.32, position + 0.32], color=INK, lw=1.6, zorder=4,
+                  label="median over tasks" if position == positions[0] else None)
+    axis.set_yticks(positions)
+    axis.set_yticklabels([SITE_LABELS[site] for site in order])
+    axis.set_ylim(-0.6, len(order) - 0.4)
+    axis.set_xlabel("best score minus best residual-stream score")
+    axis.grid(axis="x", color=GRID, lw=0.5)
+    axis.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0), ncol=3, frameon=False, fontsize=5.5)
+    figure.tight_layout()
     return _save(figure, path)
 
 
@@ -1034,6 +1075,8 @@ def result_figures(
         written.append(control_grid(summary, blocks, out / "controls.png"))
     written.append(site_maps(summary, out / "site_maps.png"))
     written.append(site_gap_map(summary, out / "site_gaps.png"))
+    levels = {task: record.get("level", "protein") for task, record in (metadata or {}).items()}
+    written.append(site_summary(summary, out / "site_summary.png", levels))
     written.append(site_family_curves(summary, blocks, out / "site_families.png"))
     if (summary["family"] == "head").any():
         written.append(head_maps(summary, out / "heads.png"))
