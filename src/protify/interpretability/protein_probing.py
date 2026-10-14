@@ -2,7 +2,8 @@
 
 Each site's train, validation and test rows are read once from the pooled store onto the device. One bank holds a
 full-width probe per layer (input 2w: mean then variance), and, for head-split sites, a bank holds one probe per
-layer and head (input 2 d_h: that head's mean then variance columns). Training is minibatch AdamW over proteins
+layer and head (input 2 d_h: that head's mean then variance columns); with `pooling="mean"` every probe reads the
+mean columns alone (w, or d_h). Training is minibatch AdamW over proteins
 with validation each epoch (or every `validate_every` steps), per-probe early stopping on validation loss, and the
 best validation weights kept. Test scores cover the controls when control stores are given. Linear banks run on the
 probe bank's shared-input path: the P probes of a family read P slices of one row, and every grid setting reads the
@@ -50,15 +51,23 @@ class ControlStores:
         return seeds.pop()
 
 
-def head_view(pooled: Tensor, heads: int) -> Tensor:
-    """Split pooled (mean, variance) columns into per-head (mean, variance) blocks."""
-    # pooled: (n, L, 2 * w) -> (n, L * H, 2 * d_h)
+def head_view(pooled: Tensor, heads: int, pooling: str = "mean_var") -> Tensor:
+    """Split pooled (mean, variance) columns into per-head (mean, variance) blocks, or per-head means alone."""
+    # pooled: (n, L, 2 * w) -> (n, L * H, 2 * d_h), or (n, L * H, d_h) for the mean alone
     n, layers, columns = pooled.shape
     width = columns // 2
     mean, variance = pooled.split(width, dim=-1)  # each (n, L, w)
     mean = mean.reshape(n, layers, heads, width // heads)  # (n, L, H, d_h)
+    if pooling == "mean":
+        return mean.reshape(n, layers * heads, width // heads)  # (n, L * H, d_h)
     variance = variance.reshape(n, layers, heads, width // heads)  # (n, L, H, d_h)
     return torch.cat([mean, variance], dim=-1).reshape(n, layers * heads, 2 * width // heads)  # (n, L * H, 2 * d_h)
+
+
+def full_view(pooled: Tensor, pooling: str = "mean_var") -> Tensor:
+    """The pooled columns a full-width probe reads: mean then variance, or the mean alone."""
+    # pooled: (n, L, 2 * w) -> (n, L, 2 * w), or (n, L, w)
+    return pooled if pooling == "mean_var" else pooled[..., : pooled.shape[-1] // 2]
 
 
 def feature_moments(X: Tensor, chunk: int = 1024) -> tuple[Tensor, Tensor]:
@@ -144,11 +153,11 @@ def train_bank(
     return epochs
 
 
-def families(layout: SiteLayout) -> list[Family]:
+def families(layout: SiteLayout, pooling: str = "mean_var") -> list[Family]:
     """(family, probe names, view of the pooled rows) of a site: full width, and per head for head-split sites."""
-    found: list[Family] = [("full", layout.full_names(), lambda pooled: pooled)]
+    found: list[Family] = [("full", layout.full_names(), lambda pooled: full_view(pooled, pooling))]
     if layout.heads:
-        found.append(("head", layout.head_names(), lambda pooled, heads=layout.heads: head_view(pooled, heads)))
+        found.append(("head", layout.head_names(), lambda pooled, heads=layout.heads: head_view(pooled, heads, pooling)))
     return found
 
 
@@ -248,7 +257,7 @@ def train_protein_task(
 
     for site, layout in layouts.items():
         loaded = {split: store.load(site, rows, device) for split, rows in split_rows.items()}  # each (n, L, 2 * w)
-        for family, names, view in families(layout):
+        for family, names, view in families(layout, settings.pooling):
             inputs = {split: view(values) for split, values in loaded.items()}  # (n, P, w')
             bank, epochs = fit_family(names, inputs, targets, data, settings, device, f"{task.name} {site} {family}")
             selected, chosen = bank.select_settings(len(settings.grid()))
@@ -281,7 +290,7 @@ def sweep_protein_task(
     plan = ResamplePlan.draw(len(data.splits["validation"].sequences), 0, settings.resample_fraction, settings.seed, device)
     for site, layout in layouts.items():
         loaded = {split: store.load(site, rows, device) for split, rows in split_rows.items()}  # each (n, L, 2 * w)
-        for family, names, view in families(layout):
+        for family, names, view in families(layout, settings.pooling):
             started = time.time()
             inputs = {split: view(values) for split, values in loaded.items()}  # (n, P, w')
             bank, epochs = fit_family(names, inputs, targets, data, settings, device, f"sweep {task.name} {site} {family}")

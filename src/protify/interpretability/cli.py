@@ -6,7 +6,8 @@
     python -m protify.interpretability train  --root RUN [--tasks all] [--lr 1e-3 ...] [--probe linear]
     python -m protify.interpretability phospho --root RUN [--proteins 1000]
     python -m protify.interpretability pca    --root RUN --tasks interpro_family --sites resid_post --layers 0,5,10,15,20
-    python -m protify.interpretability figures --root RUN --label linear --out FIGURES
+    python -m protify.interpretability figures --roots RUN [RUN_2 ...] [--random-roots RANDOM ...] --out FIGURES
+    python -m protify.interpretability compare --variants raw=RUN normalized=NORM mean=RUN:mean --out FIGURES
     python -m protify.interpretability tokens --sequences FILE --out DIR --sites resid_post
 
 `embed` writes the pooled stores the protein tasks read: every protein-task sequence through the trained model,
@@ -16,7 +17,9 @@ that costs the probes least validation score, preferring the fastest batch when 
 and scores every probe of each task: protein tasks from the stores, residue tasks by streaming from the model.
 Results go to `RUN/results/<label>/<task>/` as parquet tables and a safetensors file of the selected probe weights.
 `phospho` runs the phosphomimetic scanning test, `pca` writes principal coordinates of pooled states by label set,
-and `figures` draws every figure and summary table the run's tables support.
+`figures` draws every figure and summary table the runs' tables support, and `compare` sets variants of the analysis
+(normalized inputs, mean-only pooling) against a reference. `--normalize` on `embed` and `train` L2-normalizes every
+token state before pooling or probing; `--pooling mean` makes protein probes read pooled means alone.
 """
 
 from __future__ import annotations
@@ -125,22 +128,31 @@ def control_stores(root: Path) -> ControlStores:
 StorePass = tuple[str, list[str], dict[bool, Path], Callable[[str], str] | None]
 
 
-def store_passes(datasets: dict[str, ConceptData], root: Path, controls: bool, seed: int) -> list[StorePass]:
-    """(model state, sequences, store roots, input transform) of each forward pass the stores need."""
+def store_passes(datasets: dict[str, ConceptData], root: Path, controls: bool, seed: int, normalize: bool = False) -> list[StorePass]:
+    """(model state, sequences, store roots, input transform) of each forward pass the stores need.
+
+    With `normalize`, every store pools L2-normalized token states, so the `original` and `scrambled` stores are the
+    normalized variant's inputs and the `l2_normalized` control equals `original`."""
     every = sorted({sequence for data in datasets.values() for split in data.splits.values() for sequence in split.sequences})
     tested = sorted({sequence for data in datasets.values() for sequence in data.splits["test"].sequences})
 
     def scrambled(sequence: str) -> str:
         return scramble(sequence, scramble_seed(sequence, seed))
 
-    passes: list[StorePass] = [("trained", every, {False: store_path(root, "trained", "original")}, None)]
+    passes: list[StorePass] = [("trained", every, {normalize: store_path(root, "trained", "original")}, None)]
     if controls:
         passes += [
             ("trained", tested, {True: store_path(root, "trained", "l2_normalized")}, None),
-            ("trained", tested, {False: store_path(root, "trained", "scrambled")}, scrambled),
-            ("untrained", tested, {False: store_path(root, "untrained", "original"), True: store_path(root, "untrained", "l2_normalized")}, None),
-            ("untrained", tested, {False: store_path(root, "untrained", "scrambled")}, scrambled),
+            ("trained", tested, {normalize: store_path(root, "trained", "scrambled")}, scrambled),
         ]
+        if normalize:  # both untrained stores are normalized, so they take two passes
+            passes += [
+                ("untrained", tested, {True: store_path(root, "untrained", "original")}, None),
+                ("untrained", tested, {True: store_path(root, "untrained", "l2_normalized")}, None),
+            ]
+        else:
+            passes.append(("untrained", tested, {False: store_path(root, "untrained", "original"), True: store_path(root, "untrained", "l2_normalized")}, None))
+        passes.append(("untrained", tested, {normalize: store_path(root, "untrained", "scrambled")}, scrambled))
     return passes
 
 
@@ -156,12 +168,13 @@ def write_stores(
     max_tokens: int,
     device: torch.device,
     pilot: object | None = None,
+    normalize: bool = False,
 ) -> None:
     """The pooled stores of the protein tasks: every sequence under the trained model, and the control stores.
 
     With a `foundry.pilot.Pilot`, only the first pass runs, under the pilot's watch, and its store is left incomplete.
     """
-    passes = store_passes(datasets, root, controls, seed)
+    passes = store_passes(datasets, root, controls, seed, normalize)
     if pilot is not None:
         pilot.total_steps = sum(len(token_batches(sorted(set(sequences), key=len, reverse=True), max_tokens)) for _, sequences, _, _ in passes)
         _, sequences, roots, _ = passes[0]
@@ -200,7 +213,7 @@ def command_embed(args: argparse.Namespace) -> None:
     tasks = [name for name in parse_tasks(args.tasks) if name in PROTEIN_TASKS]
     datasets = load_tasks(tasks, args)
     model, tokenizer = load_model(args.model, device, random_init=args.random_init, seed=args.seed)
-    write_stores(model, tokenizer, model_label(args), datasets, Path(args.root), spec, args.controls, args.seed, args.max_tokens, device, pilot)
+    write_stores(model, tokenizer, model_label(args), datasets, Path(args.root), spec, args.controls, args.seed, args.max_tokens, device, pilot, args.normalize)
 
 
 def training_settings(args: argparse.Namespace) -> TrainingSettings:
@@ -216,6 +229,8 @@ def training_settings(args: argparse.Namespace) -> TrainingSettings:
         seed=args.seed,
         controls=not args.no_controls,
         probe=probe,
+        normalize=args.normalize,
+        pooling=args.pooling,
     )
 
 
@@ -268,6 +283,9 @@ def train_tasks(
         started = time.time()
         if data.task.level == "protein":
             store = PooledTapStore(store_path(root, "trained", "original"))
+            if store.manifest.normalized != settings.normalize:
+                state = "normalized" if store.manifest.normalized else "raw"
+                raise SystemExit(f"{store.root} pools {state} token states; embed and train must agree on --normalize.")
             layouts = stored_layouts(store, spec)
             if sweep:
                 results = sweep_protein_task(data, store, layouts, settings, device)
@@ -322,7 +340,8 @@ def command_train(args: argparse.Namespace) -> None:
         read_task=lambda name: load_concept(name, repo=args.repo, revision=args.revision, local_dir=args.local_data),
         read_model=lambda: load_model(args.model, device, random_init=args.random_init, seed=args.seed),
         overwrite=args.overwrite,
-        meta={"model": model_label(args), "random_init": args.random_init, "repo": args.repo, "revision": args.revision, "local_data": args.local_data},
+        meta={"model": model_label(args), "random_init": args.random_init, "normalize": args.normalize, "pooling": args.pooling,
+              "repo": args.repo, "revision": args.revision, "local_data": args.local_data},
         pilot=pilot,
         sweep=args.command == "sweep",
     )
@@ -413,6 +432,26 @@ def command_figures(args: argparse.Namespace) -> None:
         print(path)
 
 
+def parse_variant(item: str, label: str) -> tuple[str, list[tuple[Path, str]]]:
+    """NAME=ROOT[:LABEL][,ROOT[:LABEL]...] as the variant's name and its replicate (root, results label) pairs."""
+    name, _, spec = item.partition("=")
+    if not name or not spec:
+        raise SystemExit(f"--variants takes NAME=ROOT[:LABEL][,ROOT[:LABEL]...], not {item!r}.")
+    replicates = []
+    for part in spec.split(","):
+        root, separator, named = part.rpartition(":")
+        replicates.append((Path(root), named) if separator and "/" not in named and "\\" not in named else (Path(part), label))
+    return name, replicates
+
+
+def command_compare(args: argparse.Namespace) -> None:
+    from . import figures
+
+    variants = dict(parse_variant(item, args.label) for item in args.variants)
+    for path in figures.compare(variants, Path(args.out), args.blocks):
+        print(path)
+
+
 def command_tokens(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
     spec = TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=False)
@@ -436,8 +475,12 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--pilot", action="store_true", help="time the first steps (foundry.pilot), write the report under --root, and stop")
         sub.add_argument("--random-init", action="store_true", help="reset every module to PyTorch's default initialization (seeded by --seed): the random-weights control")
 
+    def normalizing(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--normalize", action="store_true", help="L2-normalize every token state along its width before pooling (embed) or probing (train)")
+
     embed = commands.add_parser("embed", help="write the pooled tap stores of the protein tasks")
     common(embed)
+    normalizing(embed)
     embed.add_argument("--root", required=True)
     embed.add_argument("--tasks", default="protein")
     embed.add_argument("--controls", action="store_true", help="also write the control stores of the test proteins")
@@ -448,6 +491,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     def training(sub: argparse.ArgumentParser) -> None:
         common(sub)
+        normalizing(sub)
         sub.add_argument("--root", required=True)
         sub.add_argument("--label", default="linear", help="results subfolder, so settings can be compared")
         sub.add_argument("--tasks", default="all")
@@ -465,6 +509,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--hidden", type=int, default=512)
         sub.add_argument("--dropout", type=float, default=0.1)
         sub.add_argument("--no-controls", action="store_true")
+        sub.add_argument("--pooling", choices=("mean_var", "mean"), default="mean_var", help="what protein probes read of a pooled state")
         sub.add_argument("--overwrite", action="store_true")
         sub.set_defaults(handler=command_train)
 
@@ -518,6 +563,13 @@ def build_parser() -> argparse.ArgumentParser:
     drawn.add_argument("--interventions", nargs="*", default=["phospho"], help="interventions labels, one per replicate, averaged per protein")
     drawn.add_argument("--latent", default="pca", help="principal coordinates label")
     drawn.set_defaults(handler=command_figures)
+
+    compared = commands.add_parser("compare", help="compare variants of the analysis, such as raw and normalized inputs")
+    compared.add_argument("--variants", nargs="+", required=True, help="NAME=ROOT[:LABEL][,ROOT[:LABEL]...], one root per replicate; the first is the reference")
+    compared.add_argument("--out", required=True)
+    compared.add_argument("--label", default="linear", help="results label of the roots that name none")
+    compared.add_argument("--blocks", type=int, default=30, help="blocks of the model, for the depth axis")
+    compared.set_defaults(handler=command_compare)
 
     tokens = commands.add_parser("tokens", help="write token-wise taps of chosen sites for a list of sequences")
     common(tokens)

@@ -628,11 +628,17 @@ def head_maps(summary: pd.DataFrame, path: Path, tasks: Sequence[str] = HEAD_TAS
 # -- against a randomly initialized model ------------------------------------------------------------------------------
 
 
-def random_diff_maps(trained: pd.DataFrame, random: pd.DataFrame, path: Path, tasks: Sequence[str] = TASK_ORDER) -> Path:
-    """Every per-block site of every task by block: the trained model's score minus the random-init model's, both
-    averaged over replicates, on one color scale for all tasks."""
+def diff_maps(
+    first: pd.DataFrame,
+    second: pd.DataFrame,
+    path: Path,
+    tasks: Sequence[str] = TASK_ORDER,
+    label: str = "trained minus random-init score",
+) -> Path:
+    """Every per-block site of every task by block: the first summary's score minus the second's, both averaged over
+    replicates, on one color scale for all tasks."""
     plt = _pyplot()
-    first, second = (headline(summary) for summary in (trained, random))
+    first, second = (headline(summary) for summary in (first, second))
     first = first[(first["family"] == "full") & first["site"].isin(BLOCK_SITES)]
     second = second[(second["family"] == "full") & second["site"].isin(BLOCK_SITES)]
     tasks = _ordered(tasks, set(first["task"]) & set(second["task"]))
@@ -661,16 +667,22 @@ def random_diff_maps(trained: pd.DataFrame, random: pd.DataFrame, path: Path, ta
     figure.tight_layout(h_pad=1.0, w_pad=0.6, rect=(0, 0, 0.93, 1))
     if image is not None:
         bar = figure.colorbar(image, cax=figure.add_axes((0.945, 0.35, 0.012, 0.3)))
-        bar.set_label("trained minus random-init score", fontsize=6)
+        bar.set_label(label, fontsize=6)
         bar.ax.tick_params(labelsize=5.5)
     return _save(figure, path)
 
 
-def random_diff_summary(trained: pd.DataFrame, random: pd.DataFrame, path: Path, tasks: Sequence[str] = TASK_ORDER) -> Path:
-    """A: per task and site, the best score over depth of the trained model minus that of the random-init model.
-    B: the best probe of each task under each model, with the spread over replicates."""
+def diff_summary(
+    first: pd.DataFrame,
+    second: pd.DataFrame,
+    path: Path,
+    tasks: Sequence[str] = TASK_ORDER,
+    names: tuple[str, str] = ("trained model", "random-init model"),
+) -> Path:
+    """A: per task and site, the best score over depth under the first summary minus that under the second.
+    B: the best probe of each task under each, with the spread over replicates."""
     plt = _pyplot()
-    first, second = site_bests(trained), site_bests(random)
+    first, second = site_bests(first), site_bests(second)
     tasks = _ordered(tasks, set(first["task"]) & set(second["task"]))
     sites = [site for site in SITE_LABELS if site in set(first["site"])]
     a = first.pivot_table(index="task", columns="site", values="full").reindex(index=tasks, columns=sites)
@@ -691,13 +703,13 @@ def random_diff_summary(trained: pd.DataFrame, random: pd.DataFrame, path: Path,
     left.set_yticklabels([TASK_LABELS.get(task, task) for task in tasks])
     _bare(left)
     bar = figure.colorbar(image, ax=left, shrink=0.5, pad=0.01, aspect=25)
-    bar.set_label("trained minus random-init best score", fontsize=5.5)
+    bar.set_label(f"{names[0]} minus {names[1]}, best score", fontsize=5.5)
     bar.ax.tick_params(labelsize=5)
     _letter(left, "A", -0.02)
     best_first = first.loc[first.groupby("task")["full"].idxmax()].set_index("task").reindex(tasks)
     best_second = second.loc[second.groupby("task")["full"].idxmax()].set_index("task").reindex(tasks)
     positions = np.arange(len(tasks))[::-1]
-    for frame, color, marker, size, legend in ((best_second, INK_SECONDARY, "s", 4.6, "random-init model"), (best_first, PALETTE[0], "o", 3.0, "trained model")):
+    for frame, color, marker, size, legend in ((best_second, INK_SECONDARY, "s", 4.6, names[1]), (best_first, PALETTE[0], "o", 3.0, names[0])):
         right.errorbar(frame["full"], positions, xerr=frame["full_std"], fmt=marker, ms=size, color=color, ecolor=color,
                        elinewidth=0.8, capsize=0, label=legend, mfc=color if marker == "o" else "white", mec=color, mew=0.9)
     for position, value_first, value_second in zip(positions, best_first["full"], best_second["full"]):
@@ -710,6 +722,73 @@ def random_diff_summary(trained: pd.DataFrame, random: pd.DataFrame, path: Path,
     _letter(right, "B", -0.02)
     figure.tight_layout(w_pad=0.8)
     return _save(figure, path)
+
+
+# -- variants of the analysis ------------------------------------------------------------------------------------------
+
+
+def variant_table(variants: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """Per task and variant: the best residual-stream and any-state full-test scores (with their spread over
+    replicates) and the mean over every full-width probe; a last row per variant averages the tasks all variants share."""
+    rows = []
+    for name, summary in variants.items():
+        trained = headline(summary)
+        trained = trained[trained["family"] == "full"]
+        for task, block in trained.groupby("task"):
+            stream = block[block["site"].isin(RESIDUAL)]
+            best_stream, best_any = stream.loc[stream["full"].idxmax()], block.loc[block["full"].idxmax()]
+            rows.append({"variant": name, "task": task, "residual_best": best_stream["full"], "residual_best_std": best_stream["full_std"],
+                         "any_best": best_any["full"], "any_best_std": best_any["full_std"], "mean_probe": block["full"].mean(),
+                         "replicates": int(block["replicates"].max())})
+    table = pd.DataFrame(rows)
+    shared = set.intersection(*(set(table[table["variant"] == name]["task"]) for name in variants))
+    means = table[table["task"].isin(shared)].groupby("variant", sort=False)[["residual_best", "any_best", "mean_probe"]].mean().reset_index()
+    order = {task: position for position, task in enumerate(TASK_ORDER)}
+    table = table.sort_values(["task", "variant"], key=lambda column: column.map(order) if column.name == "task" else column, kind="stable")
+    return pd.concat([table, means.assign(task="mean over shared tasks")], ignore_index=True)
+
+
+def variant_depth_curves(variants: dict[str, pd.DataFrame], blocks: int, path: Path, tasks: Sequence[str] = TASK_ORDER) -> Path:
+    """The residual stream of every task along depth under each variant of the analysis, one color per variant."""
+    plt = _pyplot()
+    present = set.intersection(*(set(summary["task"]) for summary in variants.values()))
+    tasks = _ordered(tasks, present)
+    figure, axes = _grid(plt, len(tasks), 6)
+    for axis, task in zip(axes, tasks):
+        for (name, summary), color in zip(variants.items(), PALETTE):
+            trained = headline(summary)
+            line = trained[(trained["task"] == task) & (trained["family"] == "full") & trained["site"].isin(RESIDUAL)]
+            _depth_line(axis, line, blocks, color, name)
+        _tag(axis, SHORT_LABELS.get(task, task))
+        axis.set_xlim(-0.5, blocks + 1.5)
+        axis.set_xticks([0, blocks // 2, blocks])
+        axis.grid(axis="y", color=GRID, lw=0.5)
+        if axis.get_subplotspec().is_first_col():
+            axis.set_ylabel("score")
+        if _bottom(axis, axes, len(tasks)):
+            axis.set_xlabel("depth")
+    handles, labels = axes[0].get_legend_handles_labels()
+    _legend_top(figure, handles, labels, len(labels), 0.3)
+    return _save(figure, path)
+
+
+def compare(variants: dict[str, Sequence[tuple[Path, str]]], out: Path, blocks: int) -> list[Path]:
+    """Figures and a table comparing variants of the analysis, each a list of replicate (root, label) pairs; the
+    first variant is the reference the others are drawn against."""
+    out.mkdir(parents=True, exist_ok=True)
+    summaries = {
+        name: summarize(pd.concat([read_table(Path(root), label, "scores").assign(replicate=index) for index, (root, label) in enumerate(replicates)],
+                                  ignore_index=True))
+        for name, replicates in variants.items()
+    }
+    names = list(summaries)
+    written = [write_summary(variant_table(summaries), out / "variants.csv"), variant_depth_curves(summaries, blocks, out / "variants_depth.png")]
+    reference = names[0]
+    for name in names[1:]:
+        slug = "".join(character if character.isalnum() else "_" for character in name).strip("_")
+        written.append(diff_maps(summaries[name], summaries[reference], out / f"variants_maps_{slug}.png", label=f"{name} minus {reference}"))
+        written.append(diff_summary(summaries[name], summaries[reference], out / f"variants_summary_{slug}.png", names=(name, reference)))
+    return written
 
 
 # -- latent views, interventions, settings and spread ------------------------------------------------------------------
@@ -906,8 +985,8 @@ def result_figures(
     written.append(rotation_effect(summary, out / "rotation.png"))
     if random is not None:
         written.append(best_state_dots(table, out / "best_states.png", best_states(random, blocks)))
-        written.append(random_diff_maps(summary, random, out / "random_init_maps.png"))
-        written.append(random_diff_summary(summary, random, out / "random_init_summary.png"))
+        written.append(diff_maps(summary, random, out / "random_init_maps.png"))
+        written.append(diff_summary(summary, random, out / "random_init_summary.png"))
         written.append(write_summary(random_init_table(summary, random, blocks), out / "random_init.csv"))
         spreads["random-init"] = replicate_spread(random)
     else:

@@ -17,13 +17,13 @@ try:
     from src.protify.base_models.esmc import get_esmc_tokenizer
     from src.protify.interpretability.capture import capture_states, model_dims
     from src.protify.interpretability import figures
-    from src.protify.interpretability.cli import STORE_VARIANTS, main, store_path, train_tasks, write_stores
+    from src.protify.interpretability.cli import STORE_VARIANTS, main, store_passes, store_path, train_tasks, write_stores
     from src.protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from src.protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from src.protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
     from src.protify.interpretability.probe_bank import ProbeBank, ProbeSettings
-    from src.protify.interpretability.protein_probing import head_view, score_bank, validation_loss
+    from src.protify.interpretability.protein_probing import full_view, head_view, score_bank, validation_loss
     from src.protify.interpretability.residue_probing import untrained_copy
     from src.protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, multiclass_mcc
     from src.protify.interpretability.selection import choose_setting, rank_settings, read_sweeps
@@ -35,13 +35,13 @@ except ImportError:
     from protify.base_models.esmc import get_esmc_tokenizer
     from protify.interpretability.capture import capture_states, model_dims
     from protify.interpretability import figures
-    from protify.interpretability.cli import STORE_VARIANTS, main, store_path, train_tasks, write_stores
+    from protify.interpretability.cli import STORE_VARIANTS, main, store_passes, store_path, train_tasks, write_stores
     from protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
     from protify.interpretability.probe_bank import ProbeBank, ProbeSettings
-    from protify.interpretability.protein_probing import head_view, score_bank, validation_loss
+    from protify.interpretability.protein_probing import full_view, head_view, score_bank, validation_loss
     from protify.interpretability.residue_probing import untrained_copy
     from protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, multiclass_mcc
     from protify.interpretability.selection import choose_setting, rank_settings, read_sweeps
@@ -269,6 +269,11 @@ def test_head_view_splits_mean_and_variance_by_head() -> None:
     layer, head = 1, 2
     torch.testing.assert_close(viewed[:, layer * 4 + head, :2], pooled[:, layer, 4:6])
     torch.testing.assert_close(viewed[:, layer * 4 + head, 2:], pooled[:, layer, 12:14])
+    means = head_view(pooled, heads=4, pooling="mean")  # (2, 12, 2): each head's mean columns alone
+    assert means.shape == (2, 12, 2)
+    torch.testing.assert_close(means[:, layer * 4 + head], pooled[:, layer, 4:6])
+    torch.testing.assert_close(full_view(pooled, "mean"), pooled[..., :8])
+    assert full_view(pooled) is pooled
 
 
 # -- probe bank ----------------------------------------------------------------------------------------------------
@@ -631,6 +636,40 @@ def test_residue_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object
     pd.testing.assert_series_equal(headline_scores(alone[alone["family"] == "full"]).sort_index(), headline_scores(full).sort_index(), atol=1e-3)
 
 
+def test_normalized_inputs_and_mean_pooling(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path / "data")
+    names = ["localization", "ssp_q3"]
+    datasets = {name: load_concept(name, local_dir=tmp_path / "data") for name in names}
+    protein = {"localization": datasets["localization"]}
+    root = tmp_path / "normalized"
+    passes = store_passes(protein, root, controls=True, seed=0, normalize=True)
+    assert all(set(roots) == {True} for _, _, roots, _ in passes)
+    assert sorted(str(path) for _, _, roots, _ in passes for path in roots.values()) == sorted(str(store_path(root, *key)) for key in STORE_VARIANTS)
+    spec = TapSpec(sites=("embedding", "q", "resid_post"))
+    write_stores(tiny_model, tokenizer, "tiny", protein, root, spec, controls=True, seed=0, max_tokens=256, device=CPU, normalize=True)
+    assert all(PooledTapStore(store_path(root, *key)).manifest.normalized for key in STORE_VARIANTS)
+    settings = TrainingSettings(learning_rates=(3e-2,), weight_decays=(0.0,), batch_size=16, max_tokens=300, max_epochs=12, patience=4,
+                                resamples=3, normalize=True)
+    train_tasks(names, root, "linear", spec, settings, CPU, read_task=datasets.__getitem__, read_model=lambda: (tiny_model, tokenizer))
+    for name, tolerance in (("localization", 1e-6), ("ssp_q3", 0.05)):
+        scores = pd.read_parquet(root / "results" / "linear" / name / "scores.parquet")
+        full = scores[scores["family"] == "full"]
+        assert conditions_of(full) == {(plm, probe, control) for plm in PLM_STATES for probe in PROBE_STATES for control in CONTROLS}
+        assert headline_scores(full)["embedding:0"] > 0.8, name
+        # normalized inputs make the L2 control a repeat of the original condition
+        again = full[(full["plm"] == "trained") & (full["probe"] == "trained") & (full["control"] == "l2_normalized") & (full["resample"] == 0)]
+        pd.testing.assert_series_equal(again.set_index("probe_name")["score"].sort_index(), headline_scores(full).sort_index(), atol=tolerance, check_names=False)
+        assert json.loads((root / "results" / "linear" / name / "run.json").read_text(encoding="utf-8"))["settings"]["normalize"] is True
+    with pytest.raises(SystemExit):  # raw probes on normalized stores
+        train_tasks(["localization"], root, "raw", spec, replace(settings, normalize=False), CPU, read_task=datasets.__getitem__, read_model=lambda: (tiny_model, tokenizer))
+    train_tasks(["localization"], root, "mean", spec, replace(settings, pooling="mean"), CPU, read_task=datasets.__getitem__, read_model=lambda: (tiny_model, tokenizer))
+    weights = load_file(str(root / "results" / "mean" / "localization" / "probes.safetensors"))
+    assert weights["embedding.full.best.weight"].shape == (1, 64, 3)  # the mean columns alone
+    assert weights["q.head.best.weight"].shape == (12, 16, 3)
+    with pytest.raises(ValueError):
+        TrainingSettings(pooling="max")
+
+
 # -- interventions and latent views --------------------------------------------------------------------------------
 
 
@@ -827,6 +866,11 @@ def test_figures_from_result_tables(tmp_path: Path) -> None:
     tests = pd.read_parquet(out / "phospho_tests.parquet")
     assert (tests["proteins"] == 6).all() and len(tests) == 2 * (2 + 4 * 3)
     assert (pd.read_csv(out / "phospho_replicates.csv")["replicates"] == 2).all()
+    main(["compare", "--variants", f"raw={roots[0]},{roots[1]}:linear", f"other={random_root}", "--out", str(out / "compare"), "--blocks", "3"])
+    variants = pd.read_csv(out / "compare" / "variants.csv")
+    assert set(variants["variant"]) == {"raw", "other"} and (variants[variants["variant"] == "raw"]["replicates"].dropna() == 2).all()
+    for name in ("variants_depth", "variants_maps_other", "variants_summary_other"):
+        assert (out / "compare" / f"{name}.png").stat().st_size > 10_000, name
     ranked = pd.DataFrame([
         {"label": label, "learning_rate": rate, "weight_decay": decay, "mean_shortfall": rate * decay, "batch_size": batch, "max_tokens": 0}
         for label, batch in (("b64", 64), ("b256", 256)) for rate in (1e-3, 1e-2) for decay in (0.0, 0.1)

@@ -19,6 +19,7 @@ PLM_STATES = ("trained", "untrained")
 PROBE_STATES = ("trained", "untrained")
 CONTROLS = ("original", "l2_normalized", "mean", "scrambled", "random_gaussian")
 MEAN_CONTROL_BATCH = 8  # proteins whose states and labels the mean control averages
+POOLINGS = ("mean_var", "mean")
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,12 @@ class TrainingSettings:
     resample_fraction: float = 0.5
     controls: bool = True
     probe: ProbeSettings = field(default_factory=ProbeSettings)
+    normalize: bool = False  # every token state L2-normalized along its width before pooling or probing
+    pooling: str = "mean_var"  # what a protein probe reads of a pooled state: "mean_var", or "mean" alone
+
+    def __post_init__(self) -> None:
+        if self.pooling not in POOLINGS:
+            raise ValueError(f"Unknown pooling {self.pooling!r}; choose one of {POOLINGS}.")
 
     def grid(self) -> list[tuple[float, float]]:
         """Every (learning rate, weight decay) pair; each probe keeps the pair that validates best."""

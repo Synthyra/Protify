@@ -2,7 +2,7 @@
 
 Each batch runs ESMC once with tap hooks. As a state arrives the hook gathers its residue rows (CLS, EOS and
 padding dropped), and every probe that reads that site and layer takes its gradient there, so memory holds one
-state at a time. One optimizer step follows each forward pass. Validation passes run the same hooks without
+state at a time. With `settings.normalize`, every state is L2-normalized token by token as it arrives. One optimizer step follows each forward pass. Validation passes run the same hooks without
 gradients, and the test passes run the model four times (trained and untrained weights, original and scrambled
 sequences) to score the controls.
 
@@ -149,7 +149,20 @@ def _layer_logits(bank: ProbeBank, states: Tensor, start: int, heads: int, which
     return bank.logits(_grouped(states, heads), start, start + heads, which)
 
 
-def _run(model: nn.Module, spec: TapSpec, consumer: Callable[[str, int, Tensor], None], batch: ResidueBatch) -> None:
+def _run(
+    model: nn.Module,
+    spec: TapSpec,
+    consumer: Callable[[str, int, Tensor], None],
+    batch: ResidueBatch,
+    normalize: bool = False,
+) -> None:
+    """One forward pass that hands every tapped state to `consumer`, L2-normalized along its width when `normalize`."""
+    if normalize:
+        def normalized(site: str, layer: int, X: Tensor, inner: Callable[[str, int, Tensor], None] = consumer) -> None:
+            # X: (b, l, w)
+            inner(site, layer, F.normalize(X.to(torch.float32), dim=-1).to(X.dtype))
+
+        consumer = normalized
     with tap_hooks(model, spec, consumer):
         model(input_ids=batch.input_ids, attention_mask=batch.attention_mask)
 
@@ -182,7 +195,7 @@ def fit_standardization(
 
     for token_batch in token_batches(sequences, settings.max_tokens):
         batch = residue_batch(tokenizer, token_batch, labels, device)
-        _run(model, spec, gather, batch)
+        _run(model, spec, gather, batch, settings.normalize)
     for site, site_banks in banks.items():
         layout = site_banks.layout
         means = []
@@ -230,7 +243,7 @@ def validation_losses(
 
     for token_batch in token_batches(split.sequences, settings.max_tokens):
         batch = residue_batch(tokenizer, token_batch, split.labels, device)
-        _run(model, spec, score, batch)
+        _run(model, spec, score, batch, settings.normalize)
         rows_seen += batch.targets.shape[0]
     return {key: value / rows_seen for key, value in totals.items()}
 
@@ -277,7 +290,7 @@ def fit_residue_banks(
         for token_batch in (watch(bar) if watch is not None else bar):
             batch = residue_batch(tokenizer, token_batch, split.labels, device)
             with torch.no_grad():
-                _run(model, spec, learn, batch)
+                _run(model, spec, learn, batch, settings.normalize)
             for bank in all_banks:
                 bank.step()
             steps += 1
@@ -365,7 +378,7 @@ def score_validation_settings(
 
     for token_batch in token_batches(split.sequences, settings.max_tokens):
         batch = residue_batch(tokenizer, token_batch, split.labels, device)
-        _run(model, spec, score, batch)
+        _run(model, spec, score, batch, settings.normalize)
     return accumulators
 
 
@@ -479,7 +492,7 @@ def score_residue_task(
                             Z = _layer_logits(bank, states, start, heads, which)  # (n, g, C)
                             accumulator(site, family, plm, probe, control).add(Z, targets, batch.proteins, start, batch.protein_index)
 
-            _run(network, spec, score, batch)
+            _run(network, spec, score, batch, settings.normalize)
     for (site, family, plm, probe, control), scores in accumulators.items():
         keep = plm == "trained" and probe == "trained" and control == "original"
         results.add_scores(task.name, family, selected[site][family].names, scores, plm, probe, control, keep)

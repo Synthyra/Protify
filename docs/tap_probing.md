@@ -43,12 +43,13 @@ python -m protify.interpretability embed --root RUN --controls
 # 2. a grid of learning rates and weight decays, scored on validation only, for each batch size to compare
 python -m protify.interpretability sweep --root RUN --label p_b256 --tasks protein --batch-size 256 --lr 1e-4 1e-3 1e-2 --wd 0 0.1
 python -m protify.interpretability sweep --root RUN --label p_b1024 --tasks protein --batch-size 1024 --lr 1e-4 1e-3 1e-2 --wd 0 0.1
-# 3. one global setting
-python -m protify.interpretability select --root RUN --labels p_b256 p_b1024
-# 4. every probe of every task under that setting, with the controls, scored on test
+# 3. one global setting per loss: cross entropy for the classification tasks, squared error for ProtParam
+python -m protify.interpretability select --root RUN --labels p_b256 p_b1024 --loss classification
+python -m protify.interpretability select --root RUN --labels p_b256 p_b1024 --loss regression
+# 4. every probe of every task under its setting, with the controls, scored on test
 python -m protify.interpretability train --root RUN --label linear --tasks protein --batch-size 256 --lr 1e-3 --wd 0
-# 5. figures and summary tables
-python -m protify.interpretability figures --root RUN --label linear --out FIGURES
+# 5. figures and summary tables, over seed replicates and against a randomly initialized model
+python -m protify.interpretability figures --roots RUN RUN_2 RUN_3 --random-roots RANDOM RANDOM_2 RANDOM_3 --out FIGURES
 ```
 
 Residue tasks follow the same steps with `--tasks residue` and `--train-tokens` in place of `--batch-size`.
@@ -81,6 +82,11 @@ and under its own best setting, averaged over probes within a task and probe fam
 Among the settings within `--tolerance` (default 0.005) of the lowest shortfall, the one whose label took the least
 time wins, so a larger batch is preferred when it costs little. The choice and the full ranking are written to
 `RUN/sweeps/selection_<labels>.json`. Test splits are read only by `train`.
+
+`--loss classification` or `--loss regression` ranks the settings over the tasks of one loss only, written to
+`selection_<labels>_<loss>.json`. Squared error on standardized targets wants much smaller steps than cross entropy:
+for ESMC-300, the learning rate that serves the classification tasks best leaves ProtParam's probes 0.29 below their
+best validation score on average, so ProtParam, the one regression task, takes its own setting.
 
 ## Controls and scores
 
@@ -115,7 +121,8 @@ training mutants, and solved exactly by Newton's method in the span of the train
 mutants than a site has columns). `--tf32` allows TF32 products in the forward passes, at twice the speed.
 `tests.parquet` holds, per input treatment, site and layer, the mean MCC under each condition and a Wilcoxon
 signed-rank test of true against shuffled labels, paired by protein, with a Bonferroni correction over every site and
-layer.
+layer. `--split-seed` redraws each protein's split and label shuffle while `--data-seed` keeps the same proteins, so
+replicates (with their own `--seed` for the untrained model) can be averaged protein by protein before testing.
 
 ## A randomly initialized model
 
@@ -129,6 +136,36 @@ python -m protify.interpretability embed --root RANDOM --random-init
 python -m protify.interpretability train --root RANDOM --random-init --no-controls --tasks protein --batch-size 256 --lr 3e-2 --wd 0
 ```
 
+## Seed replicates
+
+A replicate repeats the analysis under another `--seed` in its own root: the probes' initialization and batch order,
+the scrambled sequences, the untrained-model control and, with `--random-init`, the random model itself all follow the
+seed. The trained model's pooled store does not depend on the seed, so replicates can link it rather than write it
+again; their control stores do. `figures --roots` averages every score over the replicates, and reports both the
+standard deviation of a probe's full-test score over replicates and its spread over test halves.
+
+## Variants
+
+Two options change what the probes read, and each variant runs under its own `--root` or `--label`:
+
+- `--normalize` on `embed` and `train` scales every token state to unit L2 norm along its width before pooling
+  (protein tasks) or probing (residue tasks), the controls included; `train` refuses a store whose manifest disagrees.
+  The `l2_normalized` control then repeats the original condition.
+- `--pooling mean` on `train` makes protein probes read the pooled mean alone (width w, or d_h per head) instead of the
+  mean and variance (2w).
+
+`compare --variants NAME=ROOT[:LABEL][,ROOT[:LABEL]...] ...` sets variants against the first one: `variants.csv`
+holds each task's best residual-stream and any-state scores and its mean over full-width probes per variant,
+`variants_depth.png` overlays their residual streams, and `variants_maps_<name>.png` and `variants_summary_<name>.png`
+map each variant's difference from the first by site and block.
+
+```bash
+python -m protify.interpretability embed --root NORM --controls --normalize
+python -m protify.interpretability train --root NORM --normalize --tasks protein --batch-size 256 --lr 3e-2 --wd 0
+python -m protify.interpretability train --root RUN --label linear_mean --pooling mean --tasks protein --batch-size 256 --lr 3e-2 --wd 0
+python -m protify.interpretability compare --variants raw=RUN normalized=NORM mean=RUN:linear_mean --out FIGURES/variants
+```
+
 ## Principal components
 
 `pca` projects each protein's pooled mean state at chosen sites and layers onto its first two principal components,
@@ -137,8 +174,24 @@ Scrambled copies of the test proteins are projected onto the same components. `f
 
 ## Figures
 
-`figures` reads the tables above and writes 300 dpi PNGs and summary tables: residual-stream curves along depth with
-one standard deviation over the test halves and the untrained-model and scrambled controls, site by block maps of
-every task relative to its best probe, the best state of each task by family, the block at which each site peaks,
-every control along depth, per-head maps, the ProtParam targets one by one, the sweep curves, the phosphomimetic
-results and the principal component panels. `best_states.csv` and `summary.parquet` hold the numbers behind them.
+`figures` reads the tables above, from one root per replicate (`--roots`) and optionally from the replicates of a
+randomly initialized model (`--random-roots`), and writes 300 dpi PNGs and summary tables:
+
+| File | Shows |
+|---|---|
+| `depth_curves.png` | each task's residual stream along depth, against the random-init model and the controls |
+| `selected_tasks.png` | five tasks' residual streams with the best depth and its spread over replicates |
+| `controls.png` | all twenty conditions (model, probe and input) along the residual stream |
+| `site_maps.png` | every site by block, relative to each task's best probe |
+| `site_gaps.png` | each site's best score minus the best residual-stream score, and the block of each peak |
+| `site_families.png` | attention and MLP sites along the blocks against the block output |
+| `rotation.png` | rotated minus unrotated queries and keys, full width and per head |
+| `heads.png` | every head of the head-split sites by block |
+| `best_states.png` | the best residual-stream, attention, MLP and single-head probe of each task |
+| `random_init_maps.png`, `random_init_summary.png` | trained minus random-init scores by site and block, and by site |
+| `replicate_spread.png` | the spread of a probe's score over replicates against its spread over test halves |
+| `prot_param_targets.png`, `phospho.png`, `pca_*.png`, `sweeps_*.png` | ProtParam targets, phosphomimetic tests, principal components, sweeps |
+
+`summary.parquet` (and `summary_random_init.parquet`), `best_states.csv`, `site_bests.csv`, `random_init.csv`,
+`replicate_spread.csv`, `phospho_tests.parquet` and `phospho_replicates.csv` hold the numbers behind them.
+`--interventions` names the phosphomimetic replicates, whose scores are averaged per protein before testing.
