@@ -9,6 +9,7 @@
     python -m protify.interpretability pca    --root RUN --tasks interpro_family --sites resid_post --layers 0,5,10,15,20
     python -m protify.interpretability figures --roots RUN [RUN_2 ...] [--random-roots RANDOM ...] --out FIGURES
     python -m protify.interpretability compare --variants raw=RUN normalized=NORM mean=RUN:mean --out FIGURES
+    python -m protify.interpretability trends --models ESMC-300=RUN,RUN_2 ESMC-600=RUN_600 [--random NAME=ROOT] [--baselines NAME=ROOT ...] --out FIGURES
     python -m protify.interpretability tokens --sequences FILE --out DIR --sites resid_post
 
 `embed` writes the pooled stores the protein tasks read: every protein-task sequence through the trained model,
@@ -20,9 +21,11 @@ Results go to `RUN/results/<label>/<task>/` as parquet tables and a safetensors 
 `validation.parquet` holds each probe's validation score, which best states are chosen by, and `validate` adds it to
 runs trained before `train` wrote it.
 `phospho` runs the phosphomimetic scanning test, `pca` writes principal coordinates of pooled states by label set,
-`figures` draws every figure and summary table the runs' tables support, and `compare` sets variants of the analysis
-(normalized inputs, mean-only pooling) against a reference. `--normalize` on `embed` and `train` L2-normalizes every
-token state before pooling or probing; `--pooling mean` makes protein probes read pooled means alone.
+`figures` draws every figure and summary table the runs' tables support, `compare` sets variants of the analysis
+(normalized inputs, mean-only pooling) against a reference, and `trends` sets models side by side on a relative depth
+axis, with the randomly initialized model and the baseline encodings beside them. `--normalize` on `embed` and
+`train` L2-normalizes every token state before pooling or probing; `--pooling mean` makes protein probes read pooled
+means alone.
 
 `--model` takes any ESMC (ESMC-300, ESMC-600, ESMC-6B) or one of Protify's baseline encodings, `OneHot-Protein` and
 `Random`, whose token rows are their one state. `--tasks ppi` adds the protein-protein interaction task (the Bernett
@@ -616,6 +619,14 @@ def command_compare(args: argparse.Namespace) -> None:
         print(path)
 
 
+def command_trends(args: argparse.Namespace) -> None:
+    from . import trends
+
+    models, random, baselines = ([trends.parse_runs(item, args.label) for item in items] for items in (args.models, args.random, args.baselines))
+    for path in trends.trends(models, Path(args.out), random, baselines):
+        print(path)
+
+
 def command_tokens(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
     spec = tap_spec(args, per_head=False)
@@ -749,6 +760,14 @@ def build_parser() -> argparse.ArgumentParser:
     compared.add_argument("--label", default="linear", help="results label of the roots that name none")
     compared.add_argument("--blocks", type=int, default=30, help="blocks of the model, for the depth axis")
     compared.set_defaults(handler=command_compare)
+
+    trended = commands.add_parser("trends", help="trends across models: where concepts emerge, the best states, the controls, model size and the pair task")
+    trended.add_argument("--models", nargs="+", required=True, help="NAME=ROOT[,ROOT...] of each trained model, one root per seed replicate")
+    trended.add_argument("--random", nargs="*", default=[], help="NAME=ROOT[,ROOT...] of randomly initialized models")
+    trended.add_argument("--baselines", nargs="*", default=[], help="NAME=ROOT[,ROOT...] of baseline encodings, such as OneHot-Protein and Random")
+    trended.add_argument("--out", required=True)
+    trended.add_argument("--label", default="linear", help="results label")
+    trended.set_defaults(handler=command_trends)
 
     tokens = commands.add_parser("tokens", help="write token-wise taps of chosen sites for a list of sequences")
     common(tokens)

@@ -34,6 +34,7 @@ try:
     from src.protify.interpretability.token_batches import SPECIAL_TOKENS, group_batches, token_batches
     from src.protify.interpretability.token_store import TokenTapStore, embed_tokens
     from src.protify.interpretability.training import CONTROLS, PLM_STATES, PROBE_STATES, TaskResults, TrainingSettings, make_bank
+    from src.protify.interpretability.trends import PAIR_TASK
 except ImportError:
     from protify.base_models.control_bases import ONE_HOT, RANDOM, control_matrix, control_rows
     from protify.base_models.esmc import get_esmc_tokenizer
@@ -55,6 +56,7 @@ except ImportError:
     from protify.interpretability.token_batches import SPECIAL_TOKENS, group_batches, token_batches
     from protify.interpretability.token_store import TokenTapStore, embed_tokens
     from protify.interpretability.training import CONTROLS, PLM_STATES, PROBE_STATES, TaskResults, TrainingSettings, make_bank
+    from protify.interpretability.trends import PAIR_TASK
 
 from fastplms.models.esm_plusplus.modeling_esm_plusplus import ESMplusplusConfig, ESMplusplusModel
 
@@ -1113,3 +1115,60 @@ def test_figures_from_result_tables(tmp_path: Path) -> None:
         for label, batch in (("b64", 64), ("b256", 256)) for rate in (1e-3, 1e-2) for decay in (0.0, 0.1)
     ])
     assert figures.sweep_curves({"protein": ranked}, out / "sweeps.png").exists()
+
+
+def write_trend_run(root: Path, seed: int, sites: tuple[str, ...], blocks: int, manifest: bool = True) -> None:
+    """One synthetic replicate of a model with `blocks` blocks: the scores and validation scores of four concept tasks
+    and the pair task, the pair task's ranking table, and, with `manifest`, a store manifest giving the blocks."""
+    for index, task in enumerate(("prot_param", "ssp_q8", "localization", "go_mf", PAIR_TASK)):
+        folder = root / "results" / "linear" / task
+        folder.mkdir(parents=True)
+        scores = synthetic_scores(task, sites, layers=blocks, heads=2, resamples=2, seed=100 * seed + index)
+        scores.to_parquet(folder / "scores.parquet", index=False)
+        probes = scores[["task", "family", "probe_name"]].drop_duplicates()
+        rng = np.random.default_rng(100 * seed + index + 50)
+        probes.assign(validation_score=rng.uniform(size=len(probes)), validation_loss=rng.uniform(size=len(probes))).to_parquet(folder / "validation.parquet", index=False)
+        if task == PAIR_TASK:
+            full = probes[probes["family"] == "full"]
+            full.assign(split="test", roc_auc=rng.uniform(0.5, 1.0, len(full)), average_precision=rng.uniform(0.5, 1.0, len(full))).to_parquet(
+                folder / "ranking.parquet", index=False)
+    if manifest:
+        (root / "stores" / "trained_original").mkdir(parents=True)
+        (root / "stores" / "trained_original" / "manifest.json").write_text(json.dumps({"dims": {"blocks": blocks}}), encoding="utf-8")
+
+
+def test_trends_across_models(tmp_path: Path) -> None:
+    sites = ("embedding", "q", "attn_context", "mlp_act", "resid_post", "final_norm")
+    small, large, random_root, one_hot, random_rows = [tmp_path / "small_0", tmp_path / "small_1"], tmp_path / "large", tmp_path / "random", tmp_path / "one_hot", tmp_path / "rows"
+    for seed, root in enumerate(small + [random_root]):
+        write_trend_run(root, seed, sites, blocks=3)
+    write_trend_run(large, 7, sites, blocks=5, manifest=False)  # its blocks come from its deepest probe
+    write_trend_run(one_hot, 8, ("embedding",), blocks=0)
+    write_trend_run(random_rows, 9, ("embedding",), blocks=0, manifest=False)
+    out = tmp_path / "trends"
+    main(["trends", "--models", f"ESMC-600={large}", f"ESMC-300={small[0]},{small[1]}", "--random", f"ESMC-300 random init={random_root}",
+          "--baselines", f"OneHot-Protein={one_hot}", f"Random={random_rows}", "--out", str(out)])
+    for name in ("emergence", "state_rankings", "controls_summary", "model_size", "ppi"):
+        assert (out / f"{name}.png").stat().st_size > 10_000, name
+    profiles = pd.read_csv(out / "stream_profiles.csv")
+    assert set(profiles["model"]) == {"ESMC-300", "ESMC-600"} and set(profiles["task"]) == {"prot_param", "ssp_q8", "localization", "go_mf"}
+    depths = profiles[["onset_depth", "peak_depth", "best_depth"]].to_numpy()
+    assert ((depths >= 0) & (depths <= 1)).all() and (profiles["onset_depth"] <= profiles["peak_depth"]).all() and (profiles["best"] <= profiles["peak"]).all()
+    categories = pd.read_csv(out / "category_profiles.csv")
+    assert list(categories["model"]) == ["ESMC-300"] * 4 + ["ESMC-600"] * 4 and (categories["tasks"] == 1).all()
+    assert list(categories["category"][:4]) == ["composition", "secondary structure", "sorting and topology", "function"]
+    best = pd.read_csv(out / "best_states_by_model.csv")
+    assert best.groupby("model")["kind"].first().to_dict() == {
+        "ESMC-300": "trained", "ESMC-600": "trained", "ESMC-300 random init": "random-init", "OneHot-Protein": "baseline", "Random": "baseline"}
+    assert (best[best["kind"] == "baseline"]["residual_relative_depth"] == 0).all() and PAIR_TASK not in set(best["task"])
+    large_depths = best[best["model"] == "ESMC-600"]["residual_relative_depth"] * 6  # relative depths of 5 blocks are k / 6
+    assert np.allclose(large_depths, large_depths.round(), atol=1e-3)
+    stream = figures.headline(figures.summarize(figures.read_replicates(small, "linear"), figures.read_validation([(root, "linear") for root in small])))
+    stream = stream[(stream["task"] == "go_mf") & (stream["family"] == "full") & stream["site"].isin(figures.RESIDUAL)]
+    profile = profiles[(profiles["model"] == "ESMC-300") & (profiles["task"] == "go_mf")].iloc[0]
+    assert profile["peak"] == pytest.approx(stream["full"].max(), abs=1e-4)
+    rankings = pd.read_csv(out / "pair_ranking.csv")
+    both = pd.concat([pd.read_parquet(root / "results" / "linear" / PAIR_TASK / "ranking.parquet") for root in small])
+    expected = both[both["probe_name"] == "resid_post:1"]["roc_auc"].mean()
+    assert rankings[(rankings["model"] == "ESMC-300") & (rankings["probe_name"] == "resid_post:1")]["roc_auc"].iloc[0] == pytest.approx(expected, abs=1e-4)
+    assert set(pd.read_csv(out / "pair_best_states.csv")["task"]) == {PAIR_TASK}

@@ -53,6 +53,8 @@ python -m protify.interpretability select --root RUN --labels p_b256 p_b1024 --l
 python -m protify.interpretability train --root RUN --label linear --tasks protein --batch-size 256 --lr 1e-3 --wd 0
 # 5. figures and summary tables, over seed replicates and against a randomly initialized model
 python -m protify.interpretability figures --roots RUN RUN_2 RUN_3 --random-roots RANDOM RANDOM_2 RANDOM_3 --out FIGURES
+# 6. trends across models, the random-init model and the baselines
+python -m protify.interpretability trends --models ESMC-300=RUN,RUN_2,RUN_3 ESMC-600=RUN_600 --random "ESMC-300 random init=RANDOM" --out FIGURES/trends
 ```
 
 Residue tasks follow the same steps with `--tasks residue` and `--train-tokens` in place of `--batch-size`.
@@ -247,3 +249,28 @@ randomly initialized model (`--random-roots`), and writes 300 dpi PNGs and summa
 `summary.parquet` (and `summary_random_init.parquet`), `best_states.csv`, `site_bests.csv`, `random_init.csv`,
 `replicate_spread.csv`, `phospho_tests.parquet` and `phospho_replicates.csv` hold the numbers behind them.
 `--interventions` names the phosphomimetic replicates, whose scores are averaged per protein before testing.
+
+## Trends across models
+
+`trends` sets several models side by side: each `--models NAME=ROOT[,ROOT...]` names one model's replicate roots,
+`--random` the randomly initialized model's and `--baselines` the baseline encodings'. Depth becomes relative, 0 at the
+token embedding and 1 at the final norm, so models of different depth share one axis; a model's blocks come from its
+store manifest, or else from the deepest block its probes read. A task's onset is the first depth at which its
+residual stream comes within 5% of its highest score, and tasks are grouped into six kinds of concept (composition,
+secondary structure, sorting and topology, InterPro membership, function, residue sites and modifications).
+
+| File | Shows |
+|---|---|
+| `emergence.png` | each task's residual stream along relative depth as a share of its highest score, one panel per model, with the onset and the best state chosen on validation |
+| `state_rankings.png` | each site's best state minus the best residual-stream state, median and quartiles over tasks, per model |
+| `controls_summary.png` | each task's best residual-stream score for every model, the random-init model and the baselines, with the first model's controls |
+| `model_size.png` | each task's best score and the relative depth of its best stream state, joined across models |
+| `ppi.png` | the pair task along relative depth (MCC and ROC AUC) for every model and control, and by site |
+
+`stream_profiles.csv`, `category_profiles.csv`, `site_rankings.csv`, `best_states_by_model.csv`,
+`pair_best_states.csv` and `pair_ranking.csv` hold the numbers behind them.
+
+```bash
+python -m protify.interpretability trends --models ESMC-300=RUN,RUN_2,RUN_3 ESMC-600=RUN_600 --random "ESMC-300 random init=RANDOM" \
+    --baselines OneHot-Protein=ONE_HOT Random=RANDOM_ROWS --out FIGURES/trends
+```
