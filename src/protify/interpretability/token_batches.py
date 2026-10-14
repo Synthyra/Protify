@@ -47,6 +47,27 @@ def _greedy(order: Sequence[int], sequences: Sequence[str], max_tokens: int, max
     return batches
 
 
+def group_batches(sequences: Sequence[str], group: int, max_tokens: int) -> list[TokenBatch]:
+    """Batches of whole groups of `group` consecutive sequences (the last group may be smaller), within `max_tokens`
+    padded tokens unless one group alone exceeds them. Groups are packed longest first and never split."""
+    groups = [list(range(start, min(start + group, len(sequences)))) for start in range(0, len(sequences), group)]
+    longest = [max(len(sequences[index]) for index in members) + SPECIAL_TOKENS for members in groups]
+    batches: list[list[int]] = []
+    current: list[int] = []
+    width = 0
+    for position in sorted(range(len(groups)), key=lambda position: -longest[position]):
+        members = groups[position]
+        grown = max(width, longest[position])
+        if current and grown * (len(current) + len(members)) > max_tokens:
+            batches.append(current)
+            current, grown = [], longest[position]
+        current = current + members
+        width = grown
+    if current:
+        batches.append(current)
+    return [TokenBatch(tuple(batch), tuple(sequences[index] for index in batch)) for batch in batches]
+
+
 def token_batches(
     sequences: Sequence[str],
     max_tokens: int,

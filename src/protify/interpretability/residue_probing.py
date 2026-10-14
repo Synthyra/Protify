@@ -29,7 +29,7 @@ from .concepts import ConceptData, scramble, scramble_seed, shuffled_labels
 from .probe_bank import ProbeBank
 from .scores import ResamplePlan, ScoreAccumulator
 from .sites import SiteLayout, TapSpec
-from .token_batches import TokenBatch, token_batches
+from .token_batches import TokenBatch, group_batches, token_batches
 from .training import MEAN_CONTROL_BATCH, TaskResults, TrainingSettings, make_bank
 
 
@@ -130,6 +130,33 @@ class SiteBanks:
 
     def banks(self) -> list[ProbeBank]:
         return [self.full] + ([self.head] if self.head is not None else [])
+
+
+@dataclass
+class MeanGroups:
+    """The mean control's groups of MEAN_CONTROL_BATCH consecutive test proteins within one batch (local indices)."""
+
+    sequence_group: Tensor  # (b,) group of each sequence of the batch
+    sizes: Tensor  # (G,) sequences in each group
+    row_group: Tensor  # (n,) group of each residue row
+    modes: Tensor  # (n,) the most common label of each row's group
+
+    def positional_means(self, X: Tensor, batch: ResidueBatch) -> Tensor:
+        """Each residue row's state replaced by its group's mean state at the same position (padding counts as 0)."""
+        # X: (b, l, w) -> (n, w)
+        masked = X.to(torch.float32) * batch.attention_mask.unsqueeze(-1)  # (b, l, w)
+        sums = torch.zeros((len(self.sizes),) + masked.shape[1:], dtype=torch.float32, device=X.device).index_add_(0, self.sequence_group, masked)
+        return (sums / self.sizes.view(-1, 1, 1))[self.row_group, batch.positions]  # (n, w)
+
+
+def _mean_groups(token_batch: TokenBatch, batch: ResidueBatch) -> MeanGroups:
+    device = batch.targets.device
+    owners = torch.tensor([index // MEAN_CONTROL_BATCH for index in token_batch.indices], device=device)  # (b,)
+    names, sequence_group = torch.unique(owners, return_inverse=True)  # (G,), (b,)
+    row_group = torch.searchsorted(names, batch.proteins // MEAN_CONTROL_BATCH)  # (n,)
+    sizes = torch.bincount(sequence_group, minlength=len(names)).to(torch.float32)  # (G,)
+    modes = torch.stack([torch.mode(batch.targets[row_group == group]).values for group in range(len(names))])  # (G,)
+    return MeanGroups(sequence_group, sizes, row_group, modes[row_group])
 
 
 def _rows(X: Tensor, flat_index: Tensor) -> Tensor:
@@ -496,19 +523,17 @@ def score_residue_task(
     if settings.controls:
         variants += [("trained", True), ("untrained", False), ("untrained", True)]
     untrained = untrained_copy(model, settings.seed) if settings.controls else None
-    # the mean control averages batches of MEAN_CONTROL_BATCH proteins; without controls, batches fill the token budget
-    batches = [
-        TokenBatch(tuple(range(start, min(start + MEAN_CONTROL_BATCH, len(split.sequences)))),
-                   tuple(split.sequences[start: start + MEAN_CONTROL_BATCH]))
-        for start in range(0, len(split.sequences), MEAN_CONTROL_BATCH)
-    ] if settings.controls else token_batches(split.sequences, settings.max_tokens)
+    # The mean control averages groups of MEAN_CONTROL_BATCH consecutive test proteins, so with controls a batch holds
+    # whole groups up to the token budget; without them, batches simply fill the budget.
+    batches = group_batches(split.sequences, MEAN_CONTROL_BATCH, settings.max_tokens) if settings.controls else token_batches(split.sequences, settings.max_tokens)
     for plm, is_scrambled in variants:
         network = model if plm == "trained" else untrained
         labels = scrambled_labels if is_scrambled else split.labels
         for token_batch in tqdm(batches, desc=f"{task.name} test {plm}{' scrambled' if is_scrambled else ''}", leave=False, mininterval=10):
             fed = [scrambled_inputs[index] for index in token_batch.indices] if is_scrambled else None
             batch = residue_batch(tokenizer, token_batch, labels, device, inputs=fed)
-            mode = torch.mode(batch.targets).values
+            if settings.controls and not is_scrambled:
+                groups = _mean_groups(token_batch, batch)
 
             def score(site: str, layer: int, X: Tensor) -> None:
                 rows = _rows(X, batch.flat_index)  # (n, w)
@@ -524,12 +549,10 @@ def score_residue_task(
                     if is_scrambled:
                         inputs = {"scrambled": (rows, batch.targets)}
                     else:
-                        masked = X.to(torch.float32) * batch.attention_mask.unsqueeze(-1)  # (b, l, w)
-                        positional_mean = masked.mean(dim=0)  # (l, w)
                         inputs = {
                             "original": (rows, batch.targets),
                             "l2_normalized": (F.normalize(rows.to(torch.float32), dim=-1), batch.targets),
-                            "mean": (positional_mean.index_select(0, batch.positions), mode.expand_as(batch.targets)),
+                            "mean": (groups.positional_means(X, batch), groups.modes),
                             "random_gaussian": (torch.randn(rows.shape, generator=generator, device=device), batch.targets),
                         }
                     for probe, which in (("trained", "best"), ("untrained", "initial")):

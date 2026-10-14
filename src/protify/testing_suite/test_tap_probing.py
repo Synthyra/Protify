@@ -17,38 +17,38 @@ try:
     from src.protify.base_models.esmc import get_esmc_tokenizer
     from src.protify.interpretability.capture import capture_states, model_dims
     from src.protify.interpretability import figures
-    from src.protify.interpretability.cli import STORE_VARIANTS, main, store_passes, store_path, train_tasks, validate_tasks, write_stores
+    from src.protify.interpretability.cli import STORE_VARIANTS, main, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
     from src.protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from src.protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from src.protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
     from src.protify.interpretability.probe_bank import ProbeBank, ProbeSettings
     from src.protify.interpretability.protein_probing import full_view, head_view, score_bank, validation_loss
-    from src.protify.interpretability.residue_probing import untrained_copy
+    from src.protify.interpretability.residue_probing import _mean_groups, residue_batch, score_residue_task, untrained_copy
     from src.protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, multiclass_mcc
     from src.protify.interpretability.selection import choose_setting, rank_settings, read_sweeps
     from src.protify.interpretability.sites import ALL_SITES, ModelDims, TapSpec, parse_sites, site_layouts
-    from src.protify.interpretability.token_batches import SPECIAL_TOKENS, token_batches
+    from src.protify.interpretability.token_batches import SPECIAL_TOKENS, group_batches, token_batches
     from src.protify.interpretability.token_store import TokenTapStore, embed_tokens
-    from src.protify.interpretability.training import CONTROLS, PLM_STATES, PROBE_STATES, TrainingSettings, make_bank
+    from src.protify.interpretability.training import CONTROLS, PLM_STATES, PROBE_STATES, TaskResults, TrainingSettings, make_bank
 except ImportError:
     from protify.base_models.esmc import get_esmc_tokenizer
     from protify.interpretability.capture import capture_states, model_dims
     from protify.interpretability import figures
-    from protify.interpretability.cli import STORE_VARIANTS, main, store_passes, store_path, train_tasks, validate_tasks, write_stores
+    from protify.interpretability.cli import STORE_VARIANTS, main, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
     from protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
     from protify.interpretability.probe_bank import ProbeBank, ProbeSettings
     from protify.interpretability.protein_probing import full_view, head_view, score_bank, validation_loss
-    from protify.interpretability.residue_probing import untrained_copy
+    from protify.interpretability.residue_probing import _mean_groups, residue_batch, score_residue_task, untrained_copy
     from protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, multiclass_mcc
     from protify.interpretability.selection import choose_setting, rank_settings, read_sweeps
     from protify.interpretability.sites import ALL_SITES, ModelDims, TapSpec, parse_sites, site_layouts
-    from protify.interpretability.token_batches import SPECIAL_TOKENS, token_batches
+    from protify.interpretability.token_batches import SPECIAL_TOKENS, group_batches, token_batches
     from protify.interpretability.token_store import TokenTapStore, embed_tokens
-    from protify.interpretability.training import CONTROLS, PLM_STATES, PROBE_STATES, TrainingSettings, make_bank
+    from protify.interpretability.training import CONTROLS, PLM_STATES, PROBE_STATES, TaskResults, TrainingSettings, make_bank
 
 from fastplms.models.esm_plusplus.modeling_esm_plusplus import ESMplusplusConfig, ESMplusplusModel
 
@@ -211,6 +211,36 @@ def test_token_batches_cover_every_sequence_once() -> None:
             assert [sequences[index] for index in batch.indices] == list(batch.sequences)
             assert batch.padded_length == max(len(sequence) for sequence in batch.sequences) + SPECIAL_TOKENS
             assert len(batch.indices) * batch.padded_length <= 200 or len(batch.indices) == 1
+
+
+def test_group_batches_keep_whole_groups() -> None:
+    sequences, _ = synthetic_proteins(61, seed=2)
+    for budget in (50, 400, 100_000):
+        batches = group_batches(sequences, 8, budget)
+        assert sorted(index for batch in batches for index in batch.indices) == list(range(len(sequences)))
+        for batch in batches:
+            groups = {index // 8 for index in batch.indices}
+            assert sorted(batch.indices) == [index for group in sorted(groups) for index in range(8 * group, min(8 * group + 8, len(sequences)))]
+            assert len(batch.indices) * batch.padded_length <= budget or len(groups) == 1
+    assert len(group_batches(sequences, 8, 50)) == 8 and len(group_batches(sequences, 8, 100_000)) == 1
+
+
+def test_mean_control_averages_each_group_by_position(tokenizer: object) -> None:
+    sequences, _ = synthetic_proteins(29, seed=4)
+    labels = [np.asarray(residue_classes(sequence)) for sequence in sequences]
+    token_batch = max(group_batches(sequences, 8, 1_000), key=lambda batch: len(batch.indices))
+    batch = residue_batch(tokenizer, token_batch, labels, CPU)
+    X = torch.randn(batch.input_ids.shape + (5,), generator=torch.Generator().manual_seed(0))  # (b, l, w)
+    groups = _mean_groups(token_batch, batch)
+    means = groups.positional_means(X, batch)  # (n, w)
+    masked = X * batch.attention_mask.unsqueeze(-1)
+    rows = {index: row for row, index in enumerate(token_batch.indices)}
+    for n, (protein, position) in enumerate(zip(batch.proteins.tolist(), batch.positions.tolist())):
+        members = [rows[index] for index in token_batch.indices if index // 8 == protein // 8]
+        torch.testing.assert_close(means[n], masked[members, position].mean(dim=0))
+        group_targets = torch.cat([torch.as_tensor(labels[token_batch.indices[member]]) for member in members])
+        assert groups.modes[n] == torch.mode(group_targets).values
+    assert len({index // 8 for index in token_batch.indices}) > 1
 
 
 def test_masked_mean_var_ignores_padding() -> None:
@@ -651,6 +681,20 @@ def test_residue_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object
     alone = pd.read_parquet(root / "results" / "plain" / "ssp_q3" / "scores.parquet")
     assert conditions_of(alone) == {("trained", "trained", "original")}
     pd.testing.assert_series_equal(headline_scores(alone[alone["family"] == "full"]).sort_index(), headline_scores(full).sort_index(), atol=1e-3)
+    # with controls, a batch of several mean-control groups scores every condition as one group a batch does (the
+    # Gaussian inputs aside, which are drawn afresh)
+    layouts = site_layouts(spec, model_dims(tiny_model))
+    tables = []
+    for budget in (300, 100_000):
+        results = TaskResults()
+        selected = restore_selected(weights, layouts, data, settings, CPU)
+        score_residue_task(tiny_model, tokenizer, spec, layouts, selected, data, replace(settings, max_tokens=budget), CPU, results)
+        table = results.frames()["scores"]
+        tables.append(table[table["control"] != "random_gaussian"].sort_values(["family", "probe_name", "plm", "probe", "control", "resample"]).reset_index(drop=True))
+    assert len(group_batches(data.splits["test"].sequences, 8, 100_000)) == 1 < len(group_batches(data.splits["test"].sequences, 8, 300))
+    pd.testing.assert_frame_equal(tables[0], tables[1], atol=2e-3, rtol=0)
+    kept = scores[(scores["control"] != "random_gaussian")].sort_values(["family", "probe_name", "plm", "probe", "control", "resample"]).reset_index(drop=True)
+    pd.testing.assert_frame_equal(tables[0], kept, atol=2e-3, rtol=0)
 
 
 def test_normalized_inputs_and_mean_pooling(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:

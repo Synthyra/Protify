@@ -82,8 +82,10 @@ def make_bank(
 
 
 def restore_bank(names: list[str], saved: dict[str, Tensor], outputs: int, loss: str, settings: TrainingSettings, device: torch.device | str) -> ProbeBank:
-    """A trained bank of one grid setting rebuilt from its saved `state("best")`: the best weights, as the current
-    weights too, and the standardization. `names` are the probes in the order they were saved."""
+    """A trained bank of one grid setting rebuilt from its saved `state("best")`, to score and not to train: the best
+    weights, which are the current weights too, and the standardization, without optimizer state. `names` are the
+    probes in the order they were saved. The initial weights are drawn again from the seed, which reproduces training's
+    when it ran one grid setting."""
     best = {key.removeprefix("best."): value for key, value in saved.items() if key.startswith("best.")}
     width = best["weight" if settings.probe.kind == "linear" else "weight1"].shape[1]
     bank = ProbeBank(names, width, outputs, loss, settings.probe, saved["learning_rates"], saved["weight_decays"], settings.seed, device)
@@ -91,8 +93,9 @@ def restore_bank(names: list[str], saved: dict[str, Tensor], outputs: int, loss:
         shapes = {name: tuple(value.shape) for name, value in best.items()}
         raise ValueError(f"Saved weights of shapes {shapes} do not fit {bank.groups} probes from {names[0]}.")
     for name, value in best.items():
-        bank.params[name] = value.to(bank.device, torch.float32).clone()
         bank.best[name] = value.to(bank.device, torch.float32).clone()
+        bank.params[name] = bank.best[name]  # nothing trains a restored bank: one copy, and no optimizer state
+    bank.grads, bank.first_moment, bank.second_moment = {}, {}, {}
     bank.mean = saved["mean"].to(bank.device, torch.float32)
     bank.inverse_std = saved["inverse_std"].to(bank.device, torch.float32)
     bank.best_loss = saved["best_loss"].to(bank.device)
