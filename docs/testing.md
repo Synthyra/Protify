@@ -89,13 +89,13 @@ Tests use pytest markers registered in `conftest.py`:
 - `@pytest.mark.checkpoint` -- loads a published checkpoint from the local Hugging Face cache, offline, and fails when it is not cached.
 
 Nothing in the suite skips itself: a test that cannot run here is deselected by its marker, and one that is
-selected and cannot run fails. The CI workflow (`.github/workflows/tests.yml`) runs
-`-m "not gpu and not slow and not checkpoint"` on every push and pull request, offline, with no GPU.
+selected and cannot run fails. There is no CI workflow: run the suite yourself before a pull request, with
+`-m "not gpu and not slow and not checkpoint"` on a machine without a GPU.
 
 Filter tests by marker:
 
 ```bash
-# CPU-only tests, as CI runs them
+# CPU-only tests, offline, with no GPU
 python -m pytest src/protify/testing_suite -v -m "not gpu and not slow and not checkpoint"
 
 # GPU tests only

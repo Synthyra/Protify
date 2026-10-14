@@ -117,7 +117,7 @@ docker run --rm --gpus all --ipc=host -v ${PWD}:/workspace -w /workspace protify
   src/protify/testing_suite/test_parallel_probe_plan.py src/protify/testing_suite/test_parallel_linear_probe.py -v
 ```
 
-Outside Docker, `pip install -e .` from the root makes `protify` and the vendored `foundry` importable; run the CLI as `python -m protify.main` and the GUI as `python -m protify.gui`. `.github/workflows/tests.yml` runs the CPU suite on every push and pull request.
+Outside Docker, `pip install -e .` from the root makes `protify` and the vendored `foundry` importable; run the CLI as `python -m protify.main` and the GUI as `python -m protify.gui`. There is no CI test workflow: the team runs the suite itself, and none is added (Logan, 2026-10-14). `.github/workflows/upload.yml` only builds and publishes the wheel on a release.
 
 Treat the Python coding standard imported above as mandatory repository guidance for implementation, refactoring, and review. Preserve behavior and scope first; apply its readability preferences to all first-party Python touched by the task.
 
