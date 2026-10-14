@@ -13,11 +13,12 @@ d_h head width; C classes; K grid settings.
 from __future__ import annotations
 
 import copy
+import time
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from torch import Tensor, nn
 from tqdm.auto import tqdm
@@ -84,6 +85,27 @@ class SiteBanks:
             make_bank(layout.head_names(), layout.head_width, outputs, "multiclass", settings, settings.seed, device)
             if layout.heads else None
         )
+        self.shared = settings.probe.kind == "linear"
+        self._groups = {layer: self._layer_groups(layer, device) for layer in layout.layers}
+
+    def _layer_groups(self, layer: int, device: torch.device) -> list[tuple[ProbeBank, Tensor, int]]:
+        slot, probes, count = self.slot[layer], self.layout.num_layers, self.settings_count
+        groups = [(self.full, torch.tensor([setting * probes + slot for setting in range(count)], device=device), 1)]
+        if self.head is not None:
+            heads = self.layout.heads
+            index = [setting * probes * heads + slot * heads + head for setting in range(count) for head in range(heads)]
+            groups.append((self.head, torch.tensor(index, device=device), heads))
+        return groups
+
+    def groups(self, layer: int) -> list[tuple[ProbeBank, Tensor, int]]:
+        """(bank, group index setting-major then head, heads) of every probe that reads this layer's rows."""
+        return self._groups[layer]
+
+    def center(self, rows: Tensor, layer: int) -> Tensor:
+        """Rows minus the layer's training mean, in bf16, once for every bank and head that reads them."""
+        # rows: (n, w); the head probes' means are the full-width mean split by head
+        mean = self.full.mean[self.slot[layer]]  # (w,)
+        return (rows - mean.to(rows.dtype)).to(torch.bfloat16)
 
     def ranges(self, layer: int) -> list[tuple[ProbeBank, int, int, int]]:
         """(bank, start, stop, heads) for the groups of one layer in every grid setting."""
@@ -113,6 +135,14 @@ def _rows(X: Tensor, flat_index: Tensor) -> Tensor:
 def _grouped(rows: Tensor, heads: int) -> Tensor:
     # rows: (n, w) -> (n, 1, w), or (n, H, d_h) per head
     return rows.unsqueeze(1) if heads == 1 else rows.view(rows.shape[0], heads, rows.shape[1] // heads)
+
+
+def _layer_logits(bank: ProbeBank, states: Tensor, start: int, heads: int, which: str) -> Tensor:
+    """Outputs of the `heads` groups from `start` of a selected bank (one setting) for rows they all read."""
+    # states: (n, w) -> (n, heads, C)
+    if bank.settings.kind == "linear":
+        return bank.shared_logits(states, torch.arange(start, start + heads, device=states.device), heads, which)
+    return bank.logits(_grouped(states, heads), start, start + heads, which)
 
 
 def _run(model: nn.Module, spec: TapSpec, consumer: Callable[[str, int, Tensor], None], batch: ResidueBatch) -> None:
@@ -186,6 +216,11 @@ def validation_losses(
 
     def score(site: str, layer: int, X: Tensor) -> None:
         rows = _rows(X, batch.flat_index)  # (n, w)
+        if banks[site].shared:
+            centered = banks[site].center(rows, layer)  # (n, w) bf16
+            for bank, index, heads in banks[site].groups(layer):
+                totals[id(bank)].index_add_(0, index, bank.shared_loss_sums(centered, batch.targets, index, heads, centered=True))
+            return
         for bank, start, stop, heads in banks[site].ranges(layer):
             totals[id(bank)][start:stop] += bank.loss_sums(_grouped(rows, heads), batch.targets, start, stop)
 
@@ -196,7 +231,7 @@ def validation_losses(
     return {key: value / rows_seen for key, value in totals.items()}
 
 
-def train_residue_task(
+def fit_residue_banks(
     model: nn.Module,
     tokenizer: object,
     spec: TapSpec,
@@ -204,12 +239,14 @@ def train_residue_task(
     data: ConceptData,
     settings: TrainingSettings,
     device: torch.device,
-    results: TaskResults | None = None,
-    save_weights: dict[str, dict[str, Tensor]] | None = None,
-) -> TaskResults:
-    """Train every probe of one residue-level task by streaming states from the model, then score it."""
+    watch: Callable[[Iterable[TokenBatch]], Iterable[TokenBatch]] | None = None,
+) -> tuple[dict[str, SiteBanks], int]:
+    """Standardize and train every probe of one residue task by streaming states. Returns the banks and epochs run.
+
+    `watch` wraps the first epoch's batches, as `foundry.pilot.Pilot.watch` does, for a pilot: training stops after
+    the batches it yields.
+    """
     task = data.task
-    results = results or TaskResults()
     banks = {site: SiteBanks(layout, task.outputs, settings, device) for site, layout in layouts.items()}
     fit_standardization(model, tokenizer, spec, banks, data, settings, device)
     split = data.splits["train"]
@@ -220,6 +257,11 @@ def train_residue_task(
 
     def learn(site: str, layer: int, X: Tensor) -> None:
         rows = _rows(X, batch.flat_index)  # (n, w)
+        if banks[site].shared:
+            centered = banks[site].center(rows, layer)  # (n, w) bf16
+            for bank, index, heads in banks[site].groups(layer):
+                bank.shared_accumulate(centered, batch.targets, index, heads, centered=True)
+            return
         for bank, start, stop, heads in banks[site].ranges(layer):
             bank.accumulate(_grouped(rows, heads), batch.targets, start, stop)
 
@@ -228,7 +270,7 @@ def train_residue_task(
         batches = token_batches(split.sequences, settings.max_tokens, shuffle=True, seed=settings.seed + epoch)
         validate_every = settings.validate_every or len(batches)
         bar = tqdm(batches, desc=f"{task.name} epoch {epochs}", leave=False, mininterval=10)
-        for token_batch in bar:
+        for token_batch in (watch(bar) if watch is not None else bar):
             batch = residue_batch(tokenizer, token_batch, split.labels, device)
             with torch.no_grad():
                 _run(model, spec, learn, batch)
@@ -241,8 +283,32 @@ def train_residue_task(
                 bar.set_postfix(active=active)
                 if active == 0:
                     break
-        if active == 0:
+        if watch is not None or active == 0:
             break
+    return banks, epochs
+
+
+def train_residue_task(
+    model: nn.Module,
+    tokenizer: object,
+    spec: TapSpec,
+    layouts: dict[str, SiteLayout],
+    data: ConceptData,
+    settings: TrainingSettings,
+    device: torch.device,
+    results: TaskResults | None = None,
+    save_weights: dict[str, dict[str, Tensor]] | None = None,
+    watch: Callable[[Iterable[TokenBatch]], Iterable[TokenBatch]] | None = None,
+) -> TaskResults:
+    """Train every probe of one residue-level task by streaming states from the model, then score it.
+
+    Under a pilot's `watch`, training stops after the batches it yields and nothing is scored.
+    """
+    task = data.task
+    results = results or TaskResults()
+    banks, epochs = fit_residue_banks(model, tokenizer, spec, layouts, data, settings, device, watch)
+    if watch is not None:
+        return results
 
     selected: dict[str, dict[str, ProbeBank]] = {}
     for site, site_banks in banks.items():
@@ -256,6 +322,71 @@ def train_residue_task(
             if save_weights is not None:
                 save_weights[f"{site}.{family}"] = reduced.state("best")
     score_residue_task(model, tokenizer, spec, layouts, selected, data, settings, device, results)
+    return results
+
+
+@torch.no_grad()
+def score_validation_settings(
+    model: nn.Module,
+    tokenizer: object,
+    spec: TapSpec,
+    banks: dict[str, SiteBanks],
+    data: ConceptData,
+    settings: TrainingSettings,
+    device: torch.device,
+) -> dict[int, ScoreAccumulator]:
+    """Validation scores of every group of every bank, each grid setting with its best weights, keyed by bank id."""
+    split = data.splits["validation"]
+    plan = ResamplePlan.draw(len(split.sequences), 0, settings.resample_fraction, settings.seed, device)
+    accumulators = {
+        id(bank): ScoreAccumulator(data.task.kind, bank.groups, bank.outputs, plan)
+        for site_banks in banks.values() for bank in site_banks.banks()
+    }
+
+    def score(site: str, layer: int, X: Tensor) -> None:
+        rows = _rows(X, batch.flat_index)  # (n, w)
+        site_banks = banks[site]
+        spans = site_banks.ranges(layer)  # (bank, start, stop, heads) for each grid setting
+        if not site_banks.shared:
+            for bank, start, stop, heads in spans:
+                Z = bank.logits(_grouped(rows, heads), start, stop, "best")  # (n, heads, C)
+                accumulators[id(bank)].add(Z, batch.targets, batch.proteins, start)
+            return
+        centered = site_banks.center(rows, layer)  # (n, w) bf16
+        for bank, index, heads in site_banks.groups(layer):
+            Z = bank.shared_logits(centered, index, heads, "best", centered=True)  # (n, K * heads, C), setting-major
+            starts = [start for owner, start, _, _ in spans if owner is bank]
+            for setting, start in enumerate(starts):
+                accumulators[id(bank)].add(Z[:, setting * heads: (setting + 1) * heads], batch.targets, batch.proteins, start)
+
+    for token_batch in token_batches(split.sequences, settings.max_tokens):
+        batch = residue_batch(tokenizer, token_batch, split.labels, device)
+        _run(model, spec, score, batch)
+    return accumulators
+
+
+def sweep_residue_task(
+    model: nn.Module,
+    tokenizer: object,
+    spec: TapSpec,
+    layouts: dict[str, SiteLayout],
+    data: ConceptData,
+    settings: TrainingSettings,
+    device: torch.device,
+    results: TaskResults | None = None,
+) -> TaskResults:
+    """Train every probe under every grid setting and score each on the validation split; test is never read."""
+    results = results or TaskResults()
+    started = time.time()
+    banks, epochs = fit_residue_banks(model, tokenizer, spec, layouts, data, settings, device)
+    validation = score_validation_settings(model, tokenizer, spec, banks, data, settings, device)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    seconds = time.time() - started  # the whole task: every site streams from the same forward passes
+    for site_banks in banks.values():
+        for family, bank in (("full", site_banks.full), ("head", site_banks.head)):
+            if bank is not None:
+                results.add_sweep(data.task.name, family, bank, validation[id(bank)], settings, epochs, seconds)
     return results
 
 
@@ -324,7 +455,7 @@ def score_residue_task(
                     start, stop = slot * heads, (slot + 1) * heads
                     if family == "head" or not settings.controls:
                         if plm == "trained" and not is_scrambled:
-                            Z = bank.logits(_grouped(rows, heads), start, stop, "best")  # (n, g, C)
+                            Z = _layer_logits(bank, rows, start, heads, "best")  # (n, g, C)
                             accumulator(site, family, plm, "trained", "original").add(Z, batch.targets, batch.proteins, start)
                         continue
                     if is_scrambled:
@@ -340,7 +471,7 @@ def score_residue_task(
                         }
                     for probe, which in (("trained", "best"), ("untrained", "initial")):
                         for control, (states, targets) in inputs.items():
-                            Z = bank.logits(_grouped(states, heads), start, stop, which)  # (n, g, C)
+                            Z = _layer_logits(bank, states, start, heads, which)  # (n, g, C)
                             accumulator(site, family, plm, probe, control).add(Z, targets, batch.proteins, start)
 
             _run(network, spec, score, batch)

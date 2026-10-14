@@ -63,9 +63,13 @@ def binary_mcc(counts: Tensor) -> Tensor:
 
 
 class ScoreAccumulator:
-    """Counts for G probes of one task, folded per resample as batches arrive."""
+    """Counts for G probes of one task, folded per resample as batches arrive.
 
-    def __init__(self, kind: str, groups: int, outputs: int, plan: ResamplePlan) -> None:
+    `per_label` keeps each label's counts for multilabel and binary tasks; a sweep, which needs only the headline
+    score of many probes, turns it off.
+    """
+
+    def __init__(self, kind: str, groups: int, outputs: int, plan: ResamplePlan, per_label: bool = True) -> None:
         self.kind = kind
         self.groups = groups
         self.outputs = outputs
@@ -76,7 +80,7 @@ class ScoreAccumulator:
             self.confusion = torch.zeros(rows, groups, outputs, outputs, dtype=torch.float64, device=device)
         elif kind in ("multilabel", "binary"):
             self.micro = torch.zeros(rows, groups, 4, dtype=torch.float64, device=device)
-            self.per_label = torch.zeros(rows, groups, outputs, 4, dtype=torch.float64, device=device)
+            self.per_label = torch.zeros(rows, groups, outputs, 4, dtype=torch.float64, device=device) if per_label else None
         elif kind == "regression":
             self.cosine_sum = torch.zeros(rows, groups, dtype=torch.float64, device=device)
             self.proteins = torch.zeros(rows, dtype=torch.float64, device=device)
@@ -101,6 +105,17 @@ class ScoreAccumulator:
             per_protein = torch.bincount(cells.reshape(-1), minlength=len(local) * g * C * C).to(torch.float64)  # (p * g * C * C,)
             folded = weights @ per_protein.view(len(local), g * C * C)  # (R + 1, g * C * C)
             self.confusion[:, start:stop] += folded.view(-1, g, C, C)
+            return
+        if self.kind in ("multilabel", "binary") and self.per_label is None:
+            predicted = Z > 0  # (n, g, C)
+            truth = targets.to(torch.bool).unsqueeze(1)  # (n, 1, C)
+            tp = (predicted & truth).sum(dim=-1)  # (n, g)
+            fp = predicted.sum(dim=-1) - tp  # (n, g)
+            fn = truth.sum(dim=-1) - tp  # (n, g)
+            tn = self.outputs - tp - fp - fn  # (n, g)
+            counts = torch.stack([tp, fp, fn, tn], dim=-1).to(torch.float64)  # (n, g, 4)
+            per_protein = torch.zeros(len(local), g, 4, dtype=torch.float64, device=Z.device).index_add_(0, inverse, counts)
+            self.micro[:, start:stop] += torch.einsum("rp,pgk->rgk", weights, per_protein)
             return
         if self.kind in ("multilabel", "binary"):
             predicted = Z > 0  # (n, g, C)
@@ -134,9 +149,9 @@ class ScoreAccumulator:
         return self.cosine_sum / self.proteins.clamp_min(1.0).unsqueeze(1)
 
     def elementwise(self) -> Tensor | None:
-        """Per-label MCC, or per-target cosine across proteins: (R + 1, G, C); None for multiclass."""
+        """Per-label MCC, or per-target cosine across proteins: (R + 1, G, C); None for multiclass or without counts."""
         if self.kind in ("multilabel", "binary"):
-            return binary_mcc(self.per_label)
+            return binary_mcc(self.per_label) if self.per_label is not None else None
         if self.kind == "regression":
             products, predicted, truth = self.terms.unbind(dim=-1)
             return products / torch.sqrt(predicted * truth).clamp_min(1e-300)

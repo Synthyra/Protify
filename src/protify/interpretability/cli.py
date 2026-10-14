@@ -1,13 +1,17 @@
 """Command line for tap probing: pooled stores, token stores, and probe training on the concept tasks.
 
     python -m protify.interpretability embed  --root RUN [--tasks protein] [--sites all] [--controls]
+    python -m protify.interpretability sweep  --root RUN --label B256 --lr 1e-4 1e-3 1e-2 --wd 0 0.1 --batch-size 256
+    python -m protify.interpretability select --root RUN --labels B256 B1024
     python -m protify.interpretability train  --root RUN [--tasks all] [--lr 1e-3 ...] [--probe linear]
-    python -m protify.interpretability tokens --root RUN --sequences FILE --sites resid_post
+    python -m protify.interpretability tokens --sequences FILE --out DIR --sites resid_post
 
 `embed` writes the pooled stores the protein tasks read: every protein-task sequence through the trained model,
-and, with `--controls`, the test proteins under the untrained model, scrambled, and token-normalized. `train` trains
+and, with `--controls`, the test proteins under the untrained model, scrambled, and token-normalized. `sweep` trains
+every probe under every grid setting and scores each on the validation split, and `select` picks the one setting
+that costs the probes least validation score, preferring the fastest batch when several are close. `train` trains
 and scores every probe of each task: protein tasks from the stores, residue tasks by streaming from the model.
-Results go to `RUN/results/<task>/` as parquet tables and a safetensors file of the selected probe weights.
+Results go to `RUN/results/<label>/<task>/` as parquet tables and a safetensors file of the selected probe weights.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+import pandas as pd
 import torch
 
 from collections.abc import Callable, Sequence
@@ -24,11 +29,14 @@ from safetensors.torch import save_file
 
 from .concepts import ALL_TASKS, DEFAULT_REPO, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, load_concept, scramble, scramble_seed
 from .capture import model_dims
+from .interventions import paired_tests, run_phospho_interventions
 from .pooled_store import PooledTapStore, embed_pooled
 from .probe_bank import ProbeSettings
-from .protein_probing import ControlStores, train_protein_task
-from .residue_probing import train_residue_task, untrained_copy
+from .protein_probing import ControlStores, sweep_protein_task, train_protein_task
+from .residue_probing import sweep_residue_task, train_residue_task, untrained_copy
+from .selection import choose_setting, rank_settings, read_sweeps, task_optima
 from .sites import ModelDims, SiteLayout, TapSpec, parse_sites, site_layouts
+from .token_batches import TokenBatch, token_batches
 from .token_store import embed_tokens
 from .training import TaskResults, TrainingSettings
 
@@ -61,11 +69,11 @@ def parse_blocks(value: str) -> tuple[int, ...] | None:
     return None if value == "all" else tuple(int(part) for part in value.split(","))
 
 
-def load_model(model_name: str, device: torch.device) -> tuple[torch.nn.Module, object]:
+def load_model(model_name: str, device: torch.device, dtype: torch.dtype = torch.bfloat16) -> tuple[torch.nn.Module, object]:
     from ..base_models.get_base_models import get_base_model
 
-    model, tokenizer = get_base_model(model_name, dtype=torch.bfloat16)
-    return model.to(device).eval(), tokenizer
+    model, tokenizer = get_base_model(model_name, dtype=dtype)
+    return model.to(device, dtype).eval(), tokenizer
 
 
 def load_tasks(tasks: Sequence[str], args: argparse.Namespace) -> dict[str, ConceptData]:
@@ -93,6 +101,28 @@ def control_stores(root: Path) -> ControlStores:
     return ControlStores({key: PooledTapStore(store_path(root, *key)) for key in STORE_VARIANTS})
 
 
+StorePass = tuple[str, list[str], dict[bool, Path], Callable[[str], str] | None]
+
+
+def store_passes(datasets: dict[str, ConceptData], root: Path, controls: bool, seed: int) -> list[StorePass]:
+    """(model state, sequences, store roots, input transform) of each forward pass the stores need."""
+    every = sorted({sequence for data in datasets.values() for split in data.splits.values() for sequence in split.sequences})
+    tested = sorted({sequence for data in datasets.values() for sequence in data.splits["test"].sequences})
+
+    def scrambled(sequence: str) -> str:
+        return scramble(sequence, scramble_seed(sequence, seed))
+
+    passes: list[StorePass] = [("trained", every, {False: store_path(root, "trained", "original")}, None)]
+    if controls:
+        passes += [
+            ("trained", tested, {True: store_path(root, "trained", "l2_normalized")}, None),
+            ("trained", tested, {False: store_path(root, "trained", "scrambled")}, scrambled),
+            ("untrained", tested, {False: store_path(root, "untrained", "original"), True: store_path(root, "untrained", "l2_normalized")}, None),
+            ("untrained", tested, {False: store_path(root, "untrained", "scrambled")}, scrambled),
+        ]
+    return passes
+
+
 def write_stores(
     model: torch.nn.Module,
     tokenizer: object,
@@ -104,22 +134,18 @@ def write_stores(
     seed: int,
     max_tokens: int,
     device: torch.device,
+    pilot: object | None = None,
 ) -> None:
-    """The pooled stores of the protein tasks: every sequence under the trained model, and the control stores."""
-    every = sorted({sequence for data in datasets.values() for split in data.splits.values() for sequence in split.sequences})
-    tested = sorted({sequence for data in datasets.values() for sequence in data.splits["test"].sequences})
+    """The pooled stores of the protein tasks: every sequence under the trained model, and the control stores.
 
-    def scrambled(sequence: str) -> str:
-        return scramble(sequence, scramble_seed(sequence, seed))
-
-    passes = [("trained", every, {False: store_path(root, "trained", "original")}, None)]
-    if controls:
-        passes += [
-            ("trained", tested, {True: store_path(root, "trained", "l2_normalized")}, None),
-            ("trained", tested, {False: store_path(root, "trained", "scrambled")}, scrambled),
-            ("untrained", tested, {False: store_path(root, "untrained", "original"), True: store_path(root, "untrained", "l2_normalized")}, None),
-            ("untrained", tested, {False: store_path(root, "untrained", "scrambled")}, scrambled),
-        ]
+    With a `foundry.pilot.Pilot`, only the first pass runs, under the pilot's watch, and its store is left incomplete.
+    """
+    passes = store_passes(datasets, root, controls, seed)
+    if pilot is not None:
+        pilot.total_steps = sum(len(token_batches(sorted(set(sequences), key=len, reverse=True), max_tokens)) for _, sequences, _, _ in passes)
+        _, sequences, roots, _ = passes[0]
+        embed_pooled(model, tokenizer, sequences, spec, roots, model_name, "trained", max_tokens, device, watch=pilot.watch)
+        return
     untrained = None
     for plm, sequences, roots, transform in passes:
         if all((path / "manifest.json").exists() for path in roots.values()):
@@ -137,13 +163,23 @@ def write_stores(
         print(f"{variant}: {len(sequences)} sequences in {time.time() - started:.0f} s")
 
 
+def make_pilot(folder: Path, name: str, item_unit: str, items: Callable[[TokenBatch], int]) -> object:
+    from foundry.pilot import Pilot
+
+    folder.mkdir(parents=True, exist_ok=True)
+    return Pilot(items=items, item_unit=item_unit, receipt=folder / f"pilot_{name}.json")
+
+
 def command_embed(args: argparse.Namespace) -> None:
+    pilot = None
+    if args.pilot:
+        pilot = make_pilot(Path(args.root), "embed", "tokens", lambda batch: len(batch.sequences) * batch.padded_length)
     device = torch.device(args.device)
     spec = TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=not args.no_heads)
     tasks = [name for name in parse_tasks(args.tasks) if name in PROTEIN_TASKS]
     datasets = load_tasks(tasks, args)
     model, tokenizer = load_model(args.model, device)
-    write_stores(model, tokenizer, args.model, datasets, Path(args.root), spec, args.controls, args.seed, args.max_tokens, device)
+    write_stores(model, tokenizer, args.model, datasets, Path(args.root), spec, args.controls, args.seed, args.max_tokens, device, pilot)
 
 
 def training_settings(args: argparse.Namespace) -> TrainingSettings:
@@ -183,11 +219,26 @@ def train_tasks(
     read_model: Callable[[], tuple[torch.nn.Module, object]],
     overwrite: bool = False,
     meta: dict[str, object] | None = None,
+    pilot: object | None = None,
+    sweep: bool = False,
 ) -> None:
-    """Train and score every probe of each task, writing `root/results/<label>/<task>/`; finished tasks are skipped."""
+    """Train and score every probe of each task, writing `root/results/<label>/<task>/`; finished tasks are skipped.
+
+    With `sweep`, every grid setting is kept and scored on the validation split alone, and each task writes
+    `root/sweeps/<label>/<task>/sweep.parquet` (see `selection`). With a `foundry.pilot.Pilot`, the first residue
+    task trains under the pilot's watch for one window, and nothing is written.
+    """
     model = tokenizer = None
+    if pilot is not None:
+        name = next(name for name in tasks if read_task(name).task.level == "residue")
+        data = read_task(name)
+        model, tokenizer = read_model()
+        pilot.total_steps = len(token_batches(data.splits["train"].sequences, settings.max_tokens))
+        layouts = site_layouts(spec, model_dims(model))
+        train_residue_task(model, tokenizer, spec, layouts, data, settings, device, watch=pilot.watch)
+        return
     for name in tasks:
-        folder = root / "results" / label / name
+        folder = root / ("sweeps" if sweep else "results") / label / name
         if (folder / "run.json").exists() and not overwrite:
             print(f"have {folder}")
             continue
@@ -196,13 +247,20 @@ def train_tasks(
         started = time.time()
         if data.task.level == "protein":
             store = PooledTapStore(store_path(root, "trained", "original"))
-            controls = control_stores(root) if settings.controls else None
-            results = train_protein_task(data, store, stored_layouts(store, spec), settings, device, controls, save_weights=weights)
+            layouts = stored_layouts(store, spec)
+            if sweep:
+                results = sweep_protein_task(data, store, layouts, settings, device)
+            else:
+                controls = control_stores(root) if settings.controls else None
+                results = train_protein_task(data, store, layouts, settings, device, controls, save_weights=weights)
         else:
             if model is None:
                 model, tokenizer = read_model()
             layouts = site_layouts(spec, model_dims(model))
-            results = train_residue_task(model, tokenizer, spec, layouts, data, settings, device, save_weights=weights)
+            if sweep:
+                results = sweep_residue_task(model, tokenizer, spec, layouts, data, settings, device)
+            else:
+                results = train_residue_task(model, tokenizer, spec, layouts, data, settings, device, save_weights=weights)
         elapsed = time.time() - started
         record = {
             "task": asdict(data.task),
@@ -212,11 +270,24 @@ def train_tasks(
             "rows": {split: len(part.sequences) for split, part in data.splits.items()},
             **(meta or {}),
         }
-        write_results(folder, results, weights, record)
+        if sweep:
+            write_sweep(folder, results, record)
+        else:
+            write_results(folder, results, weights, record)
         print(f"{name}: {elapsed:.0f} s -> {folder}")
 
 
+def write_sweep(folder: Path, results: TaskResults, meta: dict[str, object]) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    results.sweep_frame().to_parquet(folder / "sweep.parquet", index=False)
+    # run.json last: its presence marks a finished task
+    (folder / "run.json").write_text(json.dumps(meta, indent=2, default=str), encoding="utf-8", newline="\n")
+
+
 def command_train(args: argparse.Namespace) -> None:
+    pilot = None
+    if args.pilot:
+        pilot = make_pilot(Path(args.root), args.command, "tokens", lambda batch: len(batch.sequences) * batch.padded_length)
     device = torch.device(args.device)
     torch.backends.cuda.matmul.allow_tf32 = True
     spec = TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=not args.no_heads)
@@ -231,7 +302,43 @@ def command_train(args: argparse.Namespace) -> None:
         read_model=lambda: load_model(args.model, device),
         overwrite=args.overwrite,
         meta={"model": args.model, "repo": args.repo, "revision": args.revision, "local_data": args.local_data},
+        pilot=pilot,
+        sweep=args.command == "sweep",
     )
+
+
+def command_select(args: argparse.Namespace) -> None:
+    root = Path(args.root)
+    sweeps = read_sweeps(root, args.labels)
+    ranked = rank_settings(sweeps)
+    chosen = choose_setting(ranked, args.tolerance)
+    with pd.option_context("display.width", 200, "display.max_columns", 20):
+        print(ranked.head(args.show).to_string(index=False))
+        print("\nEach task's own best setting:")
+        print(task_optima(sweeps).to_string(index=False))
+    choice = {name: (value.item() if hasattr(value, "item") else value) for name, value in chosen.items()}
+    print(f"\nchosen: {choice}")
+    out = Path(args.out) if args.out else root / "sweeps" / f"selection_{'_'.join(args.labels)}.json"
+    record = {"labels": list(args.labels), "tolerance": args.tolerance, "chosen": choice, "ranking": ranked.to_dict(orient="records")}
+    out.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8", newline="\n")
+
+
+def command_phospho(args: argparse.Namespace) -> None:
+    device = torch.device(args.device)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    spec = TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=False)
+    data = load_concept("phosphorylation", repo=args.repo, revision=args.revision, local_dir=args.local_data)
+    # float32 weights: mutants of one protein differ by about a part in a thousand in their pooled states
+    model, tokenizer = load_model(args.model, device, torch.float32)
+    untrained = untrained_copy(model, args.seed)
+    folder = Path(args.root) / "interventions" / args.label
+    scores = run_phospho_interventions(
+        model, untrained, tokenizer, data, spec, folder / "proteins", device,
+        proteins=args.proteins, seed=args.data_seed, iterations=args.iterations, max_tokens=args.max_tokens,
+    )
+    scores.to_parquet(folder / "scores.parquet", index=False)
+    paired_tests(scores).to_parquet(folder / "tests.parquet", index=False)
+    print(f"{scores['protein'].nunique()} proteins -> {folder}")
 
 
 def command_tokens(args: argparse.Namespace) -> None:
@@ -254,6 +361,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
         sub.add_argument("--seed", type=int, default=24895)
         sub.add_argument("--max-tokens", type=int, default=65536, help="padded tokens per embedding batch")
+        sub.add_argument("--pilot", action="store_true", help="time the first steps (foundry.pilot), write the report under --root, and stop")
 
     embed = commands.add_parser("embed", help="write the pooled tap stores of the protein tasks")
     common(embed)
@@ -265,27 +373,50 @@ def build_parser() -> argparse.ArgumentParser:
     embed.add_argument("--local-data", default=None)
     embed.set_defaults(handler=command_embed)
 
-    train = commands.add_parser("train", help="train and score every probe of each task")
-    common(train)
-    train.add_argument("--root", required=True)
-    train.add_argument("--label", default="linear", help="results subfolder, so settings can be compared")
-    train.add_argument("--tasks", default="all")
-    train.add_argument("--repo", default=DEFAULT_REPO)
-    train.add_argument("--revision", default=None)
-    train.add_argument("--local-data", default=None)
-    train.add_argument("--lr", type=float, nargs="+", default=[1e-3])
-    train.add_argument("--wd", type=float, nargs="+", default=[1e-4])
-    train.add_argument("--batch-size", type=int, default=64, help="proteins per step, protein tasks")
-    train.add_argument("--train-tokens", type=int, default=32768, help="padded tokens per step, residue tasks")
-    train.add_argument("--max-epochs", type=int, default=50)
-    train.add_argument("--patience", type=int, default=5)
-    train.add_argument("--validate-every", type=int, default=0, help="steps between validations; 0 is once per epoch")
-    train.add_argument("--probe", choices=("linear", "mlp"), default="linear")
-    train.add_argument("--hidden", type=int, default=512)
-    train.add_argument("--dropout", type=float, default=0.1)
-    train.add_argument("--no-controls", action="store_true")
-    train.add_argument("--overwrite", action="store_true")
-    train.set_defaults(handler=command_train)
+    def training(sub: argparse.ArgumentParser) -> None:
+        common(sub)
+        sub.add_argument("--root", required=True)
+        sub.add_argument("--label", default="linear", help="results subfolder, so settings can be compared")
+        sub.add_argument("--tasks", default="all")
+        sub.add_argument("--repo", default=DEFAULT_REPO)
+        sub.add_argument("--revision", default=None)
+        sub.add_argument("--local-data", default=None)
+        sub.add_argument("--lr", type=float, nargs="+", default=[1e-3])
+        sub.add_argument("--wd", type=float, nargs="+", default=[1e-4])
+        sub.add_argument("--batch-size", type=int, default=64, help="proteins per step, protein tasks")
+        sub.add_argument("--train-tokens", type=int, default=32768, help="padded tokens per step, residue tasks")
+        sub.add_argument("--max-epochs", type=int, default=50)
+        sub.add_argument("--patience", type=int, default=5)
+        sub.add_argument("--validate-every", type=int, default=0, help="steps between validations; 0 is once per epoch")
+        sub.add_argument("--probe", choices=("linear", "mlp"), default="linear")
+        sub.add_argument("--hidden", type=int, default=512)
+        sub.add_argument("--dropout", type=float, default=0.1)
+        sub.add_argument("--no-controls", action="store_true")
+        sub.add_argument("--overwrite", action="store_true")
+        sub.set_defaults(handler=command_train)
+
+    training(commands.add_parser("train", help="train and score every probe of each task"))
+    training(commands.add_parser("sweep", help="train every probe under every --lr and --wd setting and score each on validation"))
+
+    select = commands.add_parser("select", help="choose one global setting from the sweeps of one or more labels")
+    select.add_argument("--root", required=True)
+    select.add_argument("--labels", nargs="+", required=True, help="sweep labels to compare, such as one per batch size")
+    select.add_argument("--tolerance", type=float, default=0.005, help="mean validation shortfall a faster label may give up")
+    select.add_argument("--show", type=int, default=20, help="ranked settings to print")
+    select.add_argument("--out", default=None, help="where to write the selection; default root/sweeps/selection_<labels>.json")
+    select.set_defaults(handler=command_select)
+
+    phospho = commands.add_parser("phospho", help="phosphomimetic scanning: logistic probes of mutant activity on every site and layer")
+    common(phospho)
+    phospho.add_argument("--root", required=True)
+    phospho.add_argument("--label", default="phospho")
+    phospho.add_argument("--repo", default=DEFAULT_REPO)
+    phospho.add_argument("--revision", default=None)
+    phospho.add_argument("--local-data", default=None)
+    phospho.add_argument("--proteins", type=int, default=1000, help="phosphoproteins drawn at random")
+    phospho.add_argument("--data-seed", type=int, default=184502, help="seed of the protein draw and each protein's split")
+    phospho.add_argument("--iterations", type=int, default=350, help="L-BFGS iterations of the logistic regressions")
+    phospho.set_defaults(handler=command_phospho)
 
     tokens = commands.add_parser("tokens", help="write token-wise taps of chosen sites for a list of sequences")
     common(tokens)

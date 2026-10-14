@@ -16,7 +16,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from torch import Tensor, nn
@@ -24,7 +24,7 @@ from tqdm.auto import tqdm
 
 from .capture import model_dims, tap_hooks
 from .sites import ModelDims, SiteLayout, TapSpec, site_layouts
-from .token_batches import token_batches
+from .token_batches import TokenBatch, token_batches
 
 
 STORE_FORMAT = "protify_pooled_taps_v1"
@@ -142,9 +142,12 @@ class PooledStoreWriter:
         bits = pooled.detach().to("cpu", torch.bfloat16).contiguous().view(torch.uint16).numpy()  # (b, L_s, 2 * w)
         self.arrays[site][row_start: row_start + bits.shape[0]] = bits
 
-    def close(self) -> None:
+    def close(self, complete: bool = True) -> None:
+        """Flush every file; only a complete store gets its manifest, which is what marks a store readable."""
         for array in self.arrays.values():
             array.flush()
+        if not complete:
+            return
         temporary = self.root / "manifest.json.tmp"
         temporary.write_text(json.dumps(asdict(self.manifest), indent=2), encoding="utf-8", newline="\n")
         temporary.replace(self.root / "manifest.json")
@@ -164,12 +167,15 @@ def embed_pooled(
     progress: bool = True,
     transform: Callable[[str], str] | None = None,
     seed: int | None = None,
-) -> None:
+    watch: Callable[[Iterable[TokenBatch]], Iterable[TokenBatch]] | None = None,
+) -> int:
     """Write pooled stores of `sequences` in one pass: raw states at `roots[False]`, L2-normalized at `roots[True]`.
 
     Sequences are embedded longest first in batches of at most `max_tokens` padded tokens, and stored in that order.
     A `transform` (a length-preserving change such as a scramble) changes what the model reads; rows stay keyed by
-    the original sequence, and the manifest records the transform's `seed` so its targets can be recomputed.
+    the original sequence, and the manifest records the transform's `seed` so its targets can be recomputed. `watch`
+    wraps the batches, as `foundry.pilot.Pilot.watch` does; a store it ends early gets no manifest. Returns the rows
+    written.
     """
     dims = model_dims(model)
     layouts = site_layouts(spec, dims)
@@ -192,7 +198,7 @@ def embed_pooled(
 
     bar = tqdm(batches, desc=f"Pooling taps ({variant})", disable=not progress, mininterval=10)
     with tap_hooks(model, spec, pool):
-        for batch in bar:
+        for batch in (watch(bar) if watch is not None else bar):
             fed = [transform(sequence) for sequence in batch.sequences] if transform is not None else batch.sequences
             encoded = encode_batch(tokenizer, fed, device)
             mask = encoded["attention_mask"]  # (b, l)
@@ -208,7 +214,8 @@ def embed_pooled(
                     writer.write(name, row_start, pooled)
             row_start += size
     for writer in writers.values():
-        writer.close()
+        writer.close(complete=row_start == len(ordered))
+    return row_start
 
 
 def encode_batch(tokenizer: object, sequences: Sequence[str], device: torch.device | str) -> dict[str, Tensor]:

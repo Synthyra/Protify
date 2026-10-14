@@ -16,12 +16,15 @@ try:
     from src.protify.base_models.esmc import get_esmc_tokenizer
     from src.protify.interpretability.capture import capture_states, model_dims
     from src.protify.interpretability.cli import STORE_VARIANTS, store_path, train_tasks, write_stores
-    from src.protify.interpretability.concepts import load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
+    from src.protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
+    from src.protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
+    from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from src.protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
     from src.protify.interpretability.probe_bank import ProbeBank, ProbeSettings
-    from src.protify.interpretability.protein_probing import head_view
+    from src.protify.interpretability.protein_probing import head_view, score_bank, validation_loss
     from src.protify.interpretability.residue_probing import untrained_copy
     from src.protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, multiclass_mcc
+    from src.protify.interpretability.selection import choose_setting, rank_settings, read_sweeps
     from src.protify.interpretability.sites import ALL_SITES, ModelDims, TapSpec, parse_sites, site_layouts
     from src.protify.interpretability.token_batches import SPECIAL_TOKENS, token_batches
     from src.protify.interpretability.token_store import TokenTapStore, embed_tokens
@@ -30,12 +33,15 @@ except ImportError:
     from protify.base_models.esmc import get_esmc_tokenizer
     from protify.interpretability.capture import capture_states, model_dims
     from protify.interpretability.cli import STORE_VARIANTS, store_path, train_tasks, write_stores
-    from protify.interpretability.concepts import load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
+    from protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
+    from protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
+    from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
     from protify.interpretability.probe_bank import ProbeBank, ProbeSettings
-    from protify.interpretability.protein_probing import head_view
+    from protify.interpretability.protein_probing import head_view, score_bank, validation_loss
     from protify.interpretability.residue_probing import untrained_copy
     from protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, multiclass_mcc
+    from protify.interpretability.selection import choose_setting, rank_settings, read_sweeps
     from protify.interpretability.sites import ALL_SITES, ModelDims, TapSpec, parse_sites, site_layouts
     from protify.interpretability.token_batches import SPECIAL_TOKENS, token_batches
     from protify.interpretability.token_store import TokenTapStore, embed_tokens
@@ -329,6 +335,39 @@ def test_probe_bank_adamw_matches_torch() -> None:
                 torch.testing.assert_close(bank.params[name][group], value.detach(), rtol=1e-5, atol=1e-7)
 
 
+@pytest.mark.parametrize("heads", [1, 4])
+def test_shared_input_probes_match_the_per_group_path(heads: int) -> None:
+    generator = torch.Generator().manual_seed(8)
+    settings = TrainingSettings(learning_rates=(1e-2, 1e-3), weight_decays=(0.0,))
+    layers, width, outputs, rows, slot = 3, 16, 5, 64, 1
+    head_width = width // heads
+    names = [f"s:{layer}:h{head}" for layer in range(layers) for head in range(heads)]
+    bank = make_bank(names, head_width, outputs, "multiclass", settings, seed=0, device=CPU)
+    mean = torch.randn(len(names), head_width, generator=generator)
+    variance = torch.rand(len(names), head_width, generator=generator) + 0.5
+    bank.set_standardization(mean.repeat(2, 1), variance.repeat(2, 1))
+    reference = ProbeBank(bank.names, head_width, outputs, "multiclass", bank.settings, bank.learning_rates, bank.weight_decays, seed=0, device=CPU)
+    reference.params = {name: value.clone() for name, value in bank.params.items()}
+    reference.set_standardization(mean.repeat(2, 1), variance.repeat(2, 1))
+    X = (2.0 * torch.randn(rows, width, generator=generator) + 1.0).to(torch.bfloat16)  # (n, w), as a hook delivers it
+    targets = torch.randint(0, outputs, (rows,), generator=generator)
+    index = torch.tensor([setting * layers * heads + slot * heads + head for setting in range(2) for head in range(heads)])
+    starts = [setting * layers * heads + slot * heads for setting in range(2)]
+    grouped = X.float().view(rows, heads, head_width)  # (n, H, d)
+
+    losses = bank.shared_accumulate(X, targets, index, heads)
+    expected = torch.cat([reference.accumulate(grouped, targets, start, start + heads) for start in starts])
+    torch.testing.assert_close(losses, expected, rtol=2e-2, atol=2e-3)
+    for name in ("weight", "bias"):
+        torch.testing.assert_close(bank.grads[name], reference.grads[name], rtol=5e-2, atol=2e-3)
+    Z = bank.shared_logits(X, index, heads)  # (n, K * H, C)
+    expected_Z = torch.cat([reference.logits(grouped, start, start + heads) for start in starts], dim=1)
+    torch.testing.assert_close(Z, expected_Z, rtol=2e-2, atol=3e-2)
+    sums = bank.shared_loss_sums(X, targets, index, heads)
+    expected_sums = torch.cat([reference.loss_sums(grouped, targets, start, start + heads) for start in starts])
+    torch.testing.assert_close(sums, expected_sums, rtol=2e-2, atol=1e-1)
+
+
 def test_observe_keeps_best_weights_and_stops_after_patience() -> None:
     bank = ProbeBank(["a", "b"], 3, 2, "multiclass", ProbeSettings(), torch.full((2,), 1e-2), torch.zeros(2), seed=0, device=CPU)
     assert bank.observe(torch.tensor([1.0, 1.0]), patience=2) == 2
@@ -441,6 +480,17 @@ def test_untrained_copy_resets_every_parameter(tiny_model: ESMplusplusModel) -> 
 # -- end to end ----------------------------------------------------------------------------------------------------
 
 
+def conditions_of(scores: pd.DataFrame) -> set[tuple[str, str, str]]:
+    return set(zip(scores["plm"], scores["probe"], scores["control"]))
+
+
+def headline_scores(scores: pd.DataFrame) -> pd.Series:
+    """Each probe's full-test score with the trained model, the trained probe and the original input."""
+    # Bracket access throughout: `frame.resample` is a DataFrame method, not the column.
+    kept = (scores["plm"] == "trained") & (scores["probe"] == "trained") & (scores["control"] == "original") & (scores["resample"] == 0)
+    return scores[kept].set_index("probe_name")["score"]
+
+
 def test_protein_tasks_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
     synthetic_dataset(tmp_path / "data")
     names = ["localization", "prot_param", "go_cc", "metal_ion_binding"]
@@ -457,18 +507,17 @@ def test_protein_tasks_end_to_end(tiny_model: ESMplusplusModel, tokenizer: objec
     for name in names:
         folder = root / "results" / "linear" / name
         scores = pd.read_parquet(folder / "scores.parquet")
-        full = scores[scores.family == "full"]
-        conditions = set(zip(full.plm, full.probe, full.control))
-        assert conditions == {(plm, probe, control) for plm in PLM_STATES for probe in PROBE_STATES for control in CONTROLS}
-        heads = scores[scores.family == "head"]
-        assert set(heads.probe_name) == {f"q:{layer}:h{head}" for layer in range(3) for head in range(4)}
-        assert set(zip(heads.plm, heads.probe, heads.control)) == {("trained", "trained", "original")}
-        assert np.isfinite(scores.score).all()
-        headline = full[(full.plm == "trained") & (full.probe == "trained") & (full.control == "original") & (full.resample == 0)]
-        assert set(headline.probe_name) == {"embedding:0", "q:0", "q:1", "q:2", "mlp_act:0", "mlp_act:1", "mlp_act:2", "resid_post:0", "resid_post:1", "resid_post:2"}
-        assert headline.set_index("probe_name").score["embedding:0"] > 0.8, name
+        full = scores[scores["family"] == "full"]
+        assert conditions_of(full) == {(plm, probe, control) for plm in PLM_STATES for probe in PROBE_STATES for control in CONTROLS}
+        heads = scores[scores["family"] == "head"]
+        assert set(heads["probe_name"]) == {f"q:{layer}:h{head}" for layer in range(3) for head in range(4)}
+        assert conditions_of(heads) == {("trained", "trained", "original")}
+        assert np.isfinite(scores["score"]).all()
+        headline = headline_scores(full)
+        assert set(headline.index) == {"embedding:0", "q:0", "q:1", "q:2", "mlp_act:0", "mlp_act:1", "mlp_act:2", "resid_post:0", "resid_post:1", "resid_post:2"}
+        assert headline["embedding:0"] > 0.8, name
         training = pd.read_parquet(folder / "training.parquet")
-        assert set(training.learning_rate) <= {3e-2, 3e-3}
+        assert set(training["learning_rate"]) <= {3e-2, 3e-3}
         weights = load_file(str(folder / "probes.safetensors"))
         outputs = datasets[name].task.outputs
         assert weights["embedding.full.best.weight"].shape == (1, 128, outputs)
@@ -477,9 +526,71 @@ def test_protein_tasks_end_to_end(tiny_model: ESMplusplusModel, tokenizer: objec
         assert record["rows"] == {"train": 90, "validation": 30, "test": 30}
     for name in ("prot_param", "go_cc"):
         elementwise = pd.read_parquet(root / "results" / "linear" / name / "elementwise.parquet")
-        assert set(elementwise.label_index) == set(range(datasets[name].task.outputs))
+        assert set(elementwise["label_index"]) == set(range(datasets[name].task.outputs))
     # A second call finds every task finished and trains nothing.
     train_tasks(names, root, "linear", spec, settings, CPU, read_task=lambda name: pytest.fail("retrained"), read_model=lambda: pytest.fail("reloaded"))
+
+
+def test_protein_shared_path_matches_the_per_group_path() -> None:
+    generator = torch.Generator().manual_seed(11)
+    settings = TrainingSettings(learning_rates=(1e-2, 1e-3), weight_decays=(0.0,))
+    probes, width, outputs, rows = 3, 8, 4, 40
+    bank = make_bank([f"s:{layer}" for layer in range(probes)], width, outputs, "multilabel", settings, seed=0, device=CPU)
+    mean = torch.randn(probes, width, generator=generator)
+    variance = torch.rand(probes, width, generator=generator) + 0.5
+    bank.set_standardization(mean.repeat(2, 1), variance.repeat(2, 1))
+    X = (torch.randn(rows, probes, width, generator=generator) + mean).to(torch.bfloat16)  # (n, P, w), as a store holds it
+    targets = (torch.rand(rows, outputs, generator=generator) > 0.6).float()
+    shared = validation_loss(bank, X, targets, settings_count=2, batch=16)  # the shared-input path of a linear bank
+    per_group = torch.cat([bank.loss_sums(X.float(), targets, start, start + probes) for start in (0, probes)]) / (rows * outputs)
+    torch.testing.assert_close(shared, per_group, rtol=2e-2, atol=2e-3)
+    plan = ResamplePlan.draw(rows, count=0)
+    fused, reference = (ScoreAccumulator("multilabel", bank.groups, outputs, plan, per_label=False) for _ in range(2))
+    score_bank(bank, "current", X, targets, fused)
+    reference.add(torch.cat([bank.logits(X.float(), start, start + probes) for start in (0, probes)], dim=1), targets, torch.arange(rows))
+    torch.testing.assert_close(fused.scores(), reference.scores(), rtol=0, atol=0.1)
+
+
+def test_selection_prefers_the_fastest_label_within_tolerance() -> None:
+    rows = []
+    for label, seconds, lift in (("slow", 100.0, 0.0), ("fast", 30.0, -0.002)):
+        for task in ("a", "b"):
+            for rate, score in ((1e-3, 0.80), (1e-2, 0.70)):
+                for probe in ("p:0", "p:1"):
+                    rows.append({"label": label, "task": task, "family": "full", "probe_name": probe, "learning_rate": rate,
+                                 "weight_decay": 0.0, "validation_score": score + lift, "task_seconds": seconds / 2,
+                                 "batch_size": 64 if label == "slow" else 512, "max_tokens": 0})
+    sweeps = pd.DataFrame(rows)
+    ranked = rank_settings(sweeps)
+    assert ranked.iloc[0]["label"] == "slow" and ranked.iloc[0]["learning_rate"] == 1e-3
+    assert ranked.iloc[0]["mean_shortfall"] == pytest.approx(0.0)
+    assert ranked.set_index(["label", "learning_rate"]).loc[("fast", 1e-3), "seconds"] == pytest.approx(30.0)
+    assert choose_setting(ranked, tolerance=0.005)["label"] == "fast"
+    assert choose_setting(ranked, tolerance=0.001)["label"] == "slow"
+
+
+def test_sweep_then_select(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path / "data")
+    names = ["localization", "go_cc", "ssp_q3"]
+    datasets = {name: load_concept(name, local_dir=tmp_path / "data") for name in names}
+    spec = TapSpec(sites=("embedding", "q", "resid_post"))
+    root = tmp_path / "run"
+    write_stores(tiny_model, tokenizer, "tiny", {name: datasets[name] for name in names[:2]}, root, spec, controls=False, seed=0, max_tokens=256, device=CPU)
+    grid = {"learning_rates": (3e-2, 3e-3), "weight_decays": (0.0, 0.1)}
+    for label, batch in (("b16", 16), ("b32", 32)):
+        settings = TrainingSettings(**grid, batch_size=batch, max_tokens=300, max_epochs=8, patience=4, controls=False)
+        train_tasks(names, root, label, spec, settings, CPU, read_task=datasets.__getitem__, read_model=lambda: (tiny_model, tokenizer), sweep=True)
+    sweep = pd.read_parquet(root / "sweeps" / "b16" / "go_cc" / "sweep.parquet")
+    assert len(sweep) == 4 * (1 + 3 + 3 + 3 * 4)  # every grid setting of embedding, q, resid_post, and q's heads
+    assert set(zip(sweep["learning_rate"], sweep["weight_decay"])) == {(3e-2, 0.0), (3e-2, 0.1), (3e-3, 0.0), (3e-3, 0.1)}
+    assert np.isfinite(sweep["validation_score"]).all()
+    assert not (root / "results").exists()  # a sweep scores validation only and writes no results
+    residue = pd.read_parquet(root / "sweeps" / "b16" / "ssp_q3" / "sweep.parquet")
+    assert len(residue) == 4 * (1 + 3 + 3 + 3 * 4)
+    assert residue[residue["probe_name"] == "embedding:0"]["validation_score"].max() > 0.9
+    ranked = rank_settings(read_sweeps(root, ["b16", "b32"]))
+    assert len(ranked) == 8 and set(ranked["tasks"]) == {3}
+    assert ranked["mean_shortfall"].min() >= 0.0
 
 
 def test_residue_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
@@ -491,14 +602,125 @@ def test_residue_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object
     train_tasks(["ssp_q3"], root, "linear", spec, settings, CPU, read_task=lambda name: data, read_model=lambda: (tiny_model, tokenizer))
     folder = root / "results" / "linear" / "ssp_q3"
     scores = pd.read_parquet(folder / "scores.parquet")
-    full = scores[scores.family == "full"]
-    assert set(zip(full.plm, full.probe, full.control)) == {
-        (plm, probe, control) for plm in PLM_STATES for probe in PROBE_STATES for control in CONTROLS
-    }
-    headline = full[(full.plm == "trained") & (full.probe == "trained") & (full.control == "original") & (full.resample == 0)]
-    assert headline.set_index("probe_name").score["embedding:0"] > 0.9
-    heads = scores[scores.family == "head"]
-    assert set(heads.probe_name) == {f"k_rot:{layer}:h{head}" for layer in range(3) for head in range(4)}
+    full = scores[scores["family"] == "full"]
+    assert conditions_of(full) == {(plm, probe, control) for plm in PLM_STATES for probe in PROBE_STATES for control in CONTROLS}
+    assert headline_scores(full)["embedding:0"] > 0.9
+    heads = scores[scores["family"] == "head"]
+    assert set(heads["probe_name"]) == {f"k_rot:{layer}:h{head}" for layer in range(3) for head in range(4)}
     weights = load_file(str(folder / "probes.safetensors"))
     assert weights["mlp_gate.full.best.weight"].shape == (3, 256, 3)
     assert weights["k_rot.head.best.weight"].shape == (12, 16, 3)
+
+
+# -- interventions and latent views --------------------------------------------------------------------------------
+
+
+PHOSPHO_NAMES = ("-", "5-glutamyl_glycerylphosphorylethanolamine", "Phosphohistidine", "Phosphoserine", "Phosphothreonine", "Phosphotyrosine")
+
+
+def phospho_task(proteins: list[tuple[str, str, list[int]]]) -> ConceptData:
+    """A phosphorylation task holding every protein in each split, as (id, sequence, per-residue labels)."""
+    task = ConceptTask("phosphorylation", "residue", "multiclass", len(PHOSPHO_NAMES), PHOSPHO_NAMES)
+    split = ConceptSplit(
+        ids=[protein_id for protein_id, _, _ in proteins],
+        sequences=[sequence for _, sequence, _ in proteins],
+        labels=[np.asarray(labels) for _, _, labels in proteins],
+    )
+    return ConceptData(task, {"train": split, "validation": ConceptSplit([], [], []), "test": ConceptSplit([], [], [])})
+
+
+def test_scanning_mutants_label_the_predicted_outcome() -> None:
+    sequences, classes = scanning_mutants(PhosphoProtein("p", "MSTAY", (1,)))
+    assert sequences[0] == "MSTAY" and classes[0] == ACTIVE
+    assert len(sequences) == 1 + 3 * 3
+    labelled = dict(zip(sequences[1:], classes[1:].tolist()))
+    assert (labelled["MATAY"], labelled["MGTAY"], labelled["METAY"]) == (INACTIVE, INACTIVE, ACTIVE)
+    assert {labelled[sequence] for sequence in ("MSAAY", "MSGAY", "MSEAY", "MSTAA", "MSTAG", "MSTAE")} == {UNKNOWN}
+
+
+def test_phosphoproteins_keep_annotated_s_t_and_y() -> None:
+    data = phospho_task([
+        ("a", "MSTY", [0, 3, 0, 5]),  # phosphoserine at 1, phosphotyrosine at 3
+        ("b", "MKKK", [0, 0, 0, 0]),  # no site
+        ("c", "MSHS", [0, 0, 2, 4]),  # a phosphohistidine, and a threonine label on a serine: neither counts
+        ("d", "MSTY", [0, 3, 0, 0]),  # a repeat of a's sequence
+    ])
+    assert phosphoproteins(data) == [PhosphoProtein("a", "MSTY", (1, 3))]
+
+
+def test_pooled_means_match_a_masked_mean(tiny_model: ESMplusplusModel, tokenizer: object) -> None:
+    sequences = ["MKTAYIAK", "MSEQ", "MLLAVLYC"]
+    spec = TapSpec(sites=("embedding", "attn_out", "mlp_act", "resid_post"), per_head=False)
+    pooled = pooled_means(tiny_model, tokenizer, sequences, spec, CPU, max_tokens=30)  # one padded batch
+    layouts = site_layouts(spec, model_dims(tiny_model))
+    for index, sequence in enumerate(sequences):
+        encoded = tokenizer([sequence], return_tensors="pt")
+        states = capture_states(tiny_model, encoded["input_ids"], encoded["attention_mask"], spec)
+        for site, layout in layouts.items():
+            expected = torch.stack([states[(site, layer)][0].mean(dim=0) for layer in layout.layers])  # (L, w)
+            torch.testing.assert_close(pooled[site][index], expected, rtol=1e-4, atol=1e-5)
+
+
+def test_fit_logistic_matches_sklearn() -> None:
+    from sklearn.linear_model import LogisticRegression
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(60, 5))
+    y = rng.integers(0, 3, size=60)
+    X[:, 0] += y  # a weak signal, so the penalty matters
+    reference = LogisticRegression(C=1.0, max_iter=2000, tol=1e-10).fit(X, y)
+    X_groups = torch.tensor(X, dtype=torch.float32).unsqueeze(0).repeat(2, 1, 1)  # two identical probes
+    weight, bias = fit_logistic(X_groups, torch.from_numpy(y), classes=3, iterations=500)
+    probabilities = torch.softmax(torch.baddbmm(bias, X_groups, weight), dim=-1)  # (2, 60, 3)
+    for group in range(2):
+        np.testing.assert_allclose(probabilities[group].numpy(), reference.predict_proba(X), atol=2e-3)
+
+
+def test_phospho_interventions_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    rng = np.random.default_rng(3)
+    proteins = []
+    for index in range(3):
+        sequence = "M" + "".join(rng.choice(list("STYAKLE"), size=23))
+        stys = [position for position, residue in enumerate(sequence) if residue in "STY"]
+        labels = [0] * len(sequence)
+        for position in stys[:2]:
+            labels[position] = PHOSPHO_NAMES.index({"S": "Phosphoserine", "T": "Phosphothreonine", "Y": "Phosphotyrosine"}[sequence[position]])
+        proteins.append((f"p{index}", sequence, labels))
+    data = phospho_task(proteins)
+    spec = TapSpec(sites=("embedding", "mlp_act", "resid_post"), per_head=False)
+    untrained = untrained_copy(tiny_model, seed=0)
+    out = tmp_path / "phospho"
+    scores = run_phospho_interventions(tiny_model, untrained, tokenizer, data, spec, out, CPU, proteins=2, iterations=40, max_tokens=512)
+    assert scores["protein"].nunique() == 2 and len(list(out.glob("*.parquet"))) == 2
+    assert set(zip(scores["plm"], scores["labels"])) == {("trained", "true"), ("trained", "shuffled"), ("untrained", "true")}
+    assert len(scores) == 2 * 3 * (1 + 3 + 3)  # proteins, conditions, site layers
+    assert scores["mcc"].between(-1.0, 1.0).all()
+    tests = paired_tests(scores)
+    assert len(tests) == 1 + 3 + 3 and tests["p_bonferroni"].between(0.0, 1.0).all()
+    written = {path.name: path.stat().st_mtime_ns for path in out.glob("*.parquet")}
+    again = run_phospho_interventions(tiny_model, untrained, tokenizer, data, spec, out, CPU, proteins=2, iterations=40)
+    assert {path.name: path.stat().st_mtime_ns for path in out.glob("*.parquet")} == written  # resumed, nothing refit
+    pd.testing.assert_frame_equal(again, scores)
+
+
+def test_principal_components_and_layer_projections(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    generator = torch.Generator().manual_seed(4)
+    X = torch.randn(200, 4, generator=generator) * torch.tensor([5.0, 2.0, 0.5, 0.1])  # (n, w), widest along axis 0
+    mean, axes, explained = principal_components(X)
+    assert axes.shape == (4, 2) and float(explained[0]) > float(explained[1]) > 0.0
+    assert abs(float(axes[0, 0])) > 0.95
+    synthetic_dataset(tmp_path / "data")
+    data = load_concept("go_cc", local_dir=tmp_path / "data")
+    spec = TapSpec(sites=("resid_post",))
+    root = tmp_path / "run"
+    write_stores(tiny_model, tokenizer, "tiny", {"go_cc": data}, root, spec, controls=True, seed=0, max_tokens=256, device=CPU)
+    groups = label_sets(data, top=2)
+    assert set(groups.values()) <= {"a rich", "l rich", "none", "other"}
+    test_sequences = data.splits["test"].sequences
+    frame = project_layers(
+        PooledTapStore(store_path(root, "trained", "original")), groups, "resid_post", [0, 2],
+        PooledTapStore(store_path(root, "trained", "scrambled")), test_sequences,
+    )
+    assert len(frame) == 2 * (len(groups) + len(test_sequences))
+    assert (frame["group"] == SCRAMBLED).sum() == 2 * len(test_sequences)
+    assert np.isfinite(frame[["pc1", "pc2", "explained_1", "explained_2"]].to_numpy()).all()

@@ -203,6 +203,80 @@ class ProbeBank:
         loss, _ = self._loss_terms(Z, targets)  # (g,)
         return loss
 
+    # -- linear probes that read one shared input ------------------------------------------------------------------
+    #
+    # A residue batch gives every probe of one layer the same rows: the full-width probe of each grid setting, or each
+    # head's probe of each setting, which reads its head's columns. `index` names those groups setting-major, then
+    # head (K settings times H heads; H is 1 for full-width probes). Their standardizations agree, so the rows are
+    # centered once, the inverse standard deviation is folded into the weights, and all K * H probes run as one
+    # batched bf16 GEMM per direction, with float32 weights, moments and losses. A caller that feeds several banks
+    # the same rows centers them once itself and passes `centered=True`.
+
+    def _shared_operands(
+        self, rows: Tensor, index: Tensor, heads: int, which: str, centered: bool
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        # rows: (n, H * d) -> centered (n, H, d) bf16, folded weights (H, d, K * C), bias (H, K * C), scale (H, d)
+        if self.settings.kind != "linear":
+            raise NotImplementedError("Shared-input probes are linear; MLP probes take the per-group path.")
+        count = index.numel() // heads
+        weights = self._weights(which)
+        scale = self.inverse_std[index].view(count, heads, self.width)[0]  # (H, d), the same in every setting
+        grouped = rows.view(rows.shape[0], heads, self.width)  # (n, H, d)
+        if not centered:
+            mean = self.mean[index].view(count, heads, self.width)[0]  # (H, d)
+            grouped = (grouped - mean.to(rows.dtype)).to(torch.bfloat16)
+        weight = weights["weight"][index].view(count, heads, self.width, self.outputs).permute(1, 2, 0, 3)  # (H, d, K, C)
+        folded = (scale[..., None, None] * weight).reshape(heads, self.width, count * self.outputs)  # (H, d, K * C)
+        bias = weights["bias"][index].view(count, heads, self.outputs).permute(1, 0, 2).reshape(heads, count * self.outputs)
+        return grouped, folded, bias, scale
+
+    def _shared_logits(self, centered: Tensor, folded: Tensor, bias: Tensor) -> Tensor:
+        # centered: (n, H, d) bf16; folded: (H, d, K * C); bias: (H, K * C) -> (n, H, K * C) float32, contiguous
+        # (einsum returns its batched product transposed; the bf16 + float32 sum is written row-major in one pass)
+        product = torch.einsum("nhd,hde->nhe", centered, folded.to(torch.bfloat16))  # (n, H, K * C)
+        return torch.add(product, bias, out=torch.empty(product.shape, dtype=torch.float32, device=product.device))
+
+    def _to_index_order(self, values: Tensor, heads: int) -> Tensor:
+        # values: (H * K, ...) head-major -> (K * H, ...) setting-major, the order of `index`
+        count = values.shape[0] // heads
+        return values.view(heads, count, *values.shape[1:]).transpose(0, 1).reshape(values.shape)
+
+    def shared_logits(self, rows: Tensor, index: Tensor, heads: int, which: str = "current", centered: bool = False) -> Tensor:
+        """Outputs of the groups in `index` for rows they all read: (n, K * H, C), in the order of `index`."""
+        grouped, folded, bias, _ = self._shared_operands(rows, index, heads, which, centered)
+        Z = self._shared_logits(grouped, folded, bias)  # (n, H, K * C)
+        n, count = Z.shape[0], index.numel() // heads
+        return Z.view(n, heads, count, self.outputs).transpose(1, 2).reshape(n, count * heads, self.outputs)
+
+    def shared_loss_sums(
+        self, rows: Tensor, targets: Tensor, index: Tensor, heads: int, which: str = "current", centered: bool = False
+    ) -> Tensor:
+        """Summed loss of the groups in `index` over these rows, in the order of `index`."""
+        grouped, folded, bias, _ = self._shared_operands(rows, index, heads, which, centered)
+        Z = self._shared_logits(grouped, folded, bias)  # (n, H, K * C)
+        loss, _ = self._loss_terms(Z.view(Z.shape[0], -1, self.outputs), targets)  # (H * K,)
+        return self._to_index_order(loss, heads)
+
+    def shared_accumulate(self, rows: Tensor, targets: Tensor, index: Tensor, heads: int, centered: bool = False) -> Tensor:
+        """`accumulate` for the groups in `index`, which all read `rows`. Returns their mean losses, in index order."""
+        # rows: (n, H * d); targets: (n,) or (n, C)
+        n = rows.shape[0]
+        if n == 0:
+            return torch.zeros(index.numel(), device=self.device)
+        count = index.numel() // heads
+        grouped, folded, bias, scale = self._shared_operands(rows, index, heads, "current", centered)
+        Z = self._shared_logits(grouped, folded, bias)  # (n, H, K * C)
+        loss, dZ = self._loss_terms(Z.view(n, heads * count, self.outputs), targets)  # (H * K,), (n, H * K, C)
+        factor = 1.0 / self._denominator(n)
+        dZ = dZ.view(n, heads, count * self.outputs)  # (n, H, K * C), unscaled
+        scaled = torch.mul(dZ, factor, out=torch.empty(dZ.shape, dtype=torch.bfloat16, device=dZ.device))  # one pass
+        d_folded = torch.einsum("nhd,nhe->hde", grouped, scaled).float()  # (H, d, K * C)
+        d_weight = (scale[..., None] * d_folded).view(heads, self.width, count, self.outputs)  # (H, d, K, C)
+        d_bias = (dZ.sum(dim=0) * factor).view(heads, count, self.outputs)  # (H, K, C)
+        self.grads["weight"].index_add_(0, index, d_weight.permute(2, 0, 1, 3).reshape(count * heads, self.width, self.outputs))
+        self.grads["bias"].index_add_(0, index, d_bias.transpose(0, 1).reshape(count * heads, self.outputs))
+        return self._to_index_order(loss, heads) * factor
+
     def step(self) -> None:
         """One AdamW step of every group, with each group's own learning rate and weight decay, then clear grads."""
         self.steps += 1

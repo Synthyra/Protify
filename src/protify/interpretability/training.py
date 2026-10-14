@@ -76,11 +76,15 @@ def make_bank(
 
 @dataclass
 class TaskResults:
-    """Long tables of one task's test scores, elementwise scores and chosen training settings."""
+    """Long tables of one task's test scores, elementwise scores and chosen training settings.
+
+    A sweep fills `sweep` instead: every probe under every grid setting, scored on the validation split only.
+    """
 
     scores: list[pd.DataFrame] = field(default_factory=list)
     elementwise: list[pd.DataFrame] = field(default_factory=list)
     training: list[pd.DataFrame] = field(default_factory=list)
+    sweep: list[pd.DataFrame] = field(default_factory=list)
 
     def add_scores(
         self,
@@ -135,8 +139,38 @@ class TaskResults:
             "epochs": epochs,
         }))
 
+    def add_sweep(
+        self,
+        task: str,
+        family: str,
+        bank: ProbeBank,
+        validation: ScoreAccumulator,
+        settings: TrainingSettings,
+        epochs: int,
+        seconds: float,
+    ) -> None:
+        """One row per group of a bank trained over the whole grid: its setting and its validation score."""
+        pairs = settings.grid()
+        setting = np.arange(bank.groups) // (bank.groups // len(pairs))  # groups are setting-major
+        self.sweep.append(pd.DataFrame({
+            "task": task,
+            "family": family,
+            "probe_name": [name.split("|")[0] for name in bank.names],
+            "learning_rate": [pairs[index][0] for index in setting],
+            "weight_decay": [pairs[index][1] for index in setting],
+            "validation_score": validation.scores()[0].cpu().numpy(),
+            "best_validation_loss": bank.best_loss.cpu().numpy(),
+            "best_step": bank.best_step.cpu().numpy(),
+            "steps": bank.steps,
+            "epochs": epochs,
+            "seconds": seconds,
+        }))
+
     def frames(self) -> dict[str, pd.DataFrame]:
         return {
             name: pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
             for name, parts in (("scores", self.scores), ("elementwise", self.elementwise), ("training", self.training))
         }
+
+    def sweep_frame(self) -> pd.DataFrame:
+        return pd.concat(self.sweep, ignore_index=True) if self.sweep else pd.DataFrame()
