@@ -1,0 +1,80 @@
+# The production sparse-autoencoder recipe.
+#
+# Point it at a dataset and it trains the whole thing: ESMC-6B features through a Biohub
+# sparse autoencoder, max pooled to one vector per protein, joined symmetrically when the
+# dataset is a pair dataset, and fitted by a gradient-boosted tree whose hyperparameters
+# are searched against the validation split.
+#
+#   python src/protify/main.py --yaml_path yamls/production_sae.yaml --data_names <dataset>
+#
+# Why these values and not others:
+#
+# sae_k 16 with sae_codebook_dim 131072 is the sparse corner of Biohub's published grid.
+# Max pooling unions the top-k features of every residue, so sparsity follows k rather
+# than width: this cell pools to about 1% non-zero, where k=512 at the same width reaches
+# 35% and is not sparse in any sense the storage or the learner cares about.
+#
+# probe_type xgboost because a max-pooled codebook entry answers "did this protein express
+# concept j anywhere, and how strongly", which is the question a decision-tree split asks
+# directly.
+#
+# pair_feature_mode minmax because interaction is symmetric and concatenation is not.
+# random_pair_flipping is left off deliberately: under a symmetric row it would emit the
+# row that is already there.
+#
+# tune_estimator because the built-in estimator defaults were selected on one 8192-wide
+# task. The search starts from those defaults, so it can only move away by scoring better
+# on validation.
+#
+# sql because a 131072-wide cache belongs on disk rather than in a process, and the
+# coordinate-list blob format makes it small at this sparsity.
+
+# Paths
+log_dir: logs
+results_dir: results
+model_save_dir: weights
+embedding_save_dir: embeddings
+plots_dir: plots
+
+# Random seeds
+seed: !!int 42
+
+# DataArguments
+max_length: !!int 2048
+trim: !!bool false
+data_names:
+  - rigorous_benchmark
+
+# BaseModelArguments
+model_names:
+  - ESMC-6B-SAE
+sae_layer: !!int 60
+sae_k: !!int 16
+sae_codebook_dim: !!int 131072
+
+# ProbeArguments
+probe_type: xgboost
+estimator_device: auto
+tune_estimator: !!bool true
+tune_trials: !!int 40
+# Two fits per trial, averaged. A single fit lets a configuration win a trial on
+# subsampling luck, and on a small validation split the chosen configuration then fails to
+# reproduce on test.
+tune_seeds: !!int 2
+keep_dead_features: !!bool false
+save_model: !!bool true
+
+# DataArguments, pair handling
+pair_feature_mode: minmax
+random_pair_flipping: !!bool false
+
+# EmbeddingArguments
+embedding_batch_size: !!int 8
+matrix_embed: !!bool false
+embedding_pooling_types:
+  - max
+save_embeddings: !!bool true
+sql: !!bool true
+
+# TrainerArguments
+num_runs: !!int 3

@@ -1,7 +1,8 @@
 """Tests for probes/get_probe.py factory dispatch and probe forward passes."""
 
-import torch
 import pytest
+import torch
+
 
 try:
     from src.protify.probes.get_probe import ProbeArguments, get_probe, rebuild_probe_from_saved_config

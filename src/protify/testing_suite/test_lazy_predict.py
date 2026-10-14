@@ -11,9 +11,11 @@ Run with pytest for fast, rigorous unit tests (subset of models):
 
 import argparse
 import numpy as np
+
 from numpy.typing import NDArray
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import Ridge, RidgeClassifier
+
 
 try:
     from src.protify.probes.lazy_predict import LazyClassifier, LazyRegressor
@@ -43,7 +45,7 @@ def _make_classification_data(
     rng = np.random.default_rng(random_state)
     X = rng.standard_normal((n_samples, n_features))  # (n, d)
     y = rng.integers(0, 2, size=n_samples)  # (n,)
-    return X, y
+    return X, y  # (n, d), (n,)
 
 
 def _make_regression_data(
@@ -54,7 +56,7 @@ def _make_regression_data(
     rng = np.random.default_rng(random_state)
     X = rng.standard_normal((n_samples, n_features))  # (n, d)
     y = rng.standard_normal(n_samples)  # (n,)
-    return X, y
+    return X, y  # (n, d), (n,)
 
 
 def _train_test_split(
@@ -62,12 +64,8 @@ def _train_test_split(
     y: NDArray[np.float64] | NDArray[np.int64],
     train_frac: float = 0.8,
     random_state: int = 42,
-) -> tuple[
-    NDArray[np.float64],
-    NDArray[np.float64],
-    NDArray[np.float64] | NDArray[np.int64],
-    NDArray[np.float64] | NDArray[np.int64],
-]:
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64] | NDArray[np.int64], NDArray[np.float64] | NDArray[np.int64]]:
+    # X: (n, d), y: (n,)
     rng = np.random.default_rng(random_state)
     n = len(y)  # n
     indices = rng.permutation(n)  # (n,)
@@ -147,10 +145,10 @@ def test_lazy_classifier_predictions_true_returns_tuple():
         train_frac=0.8,
     )
     clf = LazyClassifier(classifiers=FAST_CLASSIFIERS, verbose=0, predictions=True)
-    result = clf.fit(X_train, X_test, y_train, y_test)
-    assert isinstance(result, tuple)
-    assert len(result) == 2
-    _scores, preds_df = result  # predictions: (n_test=16, m=2)
+    fit_output = clf.fit(X_train, X_test, y_train, y_test)
+    assert isinstance(fit_output, tuple)
+    assert len(fit_output) == 2
+    _scores, preds_df = fit_output  # predictions: (n_test=16, m=2)
     assert len(preds_df) == len(y_test)
     assert list(preds_df.columns) == [name for name, _ in FAST_CLASSIFIERS]
 
@@ -215,10 +213,10 @@ def test_lazy_regressor_predictions_true_returns_tuple():
         train_frac=0.8,
     )
     rg = LazyRegressor(regressors=FAST_REGRESSORS, verbose=0, predictions=True)
-    result = rg.fit(X_train, X_test, y_train, y_test)
-    assert isinstance(result, tuple)
-    assert len(result) == 2
-    _scores, preds_df = result  # predictions: (n_test=16, m=2)
+    fit_output = rg.fit(X_train, X_test, y_train, y_test)
+    assert isinstance(fit_output, tuple)
+    assert len(fit_output) == 2
+    _scores, preds_df = fit_output  # predictions: (n_test=16, m=2)
     assert len(preds_df) == len(y_test)
     assert list(preds_df.columns) == [name for name, _ in FAST_REGRESSORS]
 

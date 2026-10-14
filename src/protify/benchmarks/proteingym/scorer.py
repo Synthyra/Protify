@@ -1,14 +1,14 @@
-import re
 import os
-import sys
+import re
 import subprocess
+import sys
 import time
-from typing import List
 import numpy as np
 import pandas as pd
 import torch
+
 from collections import defaultdict
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any
 from tqdm.auto import tqdm
 
 
@@ -16,7 +16,7 @@ class SequenceProcessor:
     """Handles sequence slicing and mutation parsing for ProteinGym."""
     
     @staticmethod
-    def get_optimal_window(mutation_position_relative: int, seq_len_wo_special: int, model_window: int) -> List[int]:
+    def get_optimal_window(mutation_position_relative: int, seq_len_wo_special: int, model_window: int) -> list[int]:
         """
         Select an optimal sequence window that fits the maximum model context size.
         If the sequence length is less than the maximum context size, the full sequence is returned.
@@ -33,8 +33,14 @@ class SequenceProcessor:
                     min(seq_len_wo_special, mutation_position_relative + half_model_window)]
 
     @staticmethod
-    def get_sequence_slices(df, target_seq, model_context_len, start_idx=1, 
-                            scoring_window="optimal", indel_mode=False):
+    def get_sequence_slices(
+        df: pd.DataFrame,
+        target_seq: str,
+        model_context_len: int,
+        start_idx: int = 1,
+        scoring_window: str = "optimal",
+        indel_mode: bool = False,
+    ) -> pd.DataFrame:
         """
         Process a dataframe containing mutant triplets (substitutions) or full mutated sequences (indels).
         Returns a processed DMS in which sequences have been sliced to satisfy the maximum context window.
@@ -121,7 +127,7 @@ class SequenceProcessor:
         return df.reset_index(drop=True)
     
     @staticmethod
-    def parse_mutant_string(mutant: str) -> List[Tuple[str, int, str]]:
+    def parse_mutant_string(mutant: str) -> list[tuple[str, int, str]]:
         """
         Parse a ProteinGym mutant string where each mutation is separated by ':'.
         Example: "I66N:H67T:S73C" -> [("I", 65, "N"), ("H", 66, "T"), ("S", 72, "C")]
@@ -129,7 +135,7 @@ class SequenceProcessor:
         if mutant is None or (isinstance(mutant, float) and np.isnan(mutant)):
             return []
         parts = str(mutant).split(':')
-        parsed: List[Tuple[str, int, str]] = []
+        parsed: list[tuple[str, int, str]] = []
         for p in parts:
             p = p.strip()
             if not p:
@@ -143,7 +149,7 @@ class SequenceProcessor:
         return parsed
     
     @staticmethod
-    def aa_to_token_ids(tokenizer) -> Dict[str, int]:
+    def aa_to_token_ids(tokenizer: Any) -> dict[str, int]:
         """Precompute amino acid to token ID mapping."""
         amino_acids = list('ACDEFGHIKLMNPQRSTVWY')
         aa_to_id = {}
@@ -206,7 +212,7 @@ class ProteinGymScorer:
         tokenizer: Any,
         device: torch.device,
         batch_size: int = 32,
-    ):
+    ) -> None:
         self.model_name = model_name
         self.model = model
         self.tokenizer = tokenizer
@@ -328,7 +334,7 @@ class ProteinGymScorer:
         iterator.close()
         
         # Grab normalized PLL for indels
-        pll_cache = {seq: result[0] for seq, result in zip(seqs_to_score, pll_results)}        
+        pll_cache = {seq: pll_result[0] for seq, pll_result in zip(seqs_to_score, pll_results, strict=True)}
         # Add a mapped column of per-window scores, then average by mutated_seq
         sliced_df['window_score'] = sliced_df['sliced_mutated_seq'].map(pll_cache)
         scores_by_variant = (
@@ -345,9 +351,9 @@ class ProteinGymScorer:
         self,
         df: pd.DataFrame,
         target_seq: str,
-        mutant_groups: Dict,
+        mutant_groups: dict[str, pd.DataFrame],
         scoring_method: str,
-    ) -> List[float]:
+    ) -> list[float]:
         """Score using marginal methods (masked/wildtype/mutant)."""
         
         if scoring_method == "masked_marginal":
@@ -361,11 +367,11 @@ class ProteinGymScorer:
         self,
         df: pd.DataFrame,
         target_seq: str,
-        mutant_groups: Dict,
-    ) -> List[float]:
+        mutant_groups: dict[str, pd.DataFrame],
+    ) -> list[float]:
         """Score using masked marginal method."""
         # Group by (window_start, window_end, pos_tuple) -> List[(row_idx, sorted_muts)]
-        position_groups: Dict[Tuple[int, int, Tuple[int, ...]], List[Tuple[int, Tuple[Tuple[str, int, str], ...]]]] = {}
+        position_groups: dict[tuple[int, int, tuple[int, ...]], list[tuple[int, tuple[tuple[str, int, str], ...]]]] = {}
         
         for row_idx, row in enumerate(df.itertuples(index=False)):
             mutant = row.mutant
@@ -392,9 +398,9 @@ class ProteinGymScorer:
             key = (window_start, window_end, pos_tuple)
             position_groups.setdefault(key, []).append((row_idx, sorted_muts))
         
-        sequences: List[str] = []
-        positions_list: List[List[int]] = []
-        variant_info: List[List[Tuple[int, List[Tuple[str, int, str]]]]] = []
+        sequences: list[str] = []
+        positions_list: list[list[int]] = []
+        variant_info: list[list[tuple[int, list[tuple[str, int, str]]]]] = []
         
         for (window_start, window_end, pos_tuple), variants in position_groups.items():
             window_seq = target_seq[window_start:window_end]
@@ -419,7 +425,7 @@ class ProteinGymScorer:
         )
         
         scores = [0.0] * len(df)
-        for variants_in_group, score in zip(variant_info, per_variant_log_probs):
+        for variants_in_group, score in zip(variant_info, per_variant_log_probs, strict=True):
             for row_idx, muts in variants_in_group:
                 assert score.size(0) == len(muts), "Mismatch between mutations and gathered logits"
                 wt_ids, mt_ids = [], []
@@ -443,11 +449,11 @@ class ProteinGymScorer:
         self,
         df: pd.DataFrame,
         target_seq: str,
-        mutant_groups: Dict,
-    ) -> List[float]:
+        mutant_groups: dict[str, pd.DataFrame],
+    ) -> list[float]:
         """Score using wildtype marginal method."""
         # Group by (window_start, window_end) -> List[(row_idx, sorted_muts, pos_rels)]
-        window_groups: Dict[Tuple[int, int], List[Tuple[int, Tuple[Tuple[str, int, str], ...], Tuple[int, ...]]]] = {}
+        window_groups: dict[tuple[int, int], list[tuple[int, tuple[tuple[str, int, str], ...], tuple[int, ...]]]] = {}
         
         for row_idx, row in enumerate(df.itertuples(index=False)):
             mutant = row.mutant
@@ -473,9 +479,9 @@ class ProteinGymScorer:
             key = (window_start, window_end)
             window_groups.setdefault(key, []).append((row_idx, sorted_muts, pos_rels))
         
-        sequences: List[str] = []
-        positions_list: List[List[int]] = []
-        window_to_variants: List[List[Tuple[int, List[Tuple[str, int, str]], List[int]]]] = []
+        sequences: list[str] = []
+        positions_list: list[list[int]] = []
+        window_to_variants: list[list[tuple[int, list[tuple[str, int, str]], list[int]]]] = []
         
         for (window_start, window_end), variants in window_groups.items():
             window_seq = target_seq[window_start:window_end]
@@ -504,7 +510,7 @@ class ProteinGymScorer:
         )
         
         scores = [0.0] * len(df)
-        for window_idx, (window_log_probs, variants) in enumerate(zip(per_variant_log_probs, window_to_variants)):
+        for window_idx, (window_log_probs, variants) in enumerate(zip(per_variant_log_probs, window_to_variants, strict=True)):
             window_positions = positions_list[window_idx]
             pos_to_idx = {pos: idx for idx, pos in enumerate(window_positions)}
             
@@ -534,19 +540,19 @@ class ProteinGymScorer:
         self,
         df: pd.DataFrame,
         target_seq: str,
-        mutant_groups: Dict,
-    ) -> List[float]:
+        mutant_groups: dict[str, pd.DataFrame],
+    ) -> list[float]:
         """Score using mutant marginal method."""
-        sequences: List[str] = []
-        positions_list: List[List[int]] = []
-        variant_info: List[Tuple[int, List[Tuple[str, int, str]]]] = []
+        sequences: list[str] = []
+        positions_list: list[list[int]] = []
+        variant_info: list[tuple[int, list[tuple[str, int, str]]]] = []
         
         for row_idx, row in enumerate(df.itertuples(index=False)):
             mutant = row.mutant
             mutated_seq = row.mutated_seq
             muts = SequenceProcessor.parse_mutant_string(mutant)
             
-            for wt, pos, mt in muts:
+            for _wt, pos, _mt in muts:
                 assert 0 <= pos < len(target_seq), f"Mutation pos {pos} out of range for target_seq length {len(target_seq)}"
             
             mutant_slices = mutant_groups.get(mutant)
@@ -564,8 +570,8 @@ class ProteinGymScorer:
             if not (window_start <= min_pos and max_pos < window_end):
                 raise ValueError(f"Window {window_start}-{window_end} does not contain all positions for variant {mutant}")
             
-            pos_rels: List[int] = []
-            for wt, pos, mt in muts:
+            pos_rels: list[int] = []
+            for _wt, pos, _mt in muts:
                 rel = pos - window_start
                 assert window_seq[rel] == mutated_seq[pos], f"mutant_marginal: residue mismatch at abs {pos} (rel {rel})"
                 pos_rels.append(rel)
@@ -590,7 +596,7 @@ class ProteinGymScorer:
         )
         
         scores = [0.0] * len(df)
-        for (row_idx, muts), score in zip(variant_info, per_variant_log_probs):
+        for (row_idx, muts), score in zip(variant_info, per_variant_log_probs, strict=True):
             assert score.size(0) == len(muts), "Mismatch between mutations and gathered logits"
             muts = sorted(muts, key=lambda x: x[1])
             wt_ids, mt_ids = [], []
@@ -614,7 +620,7 @@ class ProteinGymScorer:
         self,
         sliced_df: pd.DataFrame,
         target_seq: str,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Score substitutions using pseudo-log-likelihood."""
         mutated_slices = sliced_df[sliced_df['mutated_seq'] != target_seq].copy()
         
@@ -633,7 +639,7 @@ class ProteinGymScorer:
         pll_results = self._calculate_pll_batched(seqs_to_score, pll_progress)
         pll_progress.close()
         
-        seq_to_pll = {seq: res[0] for seq, res in zip(seqs_to_score, pll_results)}
+        seq_to_pll = {seq: res[0] for seq, res in zip(seqs_to_score, pll_results, strict=True)}
         mutated_slices['sequence_pll'] = mutated_slices['sliced_mutated_seq'].map(seq_to_pll)
         
         scores_by_variant = (
@@ -648,7 +654,7 @@ class ProteinGymScorer:
         self,
         sliced_df: pd.DataFrame,
         target_seq: str,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Score using global log probability."""
         mutated_slices = sliced_df[sliced_df['mutated_seq'] != target_seq].copy()
         seqs_to_score = mutated_slices['sliced_mutated_seq'].tolist()
@@ -707,10 +713,10 @@ class ProteinGymScorer:
     def _position_log_probs(
         self,
         scoring_method: str,
-        sequences: List[str],
-        positions_list: List[List[int]],
-        progress_bar,
-    ) -> List[torch.Tensor]:
+        sequences: list[str],
+        positions_list: list[list[int]],
+        progress_bar: tqdm,
+    ) -> list[torch.Tensor]:
         """Return batched log probabilities for multiple positions per sequence."""
         assert len(sequences) == len(positions_list), "Must have one position list per sequence"
         
@@ -765,14 +771,14 @@ class ProteinGymScorer:
                 log_probs = torch.log_softmax(selected_logits, dim=-1)
                 all_log_probs.append(log_probs)
         
-        return all_log_probs
+        return all_log_probs  # (p, v) per sequence, p positions and v tokens
     
     @torch.inference_mode()
     def _calculate_pll_batched(
         self,
-        sequences: List[str],
-        progress_bar,
-    ) -> List[Tuple[float, float]]:
+        sequences: list[str],
+        progress_bar: tqdm,
+    ) -> list[tuple[float, float]]:
         """Calculate pseudo-log-likelihood for multiple sequences with batched processing."""
         mask_id = self.tokenizer.mask_token_id
         if mask_id is None:
@@ -856,9 +862,9 @@ class ProteinGymScorer:
     @torch.inference_mode()
     def _get_sequence_log_probability_batched(
         self,
-        sequences: List[str],
-        progress_bar,
-    ) -> List[float]:
+        sequences: list[str],
+        progress_bar: tqdm,
+    ) -> list[float]:
         """Compute log probability for multiple sequences with batched processing."""
         results = []
         
@@ -905,8 +911,8 @@ class ProteinGymRunner:
         self,
         results_dir: str,
         repo_id: str = "GleghornLab/ProteinGym_DMS",
-        device: Optional[str] = None,
-    ):
+        device: str | None = None,
+    ) -> None:
         self.results_dir = results_dir
         self.repo_id = repo_id
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -914,13 +920,13 @@ class ProteinGymRunner:
     
     def run(
         self,
-        dms_ids: List[str],
-        model_names: List[str],
+        dms_ids: list[str],
+        model_names: list[str],
         mode: str = "benchmark",
         scoring_method: str = "masked_marginal",
         scoring_window: str = "optimal",
         batch_size: int = 32,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Run zero-shot scoring for all specified models and assays.
         
         Parameters
@@ -999,7 +1005,7 @@ class ProteinGymRunner:
         model_name: str,
         suffix: str,
         mode: str,
-    ):
+    ) -> None:
         """Save/merge results for a DMS assay."""
         per_dms_path = os.path.join(self.results_dir, f"{dms_id}_zs_{suffix}.csv")
         
@@ -1035,7 +1041,7 @@ class ProteinGymRunner:
                     merged['target_seq'] = ''
                     merged.iloc[0, merged.columns.get_loc('target_seq')] = first_target_seq
                 merged.to_csv(per_dms_path, index=False)
-            except Exception as e:
+            except Exception as e:  # noqa: broad-except a failed merge reports and falls back to saving the new results alone
                 print(f"Error merging results for {dms_id}: {e}")
                 results_to_save.to_csv(per_dms_path, index=False)
         else:
@@ -1043,11 +1049,11 @@ class ProteinGymRunner:
     
     def run_benchmark(
         self,
-        model_names: List[str],
-        dms_ids: List[str],
+        model_names: list[str],
+        dms_ids: list[str],
         mode: str,
         scoring_method: str,
-    ):
+    ) -> None:
         """Run the ProteinGym benchmarking script on scored CSV files.
         
         Parameters
@@ -1087,11 +1093,11 @@ class ProteinGymRunner:
             subprocess.run(script_cmd, check=True)
             
             print(f"Benchmark performance computed. Outputs in {perf_out_dir}")
-        except Exception as e:
+        except Exception as e:  # noqa: broad-except the performance summary is optional, so a failure reports and the run continues
             print(f"Failed to compute benchmark performance: {e}")
     
     @staticmethod
-    def collect_spearman(results_dir: str, model_names: List[str]) -> Dict[str, float]:
+    def collect_spearman(results_dir: str, model_names: list[str]) -> dict[str, float]:
         """Parse ProteinGym benchmark Summary CSV and return {model_name: spearman}.
         
         Looks for Summary_performance_DMS_[substitutions|indels]_Spearman.csv and
@@ -1118,7 +1124,7 @@ class ProteinGymRunner:
             try:
                 name = str(row['Model_name'])
                 score = float(row['Average_Spearman'])
-            except Exception:
+            except (KeyError, ValueError, TypeError):
                 continue
             model_scores[name] = score
         

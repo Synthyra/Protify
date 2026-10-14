@@ -1,5 +1,7 @@
 import numpy as np
+
 from sklearn.linear_model import Ridge
+
 
 try:
     from src.protify.probes import scikit_classes

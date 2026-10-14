@@ -9,8 +9,8 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/Gleghorn-Lab/Protify">
-    <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/github_banner.png" alt="Logo">
+  <a href="https://github.com/Synthyra/Protify">
+    <img src="https://github.com/Synthyra/Protify/blob/main/assets/github_banner.png" alt="Logo">
   </a>
 
   <h3 align="center">Protify</h3>
@@ -18,14 +18,14 @@
   <p align="center">
     A low code solution for computationally predicting the properties of chemicals.
     <br />
-    <a href="https://github.com/Gleghorn-Lab/Protify/tree/main/docs"><strong>Explore the docs »</strong></a>
+    <a href="https://github.com/Synthyra/Protify/tree/main/docs"><strong>Explore the docs »</strong></a>
     <br />
     <br />
-    <a href="https://github.com/Gleghorn-Lab/Protify">View Demo</a>
+    <a href="https://github.com/Synthyra/Protify">View Demo</a>
     &middot;
-    <a href="https://github.com/Gleghorn-Lab/Protify/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
+    <a href="https://github.com/Synthyra/Protify/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
     &middot;
-    <a href="https://github.com/Gleghorn-Lab/Protify/issues/new?labels=enhancement&template=feature-request---.md">Request Feature</a>
+    <a href="https://github.com/Synthyra/Protify/issues/new?labels=enhancement&template=feature-request---.md">Request Feature</a>
   </p>
 </div>
 
@@ -234,7 +234,7 @@ For more details about supported models and datasets, including programmatic acc
 - **ProteinGym zero-shot benchmarking**: Run zero-shot DMS scoring against 217+ ProteinGym substitution assays with multiple scoring methods
 - **Cloud compute**: Run GPU jobs via the Synthyra API or self-hosted Modal compute
 - **Multi-GPU embedding**: Split sequences across GPUs for parallel embedding generation
-- **SQL embedding storage**: Compact binary blob storage with async writer for efficient embedding caching
+- **Feature-store embedding caches**: Embeddings are cached as exact rows in a resumable feature store (a run that dies keeps every committed window), and caches from earlier Protify releases convert with `py -m src.protify.legacy_cache` (see [Models and embeddings](docs/models_and_embeddings.md))
 
 ### Support Protify's Development
 
@@ -251,7 +251,7 @@ From pip
 
 To get started locally
 ```bash
-git clone https://github.com/Gleghorn-Lab/Protify.git
+git clone https://github.com/Synthyra/Protify.git
 cd Protify
 git submodule update --init --remote --recursive
 python -m pip install -r requirements.txt
@@ -260,7 +260,7 @@ cd src/protify
 
 With a Python VM (linux)
 ```bash
-git clone https://github.com/Gleghorn-Lab/Protify.git
+git clone https://github.com/Synthyra/Protify.git
 cd Protify
 git submodule update --init --remote --recursive
 chmod +x setup_protify.sh
@@ -275,7 +275,7 @@ Run all commands from the **repository root** on your host (no need to `cd src/p
 
 **Linux / macOS:**
 ```bash
-git clone https://github.com/Gleghorn-Lab/Protify.git
+git clone https://github.com/Synthyra/Protify.git
 cd Protify
 git submodule update --init --remote --recursive
 docker build -t protify .
@@ -284,7 +284,7 @@ docker run --rm -it --gpus all -v "${PWD}":/workspace -w /workspace/src/protify 
 
 **Windows (PowerShell or cmd):**
 ```bash
-git clone https://github.com/Gleghorn-Lab/Protify.git
+git clone https://github.com/Synthyra/Protify.git
 cd Protify
 git submodule update --init --remote --recursive
 docker build -t protify .
@@ -292,6 +292,17 @@ docker run --rm -it --gpus all -v "%CD%":/workspace -w /workspace/src/protify pr
 ```
 
 Omit the `--data_names` and other CLI args to see help, or add any options you need. Output paths like `--log_dir` and `--results_dir` are relative to `/workspace/src/protify`; use e.g. `--log_dir /workspace/logs` to write at project root. Note: you may need `sudo` before the docker commands on Linux.
+
+### Log in once
+
+Protify takes no token on the command line. Log in once, and every run finds your credentials:
+
+```bash
+hf auth login   # Hugging Face: gated models, private datasets, and Hub uploads
+wandb login     # Weights & Biases: hyperparameter sweeps
+```
+
+Or set `HF_TOKEN` and `WANDB_API_KEY` in the environment. Cloud runs read your Synthyra API key from `SYNTHYRA_API_KEY`. A Docker container does not see the login on your host, so pass the variables by name, as in `docker run -e HF_TOKEN -e WANDB_API_KEY ...`, which copies their values from your shell.
 
 ### Optional: xformers for AMPLIFY
 
@@ -333,9 +344,9 @@ pip install -v -U git+https://github.com/facebookresearch/xformers.git@main#egg=
   5. Use **Poll Status** (or auto polling) to monitor job progress
   6. Click **Fetch Logs/Results/Plots** to download artifacts locally
 
-  From the CLI:
+  From the CLI, with your key in `SYNTHYRA_API_KEY`:
   ```bash
-  python -m main --synthyra_api_key YOUR_KEY --model_names ESM2-8 --data_names EC
+  python -m main --cloud --model_names ESM2-8 --data_names EC
   ```
 
   Notes:
@@ -397,51 +408,51 @@ pip install -v -U git+https://github.com/facebookresearch/xformers.git@main#egg=
   
   1.) Start the session
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/1.PNG">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/1.PNG">
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/2.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/2.PNG" width="500">
   
   2.) Select the models you would like to benchmark
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/3.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/3.PNG" width="500">
   
   3.) Select the datasets you are interested in. Here we chose Enzyme Commission numbers (multi-label classification), metal-ion binding (binary classification), solubility (binary classification), catalytic rate (kcat, regression), and protein localization (DeepLoc-2, binary classification).
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/4.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/4.PNG" width="500">
   
   4.) Embed the proteins in the selected datasets. If your machine does not have a GPU, you can download precomputed embeddings for many common sequences.
     Note: If you download embeddings, it will be faster to use the scikit model tab than the probe tab
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/5.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/5.PNG" width="500">
   
   5.) Select which probe and configuration you would like. Here, we will use a simple MLP probe, a small neural network. It is the **fastest** (by a large margin) but worst performing option (by a small margin usually).
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/6.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/6.PNG" width="500">
   
   6.) Select your settings for training. Like most of the tabs, the defaults are pretty good. If you need information about what setting does what, the `?` button provides a helpful note. The documentations has more extensive information
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/7.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/7.PNG" width="500">
   
   This will train your models!
   
   7.) After training, you can render helpful visualizations by passing the log ID from before. If you forget it, you can look for the file generated in the `logs` folder.
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/8.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/8.PNG" width="500">
   
   Here's a sample of the many plots produced. You can find them all inside `plots/your_log_id/*`
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/9.png" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/9.png" width="500">
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/10.png" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/10.png" width="500">
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/11.png" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/11.png" width="500">
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/13.png" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/13.png" width="500">
 
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/12.png" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/12.png" width="500">
   
   8.) Need to replicate your findings for a report or paper? Just input the generated log into the replay tab
   
-  <img src="https://github.com/Gleghorn-Lab/Protify/blob/main/assets/example_workflow/14.PNG" width="500">
+  <img src="https://github.com/Synthyra/Protify/blob/main/assets/example_workflow/14.PNG" width="500">
 
   To run the same session from the command line instead, you would simply execute
   ```
@@ -483,32 +494,6 @@ pip install -v -U git+https://github.com/facebookresearch/xformers.git@main#egg=
   ```
   python -m main --replay_path logs/your_log_id.txt
   ```
-
-  ### CLI auto-run on Modal (advanced)
-
-  For self-hosted Modal compute, pass Modal credentials as CLI arguments to run remotely on Modal instead of local execution. Most users should use `--synthyra_api_key` instead (see above).
-
-  ```bash
-  python -m main \
-    --modal_token_id YOUR_MODAL_TOKEN_ID \
-    --modal_token_secret YOUR_MODAL_TOKEN_SECRET \
-    --rebuild_modal \
-    --delete_modal_embeddings \
-    --model_names ESM2-8 \
-    --data_names EC
-  ```
-
-  Behavior:
-  - Triggers only when Modal credentials are explicitly provided in CLI args (`--modal_token_id` / `--modal_token_secret` or `--modal_api_key`).
-  - `--rebuild_modal` forces a fresh deploy of `src/protify/modal_backend.py` before execution.
-  - `--delete_modal_embeddings` clears `/data/embeddings` on the Modal volume before job submission (or can be run as a maintenance-only command when no dataset/proteingym run is requested).
-  - Automatically deploys `src/protify/modal_backend.py` if submit/delete fails before app/function lookup succeeds.
-  - Submits the remote job, streams incremental remote logs to your local terminal, and uses the Modal `FunctionCall` result as the terminal source of truth.
-  - Requires the currently deployed backend to provide `get_job_log_delta` (no legacy log-tail fallback).
-  - On completion, fetches artifacts and exits with:
-    - `0` on success
-    - non-zero on failed/terminated/timeout jobs
-  - Saves fetched artifacts to `modal_artifacts/<job_id>` by default.
 
 </details>
 
@@ -605,8 +590,7 @@ parameters:
 
 The following arguments control hyperparameter optimization:
 
-- `--use_wandb_hyperopt`: Enable W&B hyperparameter optimization (flag)
-- `--wandb_api_key`: Your Weights & Biases API key (alternatively set via environment variable, or the terminal when prompted)
+- `--use_wandb_hyperopt`: Enable W&B hyperparameter optimization (flag). W&B reads your key from `wandb login` or `WANDB_API_KEY`, and prompts in the terminal when it has neither
 - `--wandb_project`: W&B project name (default: "Protify")
 - `--wandb_entity`: W&B team/user entity (optional)
 - `--sweep_config_path`: Path to sweep configuration YAML (default: "yamls/sweep.yaml")
@@ -713,7 +697,7 @@ We work with a [bounty system](https://gleghornlab.notion.site/1de62a314a2e808bb
 
 Simply open a pull request with the bounty ID in the title to claim one. For additional features not on the bounty list simply use a descriptive title.
 
-For bugs and general suggestions please use [GitHub issues](https://github.com/Gleghorn-Lab/Protify/issues).
+For bugs and general suggestions please use [GitHub issues](https://github.com/Synthyra/Protify/issues).
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -757,14 +741,14 @@ If you use this package, please cite the following papers. (Coming soon)
 
 <!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
-[contributors-shield]: https://img.shields.io/github/contributors/Gleghorn-Lab/Protify.svg?style=for-the-badge
-[contributors-url]: https://github.com/Gleghorn-Lab/Protify/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/Gleghorn-Lab/Protify.svg?style=for-the-badge
-[forks-url]: https://github.com/Gleghorn-Lab/Protify/network/members
-[stars-shield]: https://img.shields.io/github/stars/Gleghorn-Lab/Protify.svg?style=for-the-badge
-[stars-url]: https://github.com/Gleghorn-Lab/Protify/stargazers
-[issues-shield]: https://img.shields.io/github/issues/Gleghorn-Lab/Protify.svg?style=for-the-badge
-[issues-url]: https://github.com/Gleghorn-Lab/Protify/issues
+[contributors-shield]: https://img.shields.io/github/contributors/Synthyra/Protify.svg?style=for-the-badge
+[contributors-url]: https://github.com/Synthyra/Protify/graphs/contributors
+[forks-shield]: https://img.shields.io/github/forks/Synthyra/Protify.svg?style=for-the-badge
+[forks-url]: https://github.com/Synthyra/Protify/network/members
+[stars-shield]: https://img.shields.io/github/stars/Synthyra/Protify.svg?style=for-the-badge
+[stars-url]: https://github.com/Synthyra/Protify/stargazers
+[issues-shield]: https://img.shields.io/github/issues/Synthyra/Protify.svg?style=for-the-badge
+[issues-url]: https://github.com/Synthyra/Protify/issues
 [linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
 [linkedin-url]: https://www.linkedin.com/company/synthyra
 [product-screenshot]: assets/screenshot.png

@@ -1,6 +1,7 @@
 import os
 import sys
 
+
 _src_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if _src_dir not in sys.path:
     sys.path.insert(0, _src_dir)
@@ -18,7 +19,8 @@ from . import base_models  # noqa: F401
 
 # Re-export commonly used classes and functions
 from .pooler import Pooler  # noqa: F401
-from .utils import torch_load, print_message  # noqa: F401
+from .legacy_cache import torch_load
+from .console_output import print_message
 from .seed_utils import (  # noqa: F401
     set_global_seed,
     get_global_seed,

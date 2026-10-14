@@ -1,4 +1,5 @@
 import pandas as pd
+
 from huggingface_hub import hf_hub_download
 
 
@@ -23,20 +24,20 @@ def load_proteingym_dms(dms_id: str, mode: str, repo_id: str = "GleghornLab/Prot
     df = _load_parquet_by_dms(repo_id=repo_id, dms_id=dms_id)
     
     if mode == 'benchmark':
-        df = df[df['is_indel'] == False]
+        df = df[df['is_indel'].eq(False)]
         df = df[["DMS_id", "mutated_seq", "target_seq", "DMS_score", "DMS_score_bin", "mutant"]]
     elif mode == 'indels':
         # Indels only, no mutant triplet column
-        df = df[df['is_indel'] == True]
+        df = df[df['is_indel'].eq(True)]
         df = df[["DMS_id", "mutated_seq", "target_seq", "DMS_score", "DMS_score_bin"]]
     elif mode == 'singles':
         # Single substitutions only
-        df = df[df['is_indel'] == False]
+        df = df[df['is_indel'].eq(False)]
         df = df[df['num_mutations'] == 1]
         df = df[["DMS_id", "mutated_seq", "target_seq", "DMS_score", "DMS_score_bin", "mutant"]]
     elif mode == 'multiples':
         # Multiple substitutions only
-        df = df[df['is_indel'] == False]
+        df = df[df['is_indel'].eq(False)]
         df = df[df['num_mutations'] > 1]
         df = df[["DMS_id", "mutated_seq", "target_seq", "DMS_score", "DMS_score_bin", "mutant"]]
 

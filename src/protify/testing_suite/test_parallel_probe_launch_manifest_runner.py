@@ -1,6 +1,6 @@
 import json
-
 import pytest
+
 
 try:
     from src.protify.scripts import plan_parallel_probes as preflight
@@ -477,15 +477,15 @@ def test_launch_manifest_runner_concurrent_execution_waits_for_wave(monkeypatch)
         ],
     }
 
-    result = runner.execute_launch_plan(plan)
+    execution = runner.execute_launch_plan(plan)
 
     assert started_commands == [["ok", "first"], ["fail", "second"]]
     assert started_envs[0]["CUDA_VISIBLE_DEVICES"] == "0"
     assert started_envs[1]["CUDA_VISIBLE_DEVICES"] == "1"
-    assert result["executed"] is True
-    assert result["failure_count"] == 1
-    assert len(result["waves"]) == 1
-    assert [command["returncode"] for command in result["waves"][0]["commands"]] == [0, 7]
+    assert execution["executed"] is True
+    assert execution["failure_count"] == 1
+    assert len(execution["waves"]) == 1
+    assert [command["returncode"] for command in execution["waves"][0]["commands"]] == [0, 7]
 
 
 def test_launch_manifest_runner_rejects_invalid_manifest(tmp_path) -> None:

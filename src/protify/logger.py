@@ -1,24 +1,31 @@
-import logging
+import ast
+import csv
+import datetime
 import functools
 import json
-import csv
+import logging
 import os
-import datetime
-import ast
 import random
 import string
 import subprocess
 import sys
+
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
 from types import SimpleNamespace
+from typing import Any
+
 
 try:
-    from utils import print_message
+    from console_output import print_message
 except ImportError:
-    from .utils import print_message
+    from .console_output import print_message
 
 
+# What a results row has to record about the probe for two rows to be comparable. Without
+# input_size and feature_selection, a full-width run and a feature-selected run of the
+# same model on the same dataset are indistinguishable in the table.
 PROBE_RESULT_IDENTITY_KEYS = (
     "probe_type",
     "hidden_size",
@@ -26,10 +33,31 @@ PROBE_RESULT_IDENTITY_KEYS = (
     "n_layers",
     "task_type",
     "num_labels",
+    "input_size",
+    "feature_selection",
 )
 
 
-def log_method_calls(func: Callable) -> Callable:
+def _json_fallback(value: Any) -> Any:
+    """Last-resort encoder for a value json does not recognize.
+
+    Metrics arrive from numpy and torch, whose scalars json cannot encode. Everything
+    should already be converted upstream, so this exists to stop a single stray value
+    from discarding a finished run's whole results table at the final write. Anything it
+    cannot convert still raises, because silently stringifying a metric would put an
+    unusable value in the table under a name that looks fine.
+    """
+    item = getattr(value, 'item', None)
+    if callable(item):
+        with suppress(TypeError, ValueError):
+            return item()
+    tolist = getattr(value, 'tolist', None)
+    if callable(tolist):
+        return tolist()
+    raise TypeError(f'Object of type {type(value).__name__} is not JSON serializable')
+
+
+def log_method_calls(func: Callable[..., Any]) -> Callable[..., Any]:
     """Decorator to log each call of the decorated method."""
     @functools.wraps(func)
     def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -126,7 +154,7 @@ class MetricsLogger:
 
     def load_tsv(self) -> None:
         """Load existing TSV data into self.logger_data_tracking (row=dataset, col=model)."""
-        with open(self.results_file, 'r', newline='', encoding='utf-8') as f:
+        with open(self.results_file, newline='', encoding='utf-8') as f:
             reader = csv.reader(f, delimiter='\t')
             header = next(reader, None)
             if not header:
@@ -195,20 +223,30 @@ class MetricsLogger:
                 for model in model_names:
                     # Get metrics if they exist, otherwise empty dict
                     metrics = self.logger_data_tracking.get(ds, {}).get(model, {})
-                    row.append(json.dumps(metrics))
+                    row.append(json.dumps(metrics, default=_json_fallback))
                 writer.writerow(row)
 
-    def _with_probe_result_identity(self, metrics_dict: Dict[str, Any]) -> Dict[str, Any]:
+    def _with_probe_result_identity(self, metrics_dict: dict[str, Any]) -> dict[str, Any]:
+        """Record what the probe actually was, alongside how it scored.
+
+        probe_args is consulted first because it holds the values in force for this run.
+        logger_args is a snapshot of the command line taken once at startup, so it still
+        shows the default for anything a sweep trial or a feature selection changed, and a
+        row built from it would attribute a score to hyperparameters that never ran.
+        """
         enriched_metrics = dict(metrics_dict)
+        probe_args_dict = getattr(getattr(self, 'probe_args', None), '__dict__', {})
         logger_args_dict = self.logger_args.__dict__
         for key in PROBE_RESULT_IDENTITY_KEYS:
             if key in enriched_metrics:
                 continue
-            if key in logger_args_dict:
+            if key in probe_args_dict:
+                enriched_metrics[key] = probe_args_dict[key]
+            elif key in logger_args_dict:
                 enriched_metrics[key] = logger_args_dict[key]
         return enriched_metrics
 
-    def log_metrics(self, dataset: str, model: str, metrics_dict: Dict[str, Any], split_name: Optional[str] = None) -> None:
+    def log_metrics(self, dataset: str, model: str, metrics_dict: dict[str, Any], split_name: str | None = None) -> None:
         try:
             training_time = metrics_dict.get('training_time_seconds')
             preserve_keys = {
@@ -245,7 +283,7 @@ class MetricsLogger:
             # Write results after each update to ensure nothing is lost
             self.write_results()
             
-        except Exception as e:
+        except Exception as e:  # noqa: broad-except a failed metrics write is logged and the run goes on
             self.logger.error(f"Error logging metrics for {dataset}/{model}: {str(e)}")
 
     def end_log(self) -> None:
@@ -265,13 +303,13 @@ class MetricsLogger:
                 if process.returncode == 0 and process.stdout.strip():
                     pip_list = process.stdout.strip()
                     break
-            except Exception:
+            except (OSError, subprocess.SubprocessError):
                 continue
 
         # Try to get nvidia-smi output, handle case where it's not available
         try:
             nvidia_info = os.popen('nvidia-smi').read().strip()
-        except:
+        except OSError:
             nvidia_info = "nvidia-smi not available"
         
         # Get system info
@@ -305,8 +343,8 @@ class MetricsLogger:
 class LogReplayer:
     def __init__(self, log_file_path: str) -> None:
         self.log_file = Path(log_file_path)
-        self.arguments: Dict[str, Any] = {}
-        self.method_calls: List[str] = []
+        self.arguments: dict[str, Any] = {}
+        self.method_calls: list[str] = []
 
     def parse_log(self) -> SimpleNamespace:
         """
@@ -317,8 +355,8 @@ class LogReplayer:
         if not self.log_file.exists():
             raise FileNotFoundError(f"Log file not found: {self.log_file}")
 
-        with open(self.log_file, 'r') as file:
-            header = next(file)
+        with open(self.log_file) as file:
+            next(file)
             for line in file:
                 if line.startswith('='):
                     continue
@@ -328,10 +366,8 @@ class LogReplayer:
                 elif ':\t' in line:
                     key, value = line.split(':\t')
                     key, value = key.strip(), value.strip()
-                    try:
+                    with suppress(ValueError, SyntaxError):
                         value = ast.literal_eval(value)
-                    except (ValueError, SyntaxError):
-                        pass
                     self.arguments[key] = value
 
         return SimpleNamespace(**self.arguments)

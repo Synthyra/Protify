@@ -2,6 +2,7 @@
 
 import torch
 
+
 try:
     from src.protify.model_components.mlp import intermediate_correction_fn, SwiGLU, swiglu_ln_ffn
     from src.protify.model_components.attention import RotaryEmbedding, rotate_half, MultiHeadAttention
@@ -17,8 +18,8 @@ except ImportError:
 def test_intermediate_correction_fn_multiple_of_256() -> None:
     for hidden_size in [16, 128, 256, 768, 1024]:
         for ratio in [8 / 3, 4.0, 2.0]:
-            result = intermediate_correction_fn(ratio, hidden_size)
-            assert result % 256 == 0, f"Not multiple of 256: {result} for hidden={hidden_size}, ratio={ratio}"
+            intermediate_size = intermediate_correction_fn(ratio, hidden_size)
+            assert intermediate_size % 256 == 0, f"Not multiple of 256: {intermediate_size} for hidden={hidden_size}, ratio={ratio}"
 
 
 def test_intermediate_correction_fn_known_value() -> None:
@@ -28,8 +29,8 @@ def test_intermediate_correction_fn_known_value() -> None:
 
 def test_intermediate_correction_fn_rounds_up() -> None:
     # 8/3 * 16 = 42.67, rounded up to nearest 256 = 256
-    result = intermediate_correction_fn(8 / 3, 16)
-    assert result == 256
+    intermediate_size = intermediate_correction_fn(8 / 3, 16)
+    assert intermediate_size == 256
 
 
 def test_swiglu_output_shape() -> None:
@@ -73,17 +74,16 @@ def test_rotary_embedding_output_shapes() -> None:
     assert K_rotated.shape == K.shape
 
 
-def test_rotary_embedding_cache_grows() -> None:
-    rotary = RotaryEmbedding(dim=4)
-    Q_short = torch.randn(1, 2, 1, 8)  # (1, 2, 1, 8)
-    K_short = torch.randn(1, 2, 1, 8)  # (1, 2, 1, 8)
-    rotary(Q_short, K_short)  # returned tensors are each (1, 2, 1, 8)
-    cached_len_1 = rotary._seq_len_cached
+def test_rotary_embedding_tables_cover_every_length_up_to_max_seq_len() -> None:
+    """The tables are built once for max_seq_len, so a shorter sequence reads a prefix of them."""
+    rotary = RotaryEmbedding(dim=4, max_seq_len=16)
     Q_long = torch.randn(1, 8, 1, 8)  # (1, 8, 1, 8)
     K_long = torch.randn(1, 8, 1, 8)  # (1, 8, 1, 8)
-    rotary(Q_long, K_long)  # returned tensors are each (1, 8, 1, 8)
-    cached_len_2 = rotary._seq_len_cached
-    assert cached_len_2 >= cached_len_1
+    Q_long_rotated, K_long_rotated = rotary(Q_long, K_long)  # each (1, 8, 1, 8)
+    Q_short_rotated, K_short_rotated = rotary(Q_long[:, :2], K_long[:, :2])  # each (1, 2, 1, 8)
+    assert rotary._cos_k.shape == (16, 2)
+    torch.testing.assert_close(Q_short_rotated, Q_long_rotated[:, :2], rtol=0, atol=0)
+    torch.testing.assert_close(K_short_rotated, K_long_rotated[:, :2], rtol=0, atol=0)
 
 
 def test_multihead_attention_output_shape() -> None:

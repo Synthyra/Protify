@@ -2,6 +2,7 @@
 """
 Utility script to list Protify supported models and datasets.
 """
+
 import argparse
 import sys
 

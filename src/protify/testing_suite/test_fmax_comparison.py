@@ -6,14 +6,16 @@ random multi-label configurations.
 Not a pass/fail test -- prints statistics on the divergence between the two.
 Run with:  py -m testing_suite.test_fmax_comparison
 """
+
 import os
 import sys
 import time
-
-import torch
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
 from tqdm import tqdm
+
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from metrics import max_metrics
@@ -21,6 +23,7 @@ from metrics import max_metrics
 
 def count_f1_max(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     """TorchDrug Fmax: macro-averaged P/R across samples, exact threshold search."""
+    # pred: (n, c), target: (n, c)
     order = pred.argsort(descending=True, dim=1)
     target = target.gather(1, order)
     precision = target.cumsum(1) / torch.ones_like(target).cumsum(1)
@@ -45,7 +48,7 @@ def count_f1_max(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
                  torch.where(is_start, torch.zeros_like(recall), recall[all_order - 1])
     all_recall = all_recall.cumsum(0) / pred.shape[0]
     all_f1 = 2 * all_precision * all_recall / (all_precision + all_recall + 1e-10)
-    return all_f1.max()
+    return all_f1.max()  # (), a scalar
 
 
 def run_comparison(n_trials: int = 100_000, seed: int = 42, sparsity_range: tuple = (0.1, 0.9), label: str = "default"):
@@ -56,7 +59,7 @@ def run_comparison(n_trials: int = 100_000, seed: int = 42, sparsity_range: tupl
     protify_time = 0.0
     torchdrug_time = 0.0
 
-    for i in tqdm(range(n_trials)):
+    for _ in tqdm(range(n_trials), desc="Comparing F1 implementations"):
         B = rng.randint(2, 32)
         N = rng.randint(2, 32)
         # Random predictions (sigmoid-like range 0-1)
@@ -93,37 +96,37 @@ def run_comparison(n_trials: int = 100_000, seed: int = 42, sparsity_range: tupl
     print(f"Sparsity range (positive rate): {sparsity_range}")
     print(f"{'='*60}")
     print(f"Trials:            {len(diffs):,}")
-    print(f"")
-    print(f"--- Absolute difference ---")
+    print("")
+    print("--- Absolute difference ---")
     print(f"  Mean:            {diffs.mean():.6f}")
     print(f"  Median:          {np.median(diffs):.6f}")
     print(f"  Std:             {diffs.std():.6f}")
     print(f"  Max:             {diffs.max():.6f}")
     print(f"  95th pctile:     {np.percentile(diffs, 95):.6f}")
     print(f"  99th pctile:     {np.percentile(diffs, 99):.6f}")
-    print(f"")
-    print(f"--- Agreement ---")
+    print("")
+    print("--- Agreement ---")
     print(f"  |diff| < 0.001:  {(diffs < 0.001).mean()*100:.1f}%")
     print(f"  |diff| < 0.01:   {(diffs < 0.01).mean()*100:.1f}%")
     print(f"  |diff| < 0.05:   {(diffs < 0.05).mean()*100:.1f}%")
     print(f"  |diff| >= 0.05:  {(diffs >= 0.05).mean()*100:.1f}%")
-    print(f"")
-    print(f"--- Which is higher ---")
+    print("")
+    print("--- Which is higher ---")
     print(f"  Protify > TD:    {(protify_vals > torchdrug_vals + 1e-8).mean()*100:.1f}%")
     print(f"  TD > Protify:    {(torchdrug_vals > protify_vals + 1e-8).mean()*100:.1f}%")
     print(f"  Equal (1e-8):    {(diffs < 1e-8).mean()*100:.1f}%")
-    print(f"")
-    print(f"--- Mean F1 values ---")
+    print("")
+    print("--- Mean F1 values ---")
     print(f"  Protify:         {protify_vals.mean():.6f}")
     print(f"  TorchDrug:       {torchdrug_vals.mean():.6f}")
-    print(f"")
-    print(f"--- Timing ---")
+    print("")
+    print("--- Timing ---")
     print(f"  Protify total:   {protify_time:.2f}s ({protify_time/len(diffs)*1000:.3f}ms/trial)")
     print(f"  TorchDrug total: {torchdrug_time:.2f}s ({torchdrug_time/len(diffs)*1000:.3f}ms/trial)")
 
     # Show worst-case examples
     worst_idx = np.argsort(diffs)[-5:][::-1]
-    print(f"\n--- Top 5 worst disagreements ---")
+    print("\n--- Top 5 worst disagreements ---")
     for rank, idx in enumerate(worst_idx):
         print(f"  #{rank+1}: Protify={protify_vals[idx]:.6f}  TorchDrug={torchdrug_vals[idx]:.6f}  diff={diffs[idx]:.6f}")
 

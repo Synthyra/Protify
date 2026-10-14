@@ -1,7 +1,9 @@
 import argparse
 import json
+
 from collections.abc import Sequence
 from dataclasses import dataclass
+
 
 try:
     from probes.parallel_probe_plan import (
@@ -823,7 +825,7 @@ def execution_recommendation_candidate(
     }
 
 
-def _recommendation_sort_key(candidate):
+def _recommendation_sort_key(candidate: dict[str, object]) -> tuple[object, ...]:
     feasible_rank = 1 if candidate["feasible"] else 0
     memory_rank = 1 if candidate["memory_fit"] else 0
     target_rank = 1 if candidate["target_fit"] else 0
@@ -1167,13 +1169,6 @@ def _base_group_cli_args(
     return cli_args
 
 
-def sequential_group_cli_args(
-    args: argparse.Namespace,
-    group: ParallelProbeGroup,
-) -> list[str]:
-    return _base_group_cli_args(args, group)
-
-
 def parallel_group_cli_args(
     args: argparse.Namespace,
     group: ParallelProbeGroup,
@@ -1389,7 +1384,7 @@ def group_launch_manifest(
 ) -> dict[str, object]:
     representative = group.runs[0]
     command_id = f"group-{group_index + 1}"
-    sequential_cli_args = sequential_group_cli_args(args, group)
+    sequential_cli_args = _base_group_cli_args(args, group)
     parallel_cli_args = parallel_group_cli_args(args, group)
     sequential_command = protify_command(sequential_cli_args)
     if len(parallel_cli_args) == 0:
@@ -1501,13 +1496,9 @@ def launch_manifest_report(
             group,
             group_estimate,
             group_index,
-            assigned_gpu_index=(
-                gpu_assignments[group_index]
-                if group_index in gpu_assignments
-                else None
-            ),
+            assigned_gpu_index=gpu_assignments.get(group_index),
         )
-        for group_index, (group, group_estimate) in enumerate(zip(plan.groups, estimate.group_estimates))
+        for group_index, (group, group_estimate) in enumerate(zip(plan.groups, estimate.group_estimates, strict=True))
     ]
     wave_manifests = []
     total_gpu_assignment_count = 0
@@ -1710,7 +1701,7 @@ def build_plan_report(args: argparse.Namespace) -> dict[str, object]:
     estimate_summary = estimate.summary_dict()
     group_reports = [
         group_report(group, group_estimate, max_group_size_by_key=max_group_size_by_key)
-        for group, group_estimate in zip(plan.groups, estimate.group_estimates)
+        for group, group_estimate in zip(plan.groups, estimate.group_estimates, strict=True)
     ]
     schedule = execution_wave_schedule(args, estimate)
     embedding_prerequisites = embedding_prerequisite_report(args, plan)

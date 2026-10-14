@@ -1,6 +1,9 @@
+import sys
 import pytest
+
 from pathlib import Path
-from datasets import Dataset
+from datasets import Dataset, DatasetDict
+
 
 try:
     from src.protify.data.data_mixin import DataArguments, DataMixin
@@ -106,3 +109,52 @@ def test_fasta_split_requires_label_metadata(tmp_path: Path) -> None:
 
     with pytest.raises(AssertionError, match="label="):
         DataMixin()._read_fasta_file(str(fasta_path))
+
+
+def test_hub_datasets_load_at_their_pinned_revisions(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested = []
+
+    def record_load_dataset(path: str, revision: str | None = None) -> DatasetDict:
+        requested.append((path, revision))
+        split = Dataset.from_dict(
+            {
+                "seqs": [_sequence_for_idx(idx) for idx in range(4)],
+                "labels": [idx % 2 for idx in range(4)],
+            }
+        )
+        return DatasetDict({"train": split, "valid": split, "test": split})
+
+    monkeypatch.setattr(sys.modules[DataMixin.__module__], "load_dataset", record_load_dataset)
+    data_args = DataArguments(
+        data_names=["research/first", "research/second"],
+        data_revisions=["a" * 40, "b" * 40],
+    )
+    datasets_by_name, _all_seqs = DataMixin(data_args).get_data()
+
+    assert data_args.data_revisions == ["a" * 40, "b" * 40]
+    assert requested == [("research/first", "a" * 40), ("research/second", "b" * 40)]
+    assert set(datasets_by_name) == {"first", "second"}
+
+
+def test_unpinned_hub_datasets_load_the_default_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    requested = []
+
+    def record_load_dataset(path: str, revision: str | None = None) -> DatasetDict:
+        requested.append((path, revision))
+        raise LookupError("stop after the load request")
+
+    monkeypatch.setattr(sys.modules[DataMixin.__module__], "load_dataset", record_load_dataset)
+    with pytest.raises(LookupError):
+        DataMixin(DataArguments(data_names=["research/first"])).get_data()
+
+    assert requested == [("research/first", None)]
+
+
+def test_revisions_must_align_with_dataset_names() -> None:
+    with pytest.raises(ValueError, match="one for one"):
+        DataArguments(data_names=["research/first", "research/second"], data_revisions=["a" * 40])
+
+
+def test_revisions_reject_names_that_are_not_one_dataset() -> None:
+    with pytest.raises(ValueError, match="standard_benchmark"):
+        DataArguments(data_names=["standard_benchmark"], data_revisions=["a" * 40])

@@ -54,14 +54,15 @@ all_presets_with_paths = {
     # AMPLIFY models (from amplify.py)
     'AMPLIFY-120': 'GleghornLab/AMPLIFY_120M',
     'AMPLIFY-350': 'GleghornLab/AMPLIFY_350M',
-    # Random models (from random.py)
+    # Control bases, generated where their rows are read and never stored (from control_bases.py)
     'Random': 'random',
+    # Untrained networks (from random.py), which have weights and a store
     'Random-Transformer': 'facebook/esm2_t12_35M_UR50D',
     'Random-ESM2-8': 'facebook/esm2_t6_8M_UR50D',
     'Random-ESM2-35': 'facebook/esm2_t12_35M_UR50D',
     'Random-ESM2-150': 'facebook/esm2_t30_150M_UR50D',
     'Random-ESM2-650': 'facebook/esm2_t36_650M_UR50D',
-    # OneHot models (from one_hot.py) - internal implementations
+    # OneHot models (from one_hot.py) - internal implementations; OneHot-Protein is a generated control
     'OneHot-Protein': 'OneHot-Protein',
     'OneHot-DNA': 'OneHot-DNA',
     'OneHot-RNA': 'OneHot-RNA',

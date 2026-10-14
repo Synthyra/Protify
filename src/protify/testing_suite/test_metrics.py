@@ -1,7 +1,9 @@
 import numpy as np
 import pytest
 import torch
+
 from transformers import EvalPrediction
+
 
 try:
     from src.protify.metrics import (

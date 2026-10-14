@@ -1,22 +1,55 @@
 import torch
-from typing import Any, Dict, List, Tuple, Union
 
-from .utils import pad_and_concatenate_dimer
+from typing import Any
 
 
-def _tokenize_kwargs(padding: str, max_length: int) -> Dict[str, Any]:
+def pad_and_concatenate_dimer(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    a_mask: torch.Tensor | None = None,
+    b_mask: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Concatenate each pair of valid sequence embeddings into a padded batch."""
+    # A: (b, l_a, d); B: (b, l_b, d)
+    batch_size, a_seq_len, hidden_size = A.size()  # b, l_a, d
+    if a_mask is None:
+        a_mask = torch.ones(batch_size, a_seq_len, device=A.device)  # (b, l_a)
+    if b_mask is None:
+        # The historical no-mask path assumes l_b == l_a.
+        b_mask = torch.ones(batch_size, a_seq_len, device=A.device)  # (b, l_a)
+
+    # a_mask: (b, l_a); b_mask: (b, l_b) when supplied by the caller
+    max_len = max(  # l_out = max_i(l_a_i + l_b_i)
+        int(a_mask[i].sum().item() + b_mask[i].sum().item())
+        for i in range(batch_size)
+    )
+    combined = torch.zeros(batch_size, max_len, hidden_size, device=A.device)  # (b, l_out, d)
+    combined_mask = torch.zeros(batch_size, max_len, device=A.device)  # (b, l_out)
+
+    for i in range(batch_size):
+        a_len = int(a_mask[i].sum().item())  # l_a_i
+        b_len = int(b_mask[i].sum().item())  # l_b_i
+        combined[i, :a_len] = A[i, :a_len]  # (a_len, d) <- (a_len, d)
+        combined[i, a_len:a_len + b_len] = B[i, :b_len]  # (b_len, d) <- (b_len, d)
+        combined_mask[i, :a_len + b_len] = 1  # (a_len + b_len,)
+
+    return combined, combined_mask  # (b, l_out, d), (b, l_out)
+
+
+def _tokenize_kwargs(padding: str, max_length: int) -> dict[str, Any]:
     """Build tokenizer kwargs for the given padding strategy."""
-    kwargs: Dict[str, Any] = dict(padding=padding, return_tensors='pt', add_special_tokens=True, truncation=True)
+    kwargs: dict[str, Any] = dict(padding=padding, return_tensors='pt', add_special_tokens=True, truncation=True)
     if padding == 'max_length':
         kwargs['max_length'] = max_length
     return kwargs
 
 
-def _pad_matrix_embeds(embeds: List[torch.Tensor], max_len: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def _pad_matrix_embeds(embeds: list[torch.Tensor], max_len: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Pad ``(l_i, d)`` embeddings to a shared sequence length."""
     # embeds: b tensors shaped (l_i, d); max_len: l_max >= max_i(l_i)
-    padded_embeds: List[torch.Tensor] = []
-    attention_masks: List[torch.Tensor] = []
+    # embeds: (l_i, d) per sequence, b tensors
+    padded_embeds: list[torch.Tensor] = []
+    attention_masks: list[torch.Tensor] = []
     for embed in embeds:
         seq_len = embed.size(0)  # l_i
         padding_size = max_len - seq_len  # l_max - l_i
@@ -50,9 +83,9 @@ class StringCollator:
         self.padding = padding
         self.max_length = max_length
 
-    def __call__(self, batch: Tuple[List[str], List[str]]) -> Dict[str, torch.Tensor]:
+    def __call__(self, batch: tuple[list[str], list[str]]) -> dict[str, torch.Tensor]:
         # Tokenizer tensor fields are normally (b, l_t); arbitrary extra fields are preserved.
-        return self.tokenizer(batch, **_tokenize_kwargs(self.padding, self.max_length))
+        return self.tokenizer(batch, **_tokenize_kwargs(self.padding, self.max_length))  # input_ids, attention_mask: (b, l_t) from the paired tokenization
 
 
 class StringLabelsCollator:
@@ -73,8 +106,9 @@ class StringLabelsCollator:
 
     def __call__(
         self,
-        batch: List[Tuple[str, Union[float, int, List[float], List[int], torch.Tensor]]],
-    ) -> Dict[str, torch.Tensor]:
+        batch: list[tuple[str, float | int | list[float] | list[int] | torch.Tensor]],
+    ) -> dict[str, torch.Tensor]:
+        # batch: (b,) tuples of (sequence, label), the label () or (r_i,) or s_y
         seqs = [ex[0] for ex in batch]
         labels = [ex[1] for ex in batch]
 
@@ -88,7 +122,7 @@ class StringLabelsCollator:
             lengths = [torch.sum(attention_mask[i]).item() for i in range(len(batch))]
             max_length = max(lengths)  # l_y, the largest valid-token count
 
-            padded_labels: List[torch.Tensor] = []
+            padded_labels: list[torch.Tensor] = []
             for label in labels:
                 if not isinstance(label, torch.Tensor):
                     label = torch.tensor(label)  # () or (r_i,)
@@ -114,7 +148,7 @@ class StringLabelsCollator:
         else:
             batch_encoding['labels'] = batch_encoding['labels'].long()  # unchanged shape
 
-        return batch_encoding
+        return batch_encoding  # input_ids, attention_mask: (b, l_t); labels: (b, l_y), (b,) or (b, *s_y)
 
 
 class EmbedsLabelsCollator:
@@ -129,7 +163,8 @@ class EmbedsLabelsCollator:
         self.task_type = task_type
         self.tokenwise = tokenwise
 
-    def __call__(self, batch: List[Tuple[torch.Tensor, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+    def __call__(self, batch: list[tuple[torch.Tensor, torch.Tensor]]) -> dict[str, torch.Tensor]:
+        # batch: (b,) tuples of (embedding (l_i, d) or s_emb, label () or s_y)
         if self.full:
             embeds = [ex[0] for ex in batch]  # b tensors shaped (l_i, d)
             labels = [ex[1] for ex in batch]  # b tensors shaped () or s_y
@@ -138,7 +173,7 @@ class EmbedsLabelsCollator:
             embeds, attention_mask = _pad_matrix_embeds(embeds, max_length)  # (b, l_max, d), (b, l_max)
 
             if self.tokenwise:
-                padded_labels: List[torch.Tensor] = []
+                padded_labels: list[torch.Tensor] = []
                 for label in labels:
                     if not isinstance(label, torch.Tensor):
                         label = torch.tensor(label)  # () or (r_i,)
@@ -161,7 +196,7 @@ class EmbedsLabelsCollator:
             else:
                 labels = labels.long()  # unchanged shape
 
-            return {
+            return {  # embeddings: (b, l_max, d); attention_mask: (b, l_max); labels: (b, l_max), (b,) or (b, *s_y)
                 'embeddings': embeds,
                 'attention_mask': attention_mask,
                 'labels': labels,
@@ -176,13 +211,13 @@ class EmbedsLabelsCollator:
             else:
                 labels = labels.long()  # unchanged shape
 
-            return {
+            return {  # embeddings: (b, *s_emb); labels: (b,) or (b, *s_y)
                 'embeddings': embeds,
                 'labels': labels
             }
 
 
-class PairCollator_input_ids:
+class PairInputIdsCollator:
     def __init__(
         self,
         tokenizer: object,
@@ -194,8 +229,8 @@ class PairCollator_input_ids:
         self.padding = padding
         self.max_length = max_length
 
-    def __call__(self, batch: List[Tuple[str, str, Union[float, int]]]) -> Dict[str, torch.Tensor]:
-        seqs_a, seqs_b, labels = zip(*batch)
+    def __call__(self, batch: list[tuple[str, str, float | int]]) -> dict[str, torch.Tensor]:
+        seqs_a, seqs_b, labels = zip(*batch, strict=True)
         labels = torch.tensor(labels, dtype=torch.float)  # (b,)
         tok_kwargs = _tokenize_kwargs(self.padding, self.max_length)
         tok_kwargs.pop('add_special_tokens', None)
@@ -203,14 +238,14 @@ class PairCollator_input_ids:
             seqs_a, seqs_b,
             **tok_kwargs,
         )  # tensor fields normally (b, l_t)
-        return {
+        return {  # input_ids, attention_mask: (b, l_t); labels: (b,)
             'input_ids': tokenized['input_ids'],
             'attention_mask': tokenized['attention_mask'],
             'labels': labels
         }
 
 
-class PairCollator_ab:
+class PairABCollator:
     def __init__(
         self,
         tokenizer: object,
@@ -222,8 +257,8 @@ class PairCollator_ab:
         self.padding = padding
         self.max_length = max_length
 
-    def __call__(self, batch: List[Tuple[str, str, Union[float, int]]]) -> Dict[str, torch.Tensor]:
-        seqs_a, seqs_b, labels = zip(*batch)
+    def __call__(self, batch: list[tuple[str, str, float | int]]) -> dict[str, torch.Tensor]:
+        seqs_a, seqs_b, labels = zip(*batch, strict=True)
         labels = torch.tensor(labels, dtype=torch.float)  # (b,)
         tok_kwargs = _tokenize_kwargs(self.padding, self.max_length)
         tokenized_a = self.tokenizer(
@@ -234,7 +269,7 @@ class PairCollator_ab:
             seqs_b,
             **tok_kwargs,
         )  # tensor fields normally (b, l_b)
-        return {
+        return {  # input_ids_a, attention_mask_a: (b, l_a); input_ids_b, attention_mask_b: (b, l_b); labels: (b,)
             'input_ids_a': tokenized_a['input_ids'],
             'input_ids_b': tokenized_b['input_ids'],
             'attention_mask_a': tokenized_a['attention_mask'],
@@ -253,7 +288,8 @@ class PairEmbedsLabelsCollator:
         self.full = full
         self.add_token_ids = add_token_ids
 
-    def __call__(self, batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+    def __call__(self, batch: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]) -> dict[str, torch.Tensor]:
+        # batch: (b,) tuples of (embedding a (l_a_i, d) or (*s, d_a), embedding b (l_b_i, d) or (*s, d_b), label () or s_y)
         if self.full:
             embeds_a = [ex[0] for ex in batch]  # b tensors shaped (l_a_i, d)
             embeds_b = [ex[1] for ex in batch]  # b tensors shaped (l_b_i, d)
@@ -278,14 +314,14 @@ class PairEmbedsLabelsCollator:
                     a_len = int(attention_mask_a[i].sum().item())  # l_a_i
                     b_len = int(attention_mask_b[i].sum().item())  # l_b_i
                     token_type_ids[i, a_len:a_len + b_len] = 1  # (b_len,)
-                return {
+                return {  # embeddings: (b, l_pair, d); attention_mask, token_type_ids: (b, l_pair); labels: (b,) or (b, *s_y)
                     'embeddings': embeds,
                     'attention_mask': attention_mask,
                     'token_type_ids': token_type_ids,
                     'labels': labels
                 }
 
-            return {
+            return {  # embeddings: (b, l_pair, d); attention_mask: (b, l_pair); labels: (b,) or (b, *s_y)
                 'embeddings': embeds,
                 'attention_mask': attention_mask,
                 'labels': labels
@@ -295,7 +331,7 @@ class PairEmbedsLabelsCollator:
             embeds_b = torch.stack([ex[1] for ex in batch])  # (b, *s, d_b)
             labels = torch.stack([ex[2] for ex in batch])  # (b,) or (b, *s_y)
             embeds = torch.cat([embeds_a, embeds_b], dim=-1)  # (b, *s, d_a + d_b)
-            return {
+            return {  # embeddings: (b, *s, d_a + d_b); labels: (b,) or (b, *s_y)
                 'embeddings': embeds,
                 'labels': labels
             }
@@ -307,13 +343,13 @@ class OneHotCollator:
         self.alphabet = list(alphabet)
         self.mapping = {token: idx for idx, token in enumerate(self.alphabet)}
 
-    def __call__(self, batch: List[Tuple[str, Any]]) -> Dict[str, torch.Tensor]:
+    def __call__(self, batch: list[tuple[str, Any]]) -> dict[str, torch.Tensor]:
         seqs = [ex[0] for ex in batch]
         labels = torch.stack([torch.tensor(ex[1]) for ex in batch])  # (b,) or (b, *s_y)
         max_len = max(len(seq) for seq in seqs)  # l_max
 
-        one_hot_tensors: List[torch.Tensor] = []
-        attention_masks: List[torch.Tensor] = []
+        one_hot_tensors: list[torch.Tensor] = []
+        attention_masks: list[torch.Tensor] = []
 
         for seq in seqs:
             seq = list(seq)
@@ -341,7 +377,7 @@ class OneHotCollator:
         embeddings = torch.stack(one_hot_tensors)  # (b, l_max, c)
         attention_masks = torch.stack(attention_masks)  # (b, l_max)
 
-        return {
+        return {  # embeddings: (b, l_max, c); attention_mask: (b, l_max); labels: (b,) or (b, *s_y)
             'embeddings': embeddings,
             'attention_mask': attention_masks,
             'labels': labels,

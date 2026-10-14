@@ -1,47 +1,50 @@
 import torch
 import torch.nn as nn
+
 from torch.nn import CrossEntropyLoss, MSELoss, BCEWithLogitsLoss
-from typing import Optional, Tuple, Union
-from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassifierOutput
 from transformers import T5EncoderModel, T5Config
+from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassifierOutput
 
 
 class T5ClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
 
-    def __init__(self, config: T5Config):
+    def __init__(self, config: T5Config) -> None:
         super().__init__()
         self.dense = nn.Linear(config.d_model, config.d_model)
         self.dropout = nn.Dropout(p=config.classifier_dropout)
         self.out_proj = nn.Linear(config.d_model, config.num_labels)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.dense(hidden_states)
-        hidden_states = torch.tanh(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.out_proj(hidden_states)
-        return hidden_states
+        # hidden_states: (..., d); d = config.d_model
+        hidden_states = self.dropout(hidden_states)  # (..., d)
+        hidden_states = self.dense(hidden_states)  # (..., d)
+        hidden_states = torch.tanh(hidden_states)  # (..., d)
+        hidden_states = self.dropout(hidden_states)  # (..., d)
+        hidden_states = self.out_proj(hidden_states)  # (..., c), c = config.num_labels
+        return hidden_states  # (..., c)
 
 
 class T5ForSequenceClassification(T5EncoderModel):
     config_class = T5Config
     all_tied_weights_keys = {}
-    def __init__(self, config: T5Config):
+    def __init__(self, config: T5Config) -> None:
         super().__init__(config)
         self.classifier = T5ClassificationHead(config)
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        labels: Optional[torch.Tensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.FloatTensor | None = None,
+        head_mask: torch.FloatTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        labels: torch.Tensor | None = None,
     ) -> SequenceClassifierOutput:
+        # input_ids: (b, l); attention_mask: (b, l); inputs_embeds: (b, l, d); head_mask: (h,) or (n_layers, h)
+        # labels: (b,) for single-label classes, (b, c) for multi-label, (b,) or (b, c) for regression
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         encoder_outputs = self.encoder(
@@ -54,10 +57,10 @@ class T5ForSequenceClassification(T5EncoderModel):
             return_dict=return_dict,
         )
 
-        sequence_output = encoder_outputs[0]
-        cls_token = sequence_output[:, 0, :]
+        sequence_output = encoder_outputs[0]  # (b, l, d)
+        cls_token = sequence_output[:, 0, :]  # (b, d)
 
-        logits = self.classifier(cls_token)
+        logits = self.classifier(cls_token)  # (b, c)
 
         loss = None
         if labels is not None:
@@ -92,21 +95,23 @@ class T5ForSequenceClassification(T5EncoderModel):
 class T5ForTokenClassification(T5EncoderModel):
     config_class = T5Config
     all_tied_weights_keys = {}
-    def __init__(self, config: T5Config):
+    def __init__(self, config: T5Config) -> None:
         super().__init__(config)
         self.classifier = T5ClassificationHead(config)
 
     def forward(
         self,
-        input_ids: Optional[torch.LongTensor] = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        head_mask: Optional[torch.FloatTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-        labels: Optional[torch.Tensor] = None,
+        input_ids: torch.LongTensor | None = None,
+        attention_mask: torch.FloatTensor | None = None,
+        head_mask: torch.FloatTensor | None = None,
+        inputs_embeds: torch.FloatTensor | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        labels: torch.Tensor | None = None,
     ) -> TokenClassifierOutput:
+        # input_ids: (b, l); attention_mask: (b, l); inputs_embeds: (b, l, d); head_mask: (h,) or (n_layers, h)
+        # labels: (b, l) for single-label classes, (b, l, c) for multi-label, (b, l) or (b, l, c) for regression
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         encoder_outputs = self.encoder(
@@ -119,9 +124,9 @@ class T5ForTokenClassification(T5EncoderModel):
             return_dict=return_dict,
         )
 
-        sequence_output = encoder_outputs[0]
+        sequence_output = encoder_outputs[0]  # (b, l, d)
 
-        logits = self.classifier(sequence_output)
+        logits = self.classifier(sequence_output)  # (b, l, c)
 
         loss = None
         if labels is not None:

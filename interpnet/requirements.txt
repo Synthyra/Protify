@@ -1,0 +1,5 @@
+# What the InterpNet model family imports, at the versions its tests pass on. FastPLMs, which the
+# kernels attention backend imports, is a workspace model family, not a distribution.
+einops>=0.8.2
+torch>=2.14
+transformers>=5.17

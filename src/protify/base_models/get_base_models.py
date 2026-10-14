@@ -1,10 +1,14 @@
-from dataclasses import dataclass
-from typing import List, Optional
+import torch
 
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from .control_bases import is_control_model
 from .supported_models import currently_supported_models, standard_models, experimental_models
 
 
-def _expand_sae_name(name: str, sae_layer: Optional[int], sae_k: Optional[int], sae_codebook_dim: Optional[int]) -> str:
+def _expand_sae_name(name: str, sae_layer: int | None, sae_k: int | None, sae_codebook_dim: int | None) -> str:
     """Resolve an ESMC SAE alias to a name that names its checkpoint, leaving others alone.
 
     The resolved name flows into embedding cache filenames and result tables, so an SAE
@@ -19,7 +23,7 @@ def _expand_sae_name(name: str, sae_layer: Optional[int], sae_k: Optional[int], 
 
 @dataclass
 class BaseModelArguments:
-    def __init__(self, model_names: Optional[List[str]] = None, model_paths: Optional[List[str]] = None, model_types: Optional[List[str]] = None, model_dtype: object = None, sae_layer: Optional[int] = None, sae_k: Optional[int] = None, sae_codebook_dim: Optional[int] = None, **kwargs) -> None:
+    def __init__(self, model_names: list[str] | None = None, model_paths: list[str] | None = None, model_types: list[str] | None = None, model_dtype: object = None, sae_layer: int | None = None, sae_k: int | None = None, sae_codebook_dim: int | None = None, **kwargs: Any) -> None:
         if model_paths is not None:
             assert model_types is not None, "model_types is required when model_paths is provided."
             assert len(model_paths) == len(model_types), f"model_paths ({len(model_paths)}) and model_types ({len(model_types)}) must have the same length."
@@ -41,15 +45,14 @@ class BaseModelArguments:
             ]
         self.model_dtype = model_dtype
 
-    def model_entries(self):
+    def model_entries(self) -> Iterator[tuple[str, str, str | None]]:
         """Yields (display_name, dispatch_type, model_path) tuples for each model.
 
         In preset mode: dispatch_type is the preset name, model_path is None.
         In path mode: dispatch_type is the model type keyword, model_path is the explicit path.
         """
         if self._model_paths is not None:
-            for name, mtype, mpath in zip(self.model_names, self._model_types, self._model_paths):
-                yield name, mtype, mpath
+            yield from zip(self.model_names, self._model_types, self._model_paths, strict=True)
         else:
             for name in self.model_names:
                 yield name, name, None
@@ -67,7 +70,7 @@ def get_raw_sequence_length_limit(model_name: str, max_length: int) -> int:
     return max_length
 
 
-def resolve_data_max_length(model_names: List[str], max_length: int, trim: bool) -> int:
+def resolve_data_max_length(model_names: list[str], max_length: int, trim: bool) -> int:
     """Raw-sequence limit the dataset must satisfy for every model in this run.
 
     Under truncation, keep the largest raw input any selected tokenizer can consume and
@@ -82,17 +85,25 @@ def resolve_data_max_length(model_names: List[str], max_length: int, trim: bool)
     return min(raw_sequence_limits) if trim else max(raw_sequence_limits)
 
 
-def get_base_model(model_name: str, masked_lm: bool = False, dtype=None, model_path: str = None, pooling_types=None):
+def get_base_model(
+    model_name: str,
+    masked_lm: bool = False,
+    dtype: torch.dtype | None = None,
+    model_path: str | None = None,
+    pooling_types: Sequence[str] | None = None,
+) -> tuple[torch.nn.Module, Any]:
+    if is_control_model(model_name):
+        raise ValueError(
+            f"{model_name} is a control: its rows are generated where they are read "
+            f"(protify.base_models.control_bases) and no model is built or stored for it."
+        )
     if 'random' in model_name.lower():
         from .random import build_random_model
         return build_random_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
     elif '-sae' in model_name.lower():
         from .esmc_sae import build_esmc_sae_model
         return build_esmc_sae_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path, pooling_types=pooling_types)
-    elif 'esm2' in model_name.lower() and model_name.lower().count('esm2') == 1:
-        from .esm2 import build_esm2_model
-        return build_esm2_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
-    elif 'dsm' in model_name.lower():
+    elif ('esm2' in model_name.lower() and model_name.lower().count('esm2') == 1) or 'dsm' in model_name.lower():
         from .esm2 import build_esm2_model
         return build_esm2_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
     elif 'esmc' in model_name.lower():
@@ -117,8 +128,8 @@ def get_base_model(model_name: str, masked_lm: bool = False, dtype=None, model_p
         from .dplm import build_dplm_model
         return build_dplm_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
     elif 'protclm' in model_name.lower():
-        from .protCLM import build_protCLM
-        return build_protCLM(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
+        from .protCLM import build_protclm
+        return build_protclm(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
     elif 'onehot' in model_name.lower():
         from .one_hot import build_one_hot_model
         return build_one_hot_model(model_name, masked_lm=masked_lm, dtype=dtype, model_path=model_path)
@@ -142,7 +153,14 @@ def get_base_model(model_name: str, masked_lm: bool = False, dtype=None, model_p
         raise ValueError(f"Model {model_name} not supported")
 
 
-def get_base_model_for_training(model_name: str, tokenwise: bool = False, num_labels: int = None, hybrid: bool = False, dtype=None, model_path: str = None):
+def get_base_model_for_training(
+    model_name: str,
+    tokenwise: bool = False,
+    num_labels: int | None = None,
+    hybrid: bool = False,
+    dtype: torch.dtype | None = None,
+    model_path: str | None = None,
+) -> tuple[torch.nn.Module, Any]:
     if '-sae' in model_name.lower():
         raise ValueError(
             f"{model_name} reads a frozen sparse autoencoder off ESMC hidden states, so it "
@@ -177,8 +195,8 @@ def get_base_model_for_training(model_name: str, tokenwise: bool = False, num_la
         from .e1 import get_e1_for_training
         return get_e1_for_training(model_name, tokenwise, num_labels, hybrid, dtype=dtype, model_path=model_path)
     elif 'protclm' in model_name.lower():
-        from .protCLM import get_protCLM_for_training
-        return get_protCLM_for_training(model_name, tokenwise, num_labels, hybrid, dtype=dtype, model_path=model_path)
+        from .protCLM import get_protclm_for_training
+        return get_protclm_for_training(model_name, tokenwise, num_labels, hybrid, dtype=dtype, model_path=model_path)
     elif 'amplify' in model_name.lower():
         from .amplify import get_amplify_for_training
         return get_amplify_for_training(model_name, tokenwise, num_labels, hybrid, dtype=dtype, model_path=model_path)
@@ -192,7 +210,7 @@ def get_base_model_for_training(model_name: str, tokenwise: bool = False, num_la
         raise ValueError(f"Model {model_name} not supported")
 
 
-def get_tokenizer(model_name: str, model_path: str = None):
+def get_tokenizer(model_name: str, model_path: str | None = None) -> Any:
     if 'custom' in model_name.lower():
         from .custom_model import build_custom_tokenizer
         assert model_path is not None, "model_path is required for custom models. Use --model_paths and --model_types custom."
@@ -225,8 +243,8 @@ def get_tokenizer(model_name: str, model_path: str = None):
         from .e1 import get_e1_tokenizer
         return get_e1_tokenizer(model_name, model_path=model_path)
     elif 'protclm' in model_name.lower():
-        from .protCLM import get_protCLM_tokenizer
-        return get_protCLM_tokenizer(model_name, model_path=model_path)
+        from .protCLM import get_protclm_tokenizer
+        return get_protclm_tokenizer(model_name, model_path=model_path)
     elif 'onehot' in model_name.lower():
         from .one_hot import get_one_hot_tokenizer
         return get_one_hot_tokenizer(model_name, model_path=model_path)
@@ -294,7 +312,7 @@ if __name__ == '__main__':
     if args.download:
         ### This will download all standard models
         from torchinfo import summary
-        from ..utils import clear_screen
+        from ..console_output import clear_screen
         download_args = BaseModelArguments(model_names=['standard'])
         for model_name in download_args.model_names:
             model, tokenizer = get_base_model(model_name)

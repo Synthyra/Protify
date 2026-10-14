@@ -6,32 +6,35 @@ embedding them with various pooling methods, and reporting statistics
 on distribution, NaNs, and sparsity.
 """
 
-import json
 import argparse
+import json
 import math
 import random
 import numpy as np
 import torch
-from typing import Dict, List, Optional
+
 
 try:
     from data.data_mixin import DataMixin, DataArguments
     from embedder import Embedder, EmbeddingArguments
     from base_models.get_base_models import standard_models
     from seed_utils import set_global_seed, get_global_seed
-    from utils import print_message
+    from console_output import print_message
 except ImportError:
     from ..data.data_mixin import DataMixin, DataArguments
     from ..embedder import Embedder, EmbeddingArguments
     from ..base_models.get_base_models import standard_models
     from ..seed_utils import set_global_seed, get_global_seed
-    from ..utils import print_message
+    from ..console_output import print_message
 
 
 # Default test datasets
 DEFAULT_TEST_DATASETS = [
     'EC',  # multilabel
 ]
+
+# Diagnostics by dataset, then model, then pooling method.
+SuiteResults = dict[str, dict[str, dict[str, dict[str, float]]]]
 
 
 seed = get_global_seed()
@@ -40,11 +43,11 @@ if seed is not None:
     np.random.seed(seed)
 
 def load_and_sample_sequences(
-    dataset_names: List[str],
+    dataset_names: list[str],
     sample_frac: float = 0.1,
     max_length: int = 1024,
     trim: bool = False
-) -> Dict[str, List[str]]:
+) -> dict[str, list[str]]:
     """
     Load datasets and sample sequences from them.
 
@@ -101,22 +104,23 @@ def load_and_sample_sequences(
             
             print_message(f"Sampled {len(sampled)} sequences from {len(sequences)} total")
             
-        except Exception as e:
+        except Exception as e:  # noqa: broad-except  a dataset that fails to load is reported and skipped
             print_message(f"Error loading dataset {dataset_name}: {e}")
             continue
     
     return dataset_seqs
 
 
-def compute_diagnostics(embeddings: torch.Tensor, zero_eps: float = 1e-8) -> Dict[str, float]:
-    emb = embeddings.detach().float().cpu().numpy()
-    flat = emb.ravel()
+def compute_diagnostics(embeddings: torch.Tensor, zero_eps: float = 1e-8) -> dict[str, float]:
+    # embeddings: (n, d)
+    emb = embeddings.detach().float().cpu().numpy()  # (n, d)
+    flat = emb.ravel()  # (n * d,)
 
-    is_nan = np.isnan(flat)
-    is_inf = np.isinf(flat)
-    is_finite = np.isfinite(flat)
+    is_nan = np.isnan(flat)  # (n * d,)
+    is_inf = np.isinf(flat)  # (n * d,)
+    is_finite = np.isfinite(flat)  # (n * d,)
 
-    finite = flat[is_finite]
+    finite = flat[is_finite]  # (m,), m finite entries
     if finite.size == 0:
         # If everything is NaN/Inf
         return {
@@ -127,9 +131,9 @@ def compute_diagnostics(embeddings: torch.Tensor, zero_eps: float = 1e-8) -> Dic
             "inf_count": int(is_inf.sum()),
         }
 
-    near_zero = np.abs(finite) < zero_eps
+    near_zero = np.abs(finite) < zero_eps  # (m,)
 
-    sample_l2 = np.linalg.norm(emb, axis=1)
+    sample_l2 = np.linalg.norm(emb, axis=1)  # (n,)
 
     return {
         "n_samples": int(emb.shape[0]),
@@ -165,12 +169,12 @@ def compute_diagnostics(embeddings: torch.Tensor, zero_eps: float = 1e-8) -> Dic
 
 
 def embed_and_diagnose(
-    sequences: List[str],
+    sequences: list[str],
     model_name: str,
-    pooling_types: List[str],
+    pooling_types: list[str],
     batch_size: int = 16,
     num_workers: int = 0
-) -> Dict[str, Dict[str, float]]:
+) -> dict[str, dict[str, float]]:
     """
     Embed sequences and compute diagnostics for each pooling type.
     
@@ -228,11 +232,11 @@ def embed_and_diagnose(
             to_embed, save_path, embeddings_dict = embedder._read_embeddings_from_disk(model_name)
             
             if len(to_embed) > 0:
-                result = embedder._embed_sequences(
+                embedded = embedder._embed_sequences(
                     to_embed, save_path, model, tokenizer, embeddings_dict
                 )
-                if result is not None:
-                    embeddings_dict = result
+                if embedded is not None:
+                    embeddings_dict = embedded
             
             if embeddings_dict is None or len(embeddings_dict) == 0:
                 print_message(f"Warning: No embeddings returned for {model_name} with {pool_type}")
@@ -252,7 +256,7 @@ def embed_and_diagnose(
             diagnostics = compute_diagnostics(embeddings)
             results[pool_type] = diagnostics
             
-        except Exception as e:
+        except Exception as e:  # noqa: broad-except  a model that fails to embed is reported and skipped
             print_message(f"Error embedding with {model_name} using {pool_type}: {e}")
             import traceback
             traceback.print_exc()
@@ -262,13 +266,13 @@ def embed_and_diagnose(
 
 
 def run_test_suite(
-    dataset_names: Optional[List[str]] = None,
-    model_names: Optional[List[str]] = None,
-    pooling_methods: List[str] = ['cls', 'mean,var'],
+    dataset_names: list[str] | None = None,
+    model_names: list[str] | None = None,
+    pooling_methods: list[str] | None = None,
     sample_frac: float = 0.1,
     batch_size: int = 16,
     num_workers: int = 0
-) -> Dict:
+) -> SuiteResults:
     """
     Run the embedding test suite.
     """
@@ -277,8 +281,11 @@ def run_test_suite(
     
     if model_names is None:
         model_names = standard_models
+
+    if pooling_methods is None:
+        pooling_methods = ['cls', 'mean,var']
     
-    print_message(f"Running embedding test suite")
+    print_message("Running embedding test suite")
     print_message(f"Datasets: {dataset_names}")
     print_message(f"Models: {model_names}")
     print_message(f"Pooling methods: {pooling_methods}")
@@ -315,7 +322,7 @@ def run_test_suite(
     return all_results
 
 
-def print_table_results(results: Dict):
+def print_table_results(results: SuiteResults) -> None:
     """Print results in table format."""
     print("\n" + "="*100)
     print("EMBEDDING TEST SUITE RESULTS")
@@ -356,10 +363,10 @@ def print_table_results(results: Dict):
                 if anomalies:
                     print(f"Anomalies: {', '.join(anomalies)}")
                 else:
-                    print(f"No anomalies detected")
+                    print("No anomalies detected")
 
 
-def print_json_results(results: Dict):
+def print_json_results(results: SuiteResults) -> None:
     """Print results in JSON format."""
     print("\n" + "="*50)
     print("JSON RESULTS")
@@ -367,7 +374,7 @@ def print_json_results(results: Dict):
     print(json.dumps(results, indent=2))
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(
         description='Embedding Test Suite - Test embedding quality across datasets and models'
     )
@@ -376,7 +383,7 @@ def main():
         '--datasets',
         nargs='+',
         default=None,
-        help=f'List of dataset names to test (default: EC)'
+        help='List of dataset names to test (default: EC)'
     )
     
     parser.add_argument(
@@ -442,4 +449,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

@@ -9,9 +9,9 @@ snapshot. No model-repository Python code is executed.
 import itertools
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
-
 import torch
+
+from typing import Any
 from transformers import BatchEncoding
 
 
@@ -79,25 +79,25 @@ class AuditedCarbonTokenizer:
         return int(self._base_tokenizer.pad_token_id)
 
     @property
-    def eos_token_id(self) -> Optional[int]:
+    def eos_token_id(self) -> int | None:
         return self._base_tokenizer.eos_token_id
 
     @property
-    def cls_token_id(self) -> Optional[int]:
+    def cls_token_id(self) -> int | None:
         return self._base_tokenizer.cls_token_id
 
     @property
-    def mask_token_id(self) -> Optional[int]:
+    def mask_token_id(self) -> int | None:
         return self._base_tokenizer.mask_token_id
 
     @property
-    def sep_token_id(self) -> Optional[int]:
+    def sep_token_id(self) -> int | None:
         return self._base_tokenizer.sep_token_id
 
     def __len__(self) -> int:
         return self.vocab_size
 
-    def get_vocab(self) -> Dict[str, int]:
+    def get_vocab(self) -> dict[str, int]:
         vocab = self._base_vocab.copy()
         for token, token_id in self.dna_token_to_id.items():
             vocab.setdefault(token, token_id)
@@ -105,15 +105,15 @@ class AuditedCarbonTokenizer:
 
     def convert_tokens_to_ids(
         self,
-        tokens: Union[str, List[str]],
-    ) -> Union[int, List[int]]:
+        tokens: str | list[str],
+    ) -> int | list[int]:
         if isinstance(tokens, list):
             return [int(self.convert_tokens_to_ids(token)) for token in tokens]
         if tokens in self.dna_token_to_id:
             return self.dna_token_to_id[tokens]
         return int(self._base_tokenizer.convert_tokens_to_ids(tokens))
 
-    def _encode_dna(self, text: str) -> List[int]:
+    def _encode_dna(self, text: str) -> list[int]:
         if not text.startswith(DNA_OPEN_TOKEN) or not text.endswith(DNA_CLOSE_TOKEN):
             raise ValueError("Audited CARBON tokenizer accepts one <dna>...</dna> region")
         dna = text[len(DNA_OPEN_TOKEN):-len(DNA_CLOSE_TOKEN)]
@@ -133,13 +133,13 @@ class AuditedCarbonTokenizer:
 
     def __call__(
         self,
-        text: Union[str, List[str]],
+        text: str | list[str],
         add_special_tokens: bool = False,
-        padding: Union[bool, str] = False,
+        padding: bool | str = False,
         truncation: bool = False,
-        max_length: Optional[int] = None,
-        return_tensors: Optional[str] = None,
-        pad_to_multiple_of: Optional[int] = None,
+        max_length: int | None = None,
+        return_tensors: str | None = None,
+        pad_to_multiple_of: int | None = None,
         **kwargs: Any,
     ) -> BatchEncoding:
         if add_special_tokens:
@@ -168,8 +168,8 @@ class AuditedCarbonTokenizer:
         else:
             target_length = None
 
-        padded_ids: List[List[int]] = []
-        attention_masks: List[List[int]] = []
+        padded_ids: list[list[int]] = []
+        attention_masks: list[list[int]] = []
         for ids in all_ids:
             if target_length is None:
                 padded_ids.append(ids)
@@ -185,7 +185,7 @@ class AuditedCarbonTokenizer:
                 padded_ids.append(ids + [self.pad_token_id] * pad_length)
                 attention_masks.append([1] * len(ids) + [0] * pad_length)
 
-        result: Dict[str, Any] = {
+        encoded: dict[str, Any] = {
             "input_ids": padded_ids if is_batch else padded_ids[0],
             "attention_mask": attention_masks if is_batch else attention_masks[0],
         }
@@ -193,15 +193,15 @@ class AuditedCarbonTokenizer:
             rows = padded_ids
             if len({len(row) for row in rows}) != 1:
                 raise ValueError("Tensor output requires padding for variable-length batches")
-            result = {
+            encoded = {
                 "input_ids": torch.tensor(rows, dtype=torch.long),
                 "attention_mask": torch.tensor(attention_masks, dtype=torch.long),
             }
         elif return_tensors is not None:
             raise ValueError(f"Unsupported CARBON tensor type: {return_tensors}")
-        return BatchEncoding(result, tensor_type=return_tensors)
+        return BatchEncoding(encoded, tensor_type=return_tensors)
 
-    def save_pretrained(self, save_directory: str) -> Tuple[str, ...]:
+    def save_pretrained(self, save_directory: str) -> tuple[str, ...]:
         os.makedirs(save_directory, exist_ok=True)
         saved_files = list(self._base_tokenizer.save_pretrained(save_directory))
         metadata_path = os.path.join(save_directory, "carbon_preprocessing.json")

@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+
 from transformers import T5Config
 
 from src.protify.base_models.t5 import (
@@ -42,6 +43,7 @@ def test_t5_classification_heads_accept_optional_labels(
     labels: torch.Tensor,
     expected_shape: tuple[int, ...],
 ):
+    # labels: (b,) or (b, l)
     model = model_class(_tiny_config())
     input_ids = torch.tensor([[2, 3, 1, 0], [4, 1, 0, 0]])  # (b=2, l=4)
     attention_mask = input_ids.ne(0)  # (b, l)

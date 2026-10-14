@@ -12,6 +12,7 @@ parameters:
     max: 0.1
   
   # Parameters for both linear and transformer probes
+  # A transformer sweep draws only the multiples of head_size in this range.
   hidden_size:
     distribution: q_uniform
     min: 64
@@ -39,8 +40,8 @@ parameters:
     max: 8192
     q: 8
   
-  # Transformer probe pooling (only swept when probe_type=transformer)
-  # Strings are parsed: 'mean-cls' -> ['mean', 'cls']
+  # Transformer and Lyra probe pooling. Strings are parsed: 'mean-cls' -> ['mean', 'cls']
+  # A sweep offers each probe only the values it takes: Lyra gets the single types here.
   probe_pooling_types:
     values: ['mean', 'cls', 'mean-cls', 'mean-var']
 

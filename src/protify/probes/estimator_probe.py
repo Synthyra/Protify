@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import numpy as np
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 
 # Metrics, transformers, and the estimator libraries load inside the functions that need
@@ -42,6 +43,13 @@ ESTIMATOR_PROBE_TYPES = ("xgboost", "lightgbm", "random_forest")
 #
 # The lightgbm and random_forest values mirror the same shape and are not separately
 # measured. Override any of them with --scikit_model_args.
+#
+# Two parameters these defaults leave at XGBoost's own values were measured to matter on
+# much wider codebook features, which is why `--tune_estimator` searches both. On PPA-ppi
+# at codebook 131072 the whole gain from tuning was `reg_alpha` moving from 0 to 5.66,
+# worth 0.0215 Spearman; on designed-binder, which is 13.2% positive, it was
+# `scale_pos_weight` moving to 5.07, worth 0.0482 MCC. Neither was reselected as a default
+# here, because both were chosen on one dataset each.
 ESTIMATOR_DEFAULTS: dict[str, dict[str, Any]] = {
     "xgboost": {
         "n_estimators": 1000,
@@ -52,6 +60,9 @@ ESTIMATOR_DEFAULTS: dict[str, dict[str, Any]] = {
         "colsample_bytree": 0.3,
         "reg_lambda": 1.0,
         "tree_method": "hist",
+        # XGBoost's own default, written out because it is the knob to turn when a wide
+        # feature matrix will not fit: the histogram is max_bin entries per column.
+        "max_bin": 256,
         "early_stopping_rounds": 50,
     },
     "lightgbm": {
@@ -90,8 +101,26 @@ REGRESSION_TASK_TYPES = ("regression", "sigmoid_regression")
 SUPPORTED_TASK_TYPES = REGRESSION_TASK_TYPES + ("singlelabel", "multilabel")
 
 
+# The neural probes report through the Transformers Trainer, which prefixes a metric with
+# the split it came from: "eval_" from evaluate() and "test_" from predict(). The
+# estimators call the same metric functions directly, so their keys arrive bare. The
+# pipeline needs one schema across both, because a sweep reads its objective by name from
+# the validation metrics and the results table is written from the test metrics.
+VALID_METRIC_PREFIX = "eval"
+TEST_METRIC_PREFIX = "test"
+
+
 def is_estimator_probe(probe_type: str) -> bool:
     return probe_type in ESTIMATOR_PROBE_TYPES
+
+
+def with_split_metric_prefix(metrics: dict[str, float], split: str) -> dict[str, float]:
+    """Rename raw estimator metrics onto the Trainer's per-split convention.
+
+    Applied at the pipeline boundary rather than inside `train_estimator_probe`, which
+    keeps that function reporting the metric names its metric functions actually produce.
+    """
+    return {f"{split}_{name}": value for name, value in metrics.items()}
 
 
 def check_task_type(probe_type: str, task_type: str) -> None:
@@ -102,7 +131,7 @@ def check_task_type(probe_type: str, task_type: str) -> None:
         )
 
 
-def _load_estimator_classes(probe_type: str) -> tuple[type, type]:
+def _load_estimator_classes(probe_type: str) -> tuple[type[Any], type[Any]]:
     """Return the (classifier, regressor) pair for a probe type."""
     if probe_type == "xgboost":
         from xgboost import XGBClassifier, XGBRegressor
@@ -157,13 +186,14 @@ def build_estimator(args: EstimatorProbeArguments) -> Any:
 
 def _fit(
     estimator: Any,
-    X_train: np.ndarray,
+    X_train: Any,
     y_train: np.ndarray,
-    X_valid: np.ndarray,
+    X_valid: Any,
     y_valid: np.ndarray,
 ) -> Any:
     """Fit an estimator, passing a validation set when it supports early stopping."""
-    # X_train: (n_train, d); y_train: (n_train,) or (n_train, c)
+    # X_train: (n_train, d), dense or CSR; y_train: (n_train,) or (n_train, c)
+    # y_valid: (n_valid,) or (n_valid, c)
     uses_early_stopping = getattr(estimator, "early_stopping_rounds", None) is not None
     if uses_early_stopping:
         estimator.fit(X_train, y_train, eval_set=[(X_valid, y_valid)], verbose=False)
@@ -212,7 +242,7 @@ def _predictions(estimator: Any, X: np.ndarray, task_type: str) -> np.ndarray:
         per_label = estimator.predict_proba(X)
         probabilities = np.stack(
             [_positive_probability(block, classes)
-             for block, classes in zip(per_label, estimator.classes_)],
+             for block, classes in zip(per_label, estimator.classes_, strict=True)],
             axis=1,
         )  # (n, c)
         probabilities = np.clip(probabilities, _PROBABILITY_EPSILON, 1.0 - _PROBABILITY_EPSILON)
@@ -247,38 +277,62 @@ def _metric_function(task_type: str) -> Callable[[Any], dict[str, float]]:
     return compute_single_label_classification_metrics
 
 
-def train_estimator_probe(
-    args: EstimatorProbeArguments,
-    X_train: np.ndarray,
-    y_train: np.ndarray,
-    X_valid: np.ndarray,
-    y_valid: np.ndarray,
-    X_test: np.ndarray,
-    y_test: np.ndarray,
-) -> tuple[Any, dict[str, float], dict[str, float]]:
-    """Fit one estimator probe and score it on the validation and test splits."""
-    # X_*: (n_split, d); y_*: (n_split,) or (n_split, c)
+def score_split(estimator: Any, X: Any, y: np.ndarray, task_type: str) -> dict[str, float]:
+    """Metrics for one already-fitted estimator on one split."""
+    # X: (n, d); y: (n,) or (n, c)
     from transformers import EvalPrediction
 
+    compute_metrics = _metric_function(task_type)
+    return compute_metrics(
+        EvalPrediction(predictions=_predictions(estimator, X, task_type), label_ids=y)
+    )
+
+
+def fit_and_score_valid(
+    args: EstimatorProbeArguments,
+    X_train: Any,
+    y_train: np.ndarray,
+    X_valid: Any,
+    y_valid: np.ndarray,
+) -> tuple[Any, dict[str, float]]:
+    """Fit one estimator probe and score it on validation only.
+
+    Separate from `train_estimator_probe` so a hyperparameter search can refit many times
+    without the test split ever being read.
+    """
+    # X_*: (n_split, d), dense or CSR; y_*: (n_split,) or (n_split, c)
+    # y_train: (n_train,) or (n_train, c), y_valid: (n_valid,) or (n_valid, c)
     try:
-        from utils import print_message
+        from data.feature_matrix import matrix_density
+        from console_output import print_message
     except ImportError:
-        from ..utils import print_message
+        from ..data.feature_matrix import matrix_density
+        from ..console_output import print_message
 
     estimator = build_estimator(args)
     print_message(
         f"Fitting {args.probe_type} probe on {X_train.shape[0]} samples "
         f"with {X_train.shape[1]} features "
-        f"({100 * float(np.count_nonzero(X_train)) / X_train.size:.1f}% non-zero)"
+        f"({100 * matrix_density(X_train):.1f}% non-zero)"
     )
     estimator = _fit(estimator, X_train, y_train, X_valid, y_valid)
 
-    compute_metrics = _metric_function(args.task_type)
-    valid_metrics = compute_metrics(
-        EvalPrediction(predictions=_predictions(estimator, X_valid, args.task_type), label_ids=y_valid)
-    )
-    test_metrics = compute_metrics(
-        EvalPrediction(predictions=_predictions(estimator, X_test, args.task_type), label_ids=y_test)
-    )
+    return estimator, score_split(estimator, X_valid, y_valid, args.task_type)
+
+
+def train_estimator_probe(
+    args: EstimatorProbeArguments,
+    X_train: Any,
+    y_train: np.ndarray,
+    X_valid: Any,
+    y_valid: np.ndarray,
+    X_test: Any,
+    y_test: np.ndarray,
+) -> tuple[Any, dict[str, float], dict[str, float]]:
+    """Fit one estimator probe and score it on the validation and test splits."""
+    # X_*: (n_split, d), dense or CSR; y_*: (n_split,) or (n_split, c)
+    # y_train: (n_train,) or (n_train, c), y_valid: (n_valid,) or (n_valid, c), y_test: (n_test,) or (n_test, c)
+    estimator, valid_metrics = fit_and_score_valid(args, X_train, y_train, X_valid, y_valid)
+    test_metrics = score_split(estimator, X_test, y_test, args.task_type)
 
     return estimator, valid_metrics, test_metrics

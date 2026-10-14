@@ -9,8 +9,9 @@ import json
 import os
 import sys
 import time
+
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 def _is_json_scalar(value: Any) -> bool:
@@ -35,20 +36,20 @@ def _should_auto_run_cloud(args: Any) -> bool:
         return False
     if getattr(args, "replay_path", None) is not None:
         return False
-    return getattr(args, "cloud_api_key", None) is not None
+    return bool(getattr(args, "cloud", False))
 
 
-def _build_cloud_config_from_args(args: Any) -> Dict[str, Any]:
+def _build_cloud_config_from_args(args: Any) -> dict[str, Any]:
     """Build a config dict from CLI args, excluding cloud-specific keys."""
     excluded_keys = {
-        "cloud_api_key",
+        "cloud",
         "cloud_url",
         "cloud_gpu_type",
         "cloud_timeout_seconds",
         "cloud_poll_interval",
         "cloud_artifacts_dir",
     }
-    config: Dict[str, Any] = {}
+    config: dict[str, Any] = {}
     for key, value in args.__dict__.items():
         if key in excluded_keys:
             continue
@@ -58,7 +59,7 @@ def _build_cloud_config_from_args(args: Any) -> Dict[str, Any]:
 
 
 def _save_cloud_artifacts(
-    result_payload: Dict[str, Any],
+    result_payload: dict[str, Any],
     output_root: str,
     job_id: str,
 ) -> str:
@@ -80,11 +81,11 @@ def _save_cloud_artifacts(
         plots_dir.mkdir(exist_ok=True)
         for img in images:
             filename = img.get("filename", "plot.png")
-            data = img.get("data", "")
-            if data:
+            encoded_image = img.get("data", "")
+            if encoded_image:
                 img_path = plots_dir / filename
                 with open(img_path, "wb") as f:
-                    f.write(base64.b64decode(data))
+                    f.write(base64.b64decode(encoded_image))
 
     # Save summary
     summary_path = job_dir / "cloud_fetch_summary.json"
@@ -98,10 +99,10 @@ def _run_on_cloud(args: Any) -> int:
     """Main entry point for cloud execution. Returns exit code (0=success, 1=failure)."""
     from cloud_backend import get_or_create_cloud_backend
 
-    api_key = args.cloud_api_key
+    api_key = os.environ.get("SYNTHYRA_API_KEY")
     base_url = getattr(args, "cloud_url", None)
     backend = get_or_create_cloud_backend(api_key=api_key, base_url=base_url)
-    assert backend is not None, "No cloud backend available. Provide --cloud_api_key."
+    assert backend is not None, "A cloud run needs a Synthyra API key: set SYNTHYRA_API_KEY to the key from synthyra.com."
 
     gpu_type = getattr(args, "cloud_gpu_type", None) or "A10"
     timeout_seconds = getattr(args, "cloud_timeout_seconds", None) or 86400
@@ -137,8 +138,8 @@ def _run_on_cloud(args: Any) -> int:
     last_status_line = ""
     log_offset = 0
 
-    final_status: Optional[str] = None
-    final_error: Optional[str] = None
+    final_status: str | None = None
+    final_error: str | None = None
 
     while True:
         # Stream logs
@@ -149,13 +150,13 @@ def _run_on_cloud(args: Any) -> int:
                 sys.stdout.write(content)
                 sys.stdout.flush()
                 log_offset = log_resp.get("next_offset", log_offset + len(content))
-        except Exception:
+        except Exception:  # noqa: broad-except silent-except a failed log poll is skipped; the status poll below reports the job
             pass
 
         # Poll status
         try:
             status_resp = backend.get_job_status(job_id=job_id)
-        except Exception as e:
+        except Exception as e:  # noqa: broad-except a failed status poll is printed and polling retries
             print(f"[Cloud] Status poll error: {e}")
             time.sleep(max(1, int(poll_interval)))
             continue
@@ -190,7 +191,7 @@ def _run_on_cloud(args: Any) -> int:
         if content:
             sys.stdout.write(content)
             sys.stdout.flush()
-    except Exception:
+    except Exception:  # noqa: broad-except silent-except the final log flush is best effort; the results fetch below still runs
         pass
 
     # Fetch results
@@ -202,7 +203,7 @@ def _run_on_cloud(args: Any) -> int:
             hub_url = results.get("hub_url")
             if hub_url:
                 print(f"Model pushed to: {hub_url}")
-    except Exception as e:
+    except Exception as e:  # noqa: broad-except a failed results fetch is printed and the final status still reports
         print(f"Failed to fetch results: {e}")
 
     # Report final status

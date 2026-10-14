@@ -2,9 +2,11 @@
 
 import torch
 import torch.nn as nn
+
 from typing import Any
 
-from .utils import ensure_fastplms_submodule_on_path, load_fastplms_model, select_hidden_state
+from .fastplms_loading import ensure_fastplms_submodule_on_path, load_fastplms_model
+from .hidden_state_selection import select_hidden_state
 
 
 ensure_fastplms_submodule_on_path()

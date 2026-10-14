@@ -9,6 +9,7 @@ the inverse transforms, and the multi-label case where a label never varies in t
 import numpy as np
 import pytest
 
+
 try:
     from src.protify.probes.estimator_probe import (
         EstimatorProbeArguments,

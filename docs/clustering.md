@@ -6,11 +6,12 @@ The implementation is in [`visualization/clustering.py`](../src/protify/visualiz
 
 ## Command-line workflow
 
-Cluster a Protify `.pth` embedding dictionary or SQLite embedding database:
+Cluster the rows of a Protify embedding store (a feature store directory) for the sequences in a text file, one per line:
 
 ```bash
 python -m src.protify.visualization.clustering \
-  --input embeddings/ESM2-650_False_mean.pth \
+  --input embeddings/protify__ESM2-650__vector__mean__len2048__float32__<digest> \
+  --ids_file sequences.txt \
   --output_dir plots/clustering/esm2_650 \
   --algorithms kmeans agglomerative dbscan optics \
   --n_clusters 8 \
@@ -18,13 +19,14 @@ python -m src.protify.visualization.clustering \
   --reductions pca tsne
 ```
 
-If `--output_dir` is omitted, artifacts go to `plots/clustering/<input-stem>/`.
+A store is looked up by sequence and lists none, so `--ids_file` is required for a store directory. If `--output_dir` is omitted, artifacts go to `plots/clustering/<input-stem>/`.
 
 For per-token matrix embeddings, one or more pooling operations can be concatenated:
 
 ```bash
 python -m src.protify.visualization.clustering \
-  --input embeddings/ESM2-650_True.pth \
+  --input embeddings/protify__ESM2-650__matrix__len2048__float32__<digest> \
+  --ids_file sequences.txt \
   --pooling_types mean var max \
   --algorithms all \
   --n_clusters 12
@@ -36,14 +38,15 @@ Supported pooling operations are `mean`, `max`, `norm`, `median`, `std`, `var`, 
 
 The loader accepts:
 
+- A directory: a feature store, which Protify writes. Pass `ids`, the sequences to read (`--ids_file` on the command line). A per-token store keeps its leading and trailing special tokens, so a matrix has `len(sequence) + 2` rows.
 - `.pt` or `.pth`: a mapping from record IDs or sequences to `(d,)` vectors or `(l, d)` token matrices.
 - `.npy`: an `(n, d)` vector matrix or `(n, l, d)` stack of token matrices.
 - `.npz`: an `embeddings` array and optional `ids` array. A single non-ID array is also accepted.
 - `.csv` or `.tsv`: one record per row, with numeric feature columns and an optional ID column. Use `--csv_id_column` when it cannot be inferred.
-- `.db`, `.sqlite`, or `.sqlite3`: Protify's `embeddings(sequence, embedding)` SQLite schema.
+- `.db`, `.sqlite`, or `.sqlite3`: a cache in Protify's original `embeddings(sequence, embedding)` SQLite format, read only through the read-only decoder in `legacy_cache.py`. Convert it into a store with `python -m src.protify.legacy_cache` to keep it.
 - Direct NumPy arrays, Torch tensors, mappings, or a Python `VectorSource` adapter.
 
-Modern Protify SQLite blobs carry their tensor shape. Legacy raw-float blobs require `--legacy_embedding_dim` so the feature width is explicit.
+Original Protify SQLite blobs carry their tensor shape. Raw-float blobs from before that require `--legacy_embedding_dim` so the feature width is explicit.
 
 FastPLMs result databases and third-party services such as FAISS, Chroma, Qdrant, Pinecone, or Weaviate use different schemas and are not opened implicitly. Connect them through the small adapter protocol instead:
 

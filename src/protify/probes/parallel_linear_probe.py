@@ -1,10 +1,12 @@
 import torch
 import torch.nn.functional as F
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 from torch import nn
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import SequenceClassifierOutput
+
 
 try:
     from .mlp_probe import MLPProbe, MLPProbeConfig
@@ -79,7 +81,7 @@ class ParallelLinear(nn.Module):
             self.register_parameter("bias", None)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        # inputs: shared (b, d_in) or run-specific (b, r, d_in).
+        # inputs: (b, d_in) shared or (b, r, d_in) run-specific.
         weight_t = self.weight.transpose(1, 2)  # (r, d_in, d_out)
         if inputs.ndim == 2:
             output = torch.matmul(inputs, weight_t).transpose(0, 1)  # (b, r, d_out)
@@ -110,7 +112,7 @@ class ParallelLayerNorm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(num_runs, normalized_shape))  # (r, d)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        # inputs: shared (b, d) or run-specific (b, r, d).
+        # inputs: (b, d) shared or (b, r, d) run-specific.
         if inputs.ndim == 2:
             inputs = inputs.unsqueeze(1).expand(-1, self.num_runs, -1)  # (b, r, d)
         assert inputs.ndim == 3, f"Expected 2D or 3D input, got shape {tuple(inputs.shape)}"
@@ -217,7 +219,7 @@ class ParallelLinearProbe(PreTrainedModel):
                 assert len(parallel_param_layers) == len(single_param_layers), (
                     f"Layer count mismatch: {len(parallel_param_layers)} parallel vs {len(single_param_layers)} single"
                 )
-                for parallel_layer, single_layer in zip(parallel_param_layers, single_param_layers):
+                for parallel_layer, single_layer in zip(parallel_param_layers, single_param_layers, strict=True):
                     if isinstance(parallel_layer, ParallelLinear):
                         assert isinstance(single_layer, nn.Linear), (
                             "Expected nn.Linear while importing seeded probe."
@@ -239,7 +241,7 @@ class ParallelLinearProbe(PreTrainedModel):
         batch_size: int,
         task_name: str,
     ) -> torch.Tensor:
-        # labels: shared (b,), (b, c), or run-specific (b, r), (b, r, c).
+        # labels: (b,) or (b, c) shared, or (b, r) or (b, r, c) run-specific.
         target = labels.float()  # same shape as labels
         if target.ndim == 3:
             assert target.shape[0] == batch_size, (
@@ -284,7 +286,7 @@ class ParallelLinearProbe(PreTrainedModel):
         return target  # (b, r, c)
 
     def _losses_by_run(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        # logits: (b, r, c); labels follow the task-specific shared/run-specific contracts.
+        # logits: (b, r, c); labels: (b,), (b, c), (b, r) or (b, r, c), by the task's shared and run-specific contracts.
         batch_size = logits.shape[0]
         if self.task_type == 'singlelabel':
             labels_have_run_dimension = (
@@ -370,6 +372,7 @@ class ParallelLinearProbe(PreTrainedModel):
         raise ValueError(f"Task type {self.task_type} not supported by ParallelLinearProbe.")
 
     def _loss(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        # logits: (b, r, c), labels: (b,), (b, c), (b, r) or (b, r, c)
         losses_by_run = self._losses_by_run(logits, labels)  # (r,)
         if self.training:
             return losses_by_run.sum()  # ()
@@ -383,8 +386,8 @@ class ParallelLinearProbe(PreTrainedModel):
     ) -> SequenceClassifierOutput:
         del attention_mask
         first_param = next(self.parameters())  # Parameter tensor; only its dtype is used.
-        # embeddings: shared (b, d) or run-specific (b, r, d).
-        # labels: task-specific shared or run-specific targets.
+        # embeddings: (b, d) shared or (b, r, d) run-specific, attention_mask: (b, l) or None and unused,
+        # labels: (b,), (b, c), (b, r) or (b, r, c), the task-specific shared or run-specific targets.
         hidden = embeddings.to(first_param.dtype)  # (b, d) or (b, r, d)
         assert hidden.ndim in (2, 3), (
             "ParallelLinearProbe currently supports pooled vector embeddings or run-specific pooled batches only. "
@@ -433,7 +436,7 @@ class ParallelLinearProbe(PreTrainedModel):
             f"Layer count mismatch: {len(parallel_param_layers)} parallel vs {len(single_param_layers)} single"
         )
         with torch.no_grad():
-            for parallel_layer, single_layer in zip(parallel_param_layers, single_param_layers):
+            for parallel_layer, single_layer in zip(parallel_param_layers, single_param_layers, strict=True):
                 if isinstance(parallel_layer, ParallelLinear):
                     assert isinstance(single_layer, nn.Linear), (
                         "Expected nn.Linear while exporting parallel linear layer."
@@ -566,7 +569,7 @@ class ParallelLinearProbeEnsemble(nn.Module):
         attention_mask: torch.Tensor | None = None,
         labels: torch.Tensor | None = None,
     ) -> SequenceClassifierOutput:
-        # embeddings: shared (b, d) or run-specific (b, r, d).
+        # embeddings: (b, d) shared or (b, r, d) run-specific, attention_mask: (b, l) or None, labels: (b,), (b, c), (b, r) or (b, r, c).
         output = self.parallel_probe(
             embeddings=embeddings,
             attention_mask=attention_mask,

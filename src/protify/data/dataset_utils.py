@@ -1,12 +1,11 @@
+from contextlib import suppress
+
 from .supported_datasets import (
     dataset_aliases,
     get_dataset_source,
-    internal_datasets,
-    possible_with_vector_reps,
     resolve_dataset_name,
     standard_data_benchmark,
     supported_datasets,
-    testing,
 )
 
 
@@ -68,7 +67,7 @@ def get_dataset_info(dataset_name: str) -> dict[str, object] | None:
     """Return metadata for a supported dataset name or alias."""
     canonical_name = resolve_dataset_name(dataset_name)
 
-    try:
+    with suppress(ImportError):
         from .dataset_descriptions import dataset_descriptions
 
         if canonical_name in dataset_descriptions:
@@ -77,8 +76,6 @@ def get_dataset_info(dataset_name: str) -> dict[str, object] | None:
                 dataset_info['name'] = canonical_name
                 dataset_info['alias'] = dataset_name
             return dataset_info
-    except ImportError:
-        pass
 
     if canonical_name in supported_datasets:
         return {"name": canonical_name, "source": get_dataset_source(canonical_name)}

@@ -1,6 +1,7 @@
+import pytest
+
 from dataclasses import replace
 
-import pytest
 
 try:
     from src.protify import probes as probes_package

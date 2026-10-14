@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+
 try:
     from src.protify.metrics_balanced import (
         compute_sample_weights,
@@ -209,7 +210,7 @@ def test_apply_weights_reference_different_distribution():
 
 
 def test_resampled_correlation_more_balanced_than_raw():
-    """On highly skewed data, resampled Pearson should differ from raw Pearson — EpHod's key motivation."""
+    """On highly skewed data, resampled Pearson should differ from raw Pearson, which is EpHod's key motivation."""
     rng = np.random.default_rng(15)
     y = _skewed_labels(rng)
     y_pred = y + rng.normal(0, 0.5, size=len(y))
@@ -217,12 +218,12 @@ def test_resampled_correlation_more_balanced_than_raw():
     raw_r = float(pearsonr(y, y_pred)[0])
     w = compute_sample_weights(y, method='bin_inv', bin_borders=[5, 9])
     m = compute_balanced_regression_metrics(y, y_pred, w, [5, 9], n_resamples=200, seed=0)
-    # Resampled should be higher — balanced data has wider spread, boosting correlation
+    # Resampled should be higher: balanced data has wider spread, boosting correlation
     assert m['weighted_pearson_rho'] > raw_r
 
 
 def _ephod_reference_performance(ytrue, ypred, weights, bins, n_resamples, seed):
-    """Direct port of EpHod's performance() from trainutils.py — ground truth for parity."""
+    """Direct port of EpHod's performance() from trainutils.py, the ground truth for parity."""
     from scipy.stats import spearmanr, pearsonr
     from sklearn import metrics as skm
     ytrue = np.asarray(ytrue, dtype=np.float64)

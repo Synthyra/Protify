@@ -1,13 +1,14 @@
 import csv
 import json
 import sqlite3
-
 import numpy as np
 import pytest
 import torch
+
 from sklearn.datasets import make_blobs
 
-from src.protify.utils import tensor_to_embedding_blob
+from src.protify.testing_suite.embedding_store_builder import build_store
+from src.protify.testing_suite.legacy_cache_writer import write_sqlite_cache
 from src.protify.visualization import clustering
 from src.protify.visualization.clustering import (
     SUPPORTED_ALGORITHMS,
@@ -26,7 +27,7 @@ def _cluster_matrix() -> np.ndarray:
         cluster_std=0.25,
         random_state=7,
     )
-    return vectors.astype(np.float32)
+    return vectors.astype(np.float32)  # (36, 4)
 
 
 def test_load_embeddings_pools_per_token_matrices() -> None:
@@ -65,23 +66,14 @@ def test_array_source_rejects_bare_string_ids() -> None:
 
 
 def test_load_embeddings_reads_protify_sqlite(tmp_path) -> None:
-    database_path = tmp_path / "embeddings.db"
-    with sqlite3.connect(database_path) as connection:
-        connection.execute(
-            "CREATE TABLE embeddings (sequence TEXT PRIMARY KEY, embedding BLOB)"
-        )
-        connection.executemany(
-            "INSERT INTO embeddings VALUES (?, ?)",
-            [
-                ("seq-b", tensor_to_embedding_blob(torch.tensor([3.0, 4.0]))),
-                (
-                    "seq-a",
-                    tensor_to_embedding_blob(
-                        torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-                    ),
-                ),
-            ],
-        )
+    """An old Protify SQLite cache is read through the legacy decoder, in the order it was written."""
+    database_path = write_sqlite_cache(
+        tmp_path / "embeddings.db",
+        {
+            "seq-b": torch.tensor([3.0, 4.0]),
+            "seq-a": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),
+        },
+    )
 
     table = load_embeddings(database_path, pooling_types=("mean",))
 
@@ -90,6 +82,124 @@ def test_load_embeddings_reads_protify_sqlite(tmp_path) -> None:
         table.vectors,
         np.array([[3.0, 4.0], [2.0, 3.0]], dtype=np.float32),
     )
+
+
+def test_a_sqlite_cache_is_not_created_or_changed_by_loading(tmp_path) -> None:
+    database_path = write_sqlite_cache(tmp_path / "embeddings.db", {"seq-a": torch.tensor([1.0, 2.0])}, wal=False)
+    before = sorted((path.name, path.read_bytes()) for path in tmp_path.iterdir())
+
+    load_embeddings(database_path)
+
+    assert sorted((path.name, path.read_bytes()) for path in tmp_path.iterdir()) == before
+
+
+def test_sqlite_input_names_the_schema_it_needs(tmp_path) -> None:
+    other = tmp_path / "other.db"
+    with sqlite3.connect(other) as connection:
+        connection.execute("CREATE TABLE unrelated (x INTEGER)")
+    narrow = tmp_path / "narrow.db"
+    with sqlite3.connect(narrow) as connection:
+        connection.execute("CREATE TABLE embeddings (sequence TEXT)")
+
+    with pytest.raises(ValueError, match=r"embeddings\(sequence, embedding\) schema"):
+        load_embeddings(other)
+    with pytest.raises(ValueError, match="sequence and embedding columns"):
+        load_embeddings(narrow)
+
+
+def test_sqlite_ids_cannot_override_the_stored_sequences(tmp_path) -> None:
+    database_path = write_sqlite_cache(tmp_path / "embeddings.db", {"seq-a": torch.tensor([1.0, 2.0])})
+
+    with pytest.raises(ValueError, match="ids cannot override identifiers in SQLite"):
+        load_embeddings(database_path, ids=["seq-a"])
+
+
+def test_load_embeddings_reads_a_feature_store_by_sequence(tmp_path) -> None:
+    directory = build_store(
+        tmp_path,
+        {
+            "seq-a": torch.tensor([1.0, 2.0]),
+            "seq-b": torch.tensor([3.0, 4.0]),
+            "seq-c": torch.tensor([5.0, 6.0]),
+        },
+    )
+
+    table = load_embeddings(directory, ids=["seq-c", "seq-a"])
+
+    assert table.ids == ("seq-c", "seq-a")
+    np.testing.assert_allclose(table.vectors, [[5.0, 6.0], [1.0, 2.0]])
+
+
+def test_a_feature_store_of_matrices_is_pooled_per_row(tmp_path) -> None:
+    directory = build_store(
+        tmp_path,
+        {
+            "alpha": torch.tensor([[1.0, 2.0], [3.0, 4.0]]),  # (l=2, d=2)
+            "beta": torch.tensor([[5.0, 1.0], [7.0, 3.0]]),  # (l, d)
+        },
+        matrix=True,
+    )
+
+    table = load_embeddings(directory, ids=["alpha", "beta"], pooling_types=("mean", "max"))
+
+    np.testing.assert_allclose(
+        table.vectors,
+        np.array([[2.0, 3.0, 3.0, 4.0], [6.0, 2.0, 7.0, 3.0]], dtype=np.float32),
+    )
+
+
+def test_a_sparse_feature_store_loads_dense_rows(tmp_path) -> None:
+    rows = {
+        "seq-a": torch.tensor([0.0, 2.5, 0.0, 0.0, 1.0, 0.0]),
+        "seq-b": torch.tensor([0.0, 0.0, 0.0, 4.0, 0.0, 0.0]),
+    }
+    # 16 of 8192 active is below the coordinate-list threshold, so this store keeps `csr` rows.
+    directory = build_store(tmp_path, rows, model_name="ESMC-300-SAE-l23-k16-c8192", pooling=("max",))
+
+    table = load_embeddings(directory, ids=["seq-a", "seq-b"])
+
+    np.testing.assert_allclose(table.vectors, np.stack([rows["seq-a"].numpy(), rows["seq-b"].numpy()]))
+
+
+def test_a_feature_store_needs_the_sequences_to_read(tmp_path) -> None:
+    directory = build_store(tmp_path, {"seq-a": torch.tensor([1.0, 2.0])})
+
+    with pytest.raises(ValueError, match="pass ids"):
+        load_embeddings(directory)
+
+
+def test_a_feature_store_missing_a_requested_sequence_is_refused(tmp_path) -> None:
+    directory = build_store(tmp_path, {"seq-a": torch.tensor([1.0, 2.0])})
+
+    with pytest.raises(ValueError, match="does not hold every requested id"):
+        load_embeddings(directory, ids=["seq-a", "seq-absent"])
+
+
+def test_the_command_line_clusters_a_feature_store_given_an_ids_file(tmp_path) -> None:
+    vectors = _cluster_matrix()  # (36, 4)
+    sequences = [f"seq-{index}" for index in range(len(vectors))]
+    directory = build_store(
+        tmp_path, {sequence: torch.from_numpy(row) for sequence, row in zip(sequences, vectors, strict=True)}
+    )
+    ids_file = tmp_path / "ids.txt"
+    ids_file.write_text("\n".join(sequences) + "\n", encoding="utf-8")
+    output_dir = tmp_path / "out"
+
+    workflow = clustering.main(
+        [
+            "--input", str(directory),
+            "--ids_file", str(ids_file),
+            "--output_dir", str(output_dir),
+            "--algorithms", "kmeans",
+            "--n_clusters", "3",
+            "--no_diagnostics",
+            "--reductions", "pca",
+        ]
+    )
+
+    assert workflow.table.ids == tuple(sequences)
+    np.testing.assert_allclose(workflow.table.vectors, vectors)
+    assert (output_dir / "assignments.tsv").is_file()
 
 
 def test_load_embeddings_reads_pth_mapping(tmp_path) -> None:
@@ -147,10 +257,10 @@ def test_supported_clusterers_return_one_label_per_record(algorithm: str, tmp_pa
         diagnostics=False,
     )
 
-    result = fit_clusterer(algorithm, vectors, config)
+    fitted = fit_clusterer(algorithm, vectors, config)
 
-    assert result.labels.shape == (len(vectors),)
-    assert result.metrics["n_clusters"] >= 1
+    assert fitted.labels.shape == (len(vectors),)
+    assert fitted.metrics["n_clusters"] >= 1
 
 
 def test_hdbscan_uses_distinct_density_parameters(tmp_path) -> None:
@@ -163,10 +273,10 @@ def test_hdbscan_uses_distinct_density_parameters(tmp_path) -> None:
         diagnostics=False,
     )
 
-    result = fit_clusterer("hdbscan", _cluster_matrix(), config)
+    fitted = fit_clusterer("hdbscan", _cluster_matrix(), config)
 
-    assert result.estimator.min_samples == 3
-    assert result.estimator.min_cluster_size == 7
+    assert fitted.estimator.min_samples == 3
+    assert fitted.estimator.min_cluster_size == 7
 
 
 def test_quadratic_algorithm_limit_is_explicit(tmp_path) -> None:
@@ -200,19 +310,19 @@ def test_clustering_workflow_standardizes_and_writes_artifacts(tmp_path) -> None
         dpi=72,
     )
 
-    result = run_clustering_workflow(vectors, config, ids=record_ids)
+    workflow = run_clustering_workflow(vectors, config, ids=record_ids)
 
-    assert result.table.ids == tuple(record_ids)
-    assert result.standardizer is not None
+    assert workflow.table.ids == tuple(record_ids)
+    assert workflow.standardizer is not None
     np.testing.assert_allclose(
-        result.transformed_vectors.mean(axis=0),
+        workflow.transformed_vectors.mean(axis=0),
         np.zeros(vectors.shape[1]),
         atol=1e-6,
     )
-    assert set(result.algorithms) == {"kmeans", "agglomerative", "dbscan"}
-    assert not result.errors
-    assert all(path.is_file() for path in result.plot_paths)
-    assert len(result.plot_paths) >= 10
+    assert set(workflow.algorithms) == {"kmeans", "agglomerative", "dbscan"}
+    assert not workflow.errors
+    assert all(path.is_file() for path in workflow.plot_paths)
+    assert len(workflow.plot_paths) >= 10
     for filename in (
         "assignments.tsv",
         "metrics.tsv",
@@ -249,11 +359,11 @@ def test_plot_failure_does_not_discard_assignments(tmp_path, monkeypatch) -> Non
         dpi=72,
     )
 
-    result = run_clustering_workflow(_cluster_matrix(), config)
+    workflow = run_clustering_workflow(_cluster_matrix(), config)
 
     assert (output_dir / "assignments.tsv").is_file()
     assert (output_dir / "metrics.tsv").is_file()
-    assert "plot:kmeans:cluster_sizes" in result.errors
+    assert "plot:kmeans:cluster_sizes" in workflow.errors
     saved_errors = json.loads((output_dir / "errors.json").read_text(encoding="utf-8"))
     assert "plot:kmeans:cluster_sizes" in saved_errors
 
@@ -270,9 +380,9 @@ def test_duplicate_vectors_do_not_break_kmeans_diagnostics(tmp_path) -> None:
         dpi=72,
     )
 
-    result = run_clustering_workflow(vectors, config)
+    workflow = run_clustering_workflow(vectors, config)
 
-    assert "kmeans" in result.algorithms
+    assert "kmeans" in workflow.algorithms
     assert (output_dir / "assignments.tsv").is_file()
     assert (output_dir / "kmeans_model_selection.png").is_file()
 

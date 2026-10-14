@@ -1,6 +1,6 @@
 # Probes and Training
 
-This page documents probe types (mlp, transformer, lyra, xgboost, lightgbm, random_forest), `ProbeArguments` and `get_probe`, `TrainerArguments` and `TrainerMixin`, and the training flows: probe-only (`run_nn_probes`), full finetuning, hybrid, and scikit. It also covers `num_runs` aggregation and model save/export.
+This page documents probe types (mlp, transformer, lyra, projected, sngp, xgboost, lightgbm, random_forest), `ProbeArguments` and `get_probe`, `TrainerArguments` and `TrainerMixin`, and the training flows: probe-only (`run_nn_probes`), full finetuning, hybrid, and scikit. It also covers `num_runs` aggregation, model save/export, and the uncertainty workflow the projected probes serve.
 
 ---
 
@@ -37,6 +37,8 @@ flowchart LR
 | **mlp** | Yes | No | Feed-forward stack on pooled embeddings. Fastest neural probe; good baseline. |
 | **transformer** | Yes | Yes | Transformer stack + pooler/classifier. Uses [model_components](model_components.md) Transformer. |
 | **lyra** | Yes | Yes | S4/Lyra probe; no shared model_components. |
+| **projected** | Yes | No | Per-branch clamp, LayerNorm, and projection into one fixed-width residual trunk; the head of representation comparisons. |
+| **sngp** | Yes | No | `projected` with spectral-bounded Linears and a random-feature Gaussian process output (single-label and regression). |
 | **xgboost** | Yes | No | Gradient-boosted trees on pooled embeddings. |
 | **lightgbm** | Yes | No | Gradient-boosted trees, leaf-wise growth. |
 | **random_forest** | Yes | No | Bagged trees; no early stopping. |
@@ -62,6 +64,143 @@ py -m src.protify.main --model_names ESMC-300-SAE --data_names gold-ppi \
   --scikit_model_args '{"max_depth": 10, "learning_rate": 0.03}'
 ```
 
+#### Tuning
+
+Those defaults were selected on one 8192-wide task and do not carry to a feature matrix
+sixteen or more times wider. `--tune_estimator` searches them with Optuna against the
+validation split, in process, with no account or network round trip:
+
+```bash
+py -m src.protify.main --model_names ESMC-6B-SAE --sae_k 16 --sae_codebook_dim 131072 \
+  --data_names gold-ppi --probe_type xgboost --embedding_pooling_types max \
+  --pair_feature_mode minmax --tune_estimator --tune_trials 40
+```
+
+- The first trial is the shipped defaults, so a search cannot land below an untuned run on
+  validation.
+- The objective is the metric the results table reports, `mcc` for classification and
+  `spearman_rho` for regression, overridable with `--tune_metric`. Scoring the search on
+  one metric and reporting another can move the reported one backwards: `scale_pos_weight`
+  shifts every predicted probability, which a threshold-free metric cannot see and a
+  thresholded one is punished by. On `gold-ppi`, which is 50.0% positive, twelve trials
+  against validation AUPRC chose `scale_pos_weight` 0.33 and took test MCC from 0.3000 down
+  to 0.2227, below the untuned defaults the search started from. Ask for `pr_auc` when the
+  positive class is rare and ranking is what you ship.
+- The search reads validation only. `--num_runs` seeds are fitted afterwards at the chosen
+  configuration, so the reported spread measures the seed and not a fresh search.
+- `n_estimators` is not searched: early stopping already picks the count. `max_bin` is not
+  searched either, because it is a memory decision and changing it rebins the whole matrix
+  on every trial.
+
+#### Feature matrices
+
+The splits an estimator probe fits come back compressed when the embeddings are sparse
+enough to warrant it, and dense otherwise, with the choice measured from a prefix of the
+rows and pinned across train, validation, and test. This is what lets a 131072-wide
+codebook reach a learner at all: the dense stack for a large pair dataset does not fit in
+host memory.
+
+Columns that are zero for every training row are dropped unless `--keep_dead_features`.
+They cannot produce a split, and keeping them dilutes the column sample of every tree. At
+`--sae_k 16 --sae_codebook_dim 131072` this typically removes two thirds of the width.
+
+`--estimator_device` decides where an xgboost probe fits. The GPU histogram is one buffer
+of `max_bin` entries per feature per node, so a wide matrix can exceed GPU memory even
+when the data itself is small; `cpu` trades speed for the host's larger memory. Lowering
+`max_bin` through `--scikit_model_args` divides that buffer directly and is usually the
+least damaging knob, because it coarsens split thresholds where cutting `max_depth`
+changes model capacity:
+
+```bash
+--scikit_model_args '{"max_bin": 64}'
+```
+
+#### Saving one
+
+`--save_model` writes the fitted estimator to `<model_save_dir>/<model>_<dataset>_<probe>`
+through [estimator_artifact.py](../src/protify/probes/estimator_artifact.py). An estimator
+is not a torch module, so it does not travel inside `PackagedProbeModel`; the directory
+holds the estimator, a plain-JSON recipe naming the backbone, pooling set, hidden-state
+index and pair mode, and the column selection the probe was fit on. `score_proteins`
+reloads all of it and scores raw sequences, re-embedding through the same `Embedder` the
+training run used so the representation cannot drift.
+
+```python
+from protify.probes.estimator_artifact import load_estimator_probe, score_proteins
+
+estimator, recipe, selection = load_estimator_probe("weights/<model>_<dataset>_xgboost")
+scores = score_proteins(estimator, recipe, selection, sequences, partners=partner_sequences)
+```
+
+`partners` is required when `recipe.ppi` is set and refused otherwise, because a pair row
+is not something a single protein can produce. Regression returns one value per protein,
+classification one probability per class, and multilabel one positive probability per
+label. Those are not the log probabilities `estimator_probe._predictions` returns: that
+function exists to feed metric functions written for neural probes, which read their input
+as raw logits.
+
+### Projected and SNGP probes
+
+`projected` and `sngp` build `ProjectedProbe` ([projected_probe.py](../src/protify/probes/projected_probe.py)),
+the one head the representation ablation trains on every arm. The input row is one or more
+branches, each a cached representation such as a max-pooled SAE codebook or a mean and
+variance of hidden states:
+
+- Each branch is clamped to plus or minus `input_clip` (10), layer-normalized, and projected
+  to `projection_size / k` for `k` branches. The clamp is for sparse features: after
+  standardization a feature active in one protein in ten thousand lands near a hundred
+  standard deviations out and would otherwise dominate its branch.
+- The projections are concatenated to `projection_size` (1024), then `n_layers` residual
+  blocks `h + Dropout(ReLU(Linear(h)))`, a LayerNorm, and the output layer. Only the branch
+  projections differ between arms, so the trunk cannot explain a difference between them.
+- `branch_widths` are one protein's branch widths. A pair row `[A | B]` is two slots of
+  them, and each branch reads its columns from both slots. With no widths the whole row is
+  one branch, which is how a single-model `--probe_type projected` run uses it.
+
+`sngp` is the same head with the TUnA recipe (SNGP, Liu et al. 2020, on frozen embeddings):
+every projection and trunk Linear is bounded to spectral norm `spectral_bound` (0.95), and
+the output is a Gaussian process over 1024 random Fourier features of the trunk output, with
+squared lengthscale `gp_lengthscale_squared` (1024). That is a `ProjectedProbeConfig` field
+with no `main.py` flag; an uncertainty cell sets it through `uncertainty.gp_lengthscale_squared`.
+After training, with the weights early stopping restored, `_train` calls `fit_posterior` over
+the training data once, which fits the Laplace posterior. Until then logits are the MAP ones,
+so early stopping reads the network it trains; after, classification logits are mean-field
+(`logits / sqrt(1 + pi / 8 * var)`) and `predict_with_variance` returns the variance.
+Classification weights each row by `p (1 - p)` of its top class. Regression uses the prior
+variance `Var(y_train)` and the training mean squared error as the noise, floored at
+`0.001 * Var(y_train)`, so a head that fits its training rows exactly keeps a positive noise
+rather than dividing the posterior precision by zero. Multilabel tasks need `projected`.
+
+The squared lengthscale is relative to the trunk output the Gaussian process reads, which
+leaves its final LayerNorm with squared norm `projection_size` at initialization. Two rows at
+correlation `rho` then have kernel `exp(-projection_size * (1 - rho) / gp_lengthscale_squared)`:
+at 1024 and the default width, `e^-1 = 0.37` for uncorrelated rows and never below
+`e^-2 = 0.14`. The LayerNorm gain trains without a bound, so the scale drifts. A CPU check
+trained a production-width head (projection and random features 1024) on synthetic clusters
+of 128 standardized features, 4 classes, and 10% label noise, over eight settings of learning
+rate, steps, seed, and cluster spread:
+
+| `gp_lengthscale_squared` | Trained to full accuracy | Kernel, different-class rows | Kernel, unseen-cluster row to nearest training row | Latent variance, unseen / near |
+|---|---|---|---|---|
+| 4096 | 8 of 8 | 0.62 to 0.67 | 0.86 to 0.92 | 2.4 to 9.6 |
+| 1024 | 8 of 8 | 0.18 to 0.26 | 0.46 to 0.66 | 1.7 to 9.5 |
+| 256 | 8 of 8 | 0.009 to 0.031 | 0.07 to 0.23 | 1.6 to 7.6 |
+| 128 | 8 of 8 | 0.0003 to 0.004 | 0.010 to 0.094 | 1.5 to 5.3 |
+| 64 | 6 of 8 | below 2e-5 | below 0.005 | 1.0 to 3.6 |
+| 16 | 1 of 6 | below 1e-17 | below 3e-9 | 1.0 to 1.4 |
+
+At 64 and below the head sometimes did not train at all, failing on the most diffuse clusters
+at 64 and on most settings at 16: rows that share a label share no random features at
+initialization, so the variance stays at the prior everywhere. From 128 up, the near-row
+negative log-likelihood varied by at most 0.014 nats within a setting, mostly favoring 4096 on
+tight clusters and 128 to 256 on the most diffuse ones. A tuning grid of {4096, 1024, 256}
+spans that range at even spacing with every point trainable in all eight settings;
+{1024, 128, 16} spends one of its three points on a value that trained once in six.
+
+Neither head has a packaged export yet, so `--save_model` falls back to pushing the raw
+probe. Their uncertainty is evaluated by the uncertainty workflow, `python -m
+protify.uncertainty`; see [Configuration](cli_and_config.md#uncertainty-cells).
+
 ---
 
 ## ProbeArguments
@@ -70,7 +209,7 @@ Defined in [get_probe.py](../src/protify/probes/get_probe.py). Key attributes (C
 
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
-| `probe_type` | str | mlp | mlp, transformer, lyra, xgboost, lightgbm, random_forest. "linear" is the former name for mlp. |
+| `probe_type` | str | mlp | mlp, transformer, lyra, projected, sngp, xgboost, lightgbm, random_forest. "linear" is the former name for mlp. |
 | `tokenwise` | bool | False | Token-wise prediction. |
 | `input_size` | int | 960 | Input dimension (set from embedding size). |
 | `hidden_size` | int | 8192 | Hidden size for the MLP probe. |
@@ -91,16 +230,22 @@ Defined in [get_probe.py](../src/protify/probes/get_probe.py). Key attributes (C
 | `rotary` | bool | True | Rotary embeddings. |
 | `attention_backend` | str | flex | kernels, flex, sdpa. |
 | `output_s_max` | bool | False | Return s_max from attention. |
-| `probe_pooling_types` | List[str] | ['mean', 'cls'] | Pooling types (stored as `pooling_types`). |
+| `probe_pooling_types` | List[str] | None | Pooling types for the transformer and Lyra probes (stored as `pooling_types`). None keeps each probe's default: `['mean', 'cls']` for the transformer probe, `['mean']` for Lyra, which takes one type. |
 | `lora` | bool | False | Use LoRA on base model (hybrid/full). |
 | `lora_r`, `lora_alpha`, `lora_dropout` | int, float, float | 8, 32.0, 0.01 | LoRA hyperparameters. |
+| `projection_size` | int | 1024 | `projected` and `sngp`: trunk width, split evenly across branches. |
+| `spectral_bound` | float | 0.95 | `sngp`: spectral norm bound of every projection and trunk Linear. |
+| `input_clip` | float | 10.0 | `projected` and `sngp`: clamp on each standardized branch input. |
+| `branch_widths` | List[int] | None | `projected` and `sngp`: one protein's branch widths; None is one branch. Set by the uncertainty workflow. |
+
+The last four are stored only when `probe_type` is `projected` or `sngp`, so every other probe serializes exactly the fields it did before they existed. `main.py` takes `--projection_size` and `--spectral_bound`; `input_clip` and `branch_widths` have no flag.
 
 ---
 
 ## get_probe and rebuild_probe_from_saved_config
 
 - **get_probe(args: ProbeArguments)**
-  Returns a probe instance: `MLPProbe`, `TransformerForSequenceClassification`, `TransformerForTokenClassification`, or the Lyra variants. Config is built from `args.__dict__` (with `hidden_size` overridden by `transformer_hidden_size` for transformer).
+  Returns a probe instance: `MLPProbe`, `TransformerForSequenceClassification`, `TransformerForTokenClassification`, the Lyra variants, or `ProjectedProbe` for `projected` and `sngp`. Config is built from `args.__dict__` (with `hidden_size` overridden by `transformer_hidden_size` for transformer).
 
 - **rebuild_probe_from_saved_config(probe_type, tokenwise, probe_config)**
   Rebuilds the same probe classes from a saved config dict (e.g. when loading a packaged model).
@@ -126,10 +271,10 @@ Defined in [trainers.py](../src/protify/probes/trainers.py).
 | `optimizer` | str | adamw_torch | Hugging Face `TrainingArguments.optim`. |
 | `weight_decay` | float | 0.00 | Weight decay. |
 | `task_type` | str | regression | regression or classification. |
-| `patience` | int | 3 | Early-stopping patience (probe phase, and base phase unless `base_patience` is set). |
+| `patience` | int | 5 | Early-stopping patience (probe phase, and base phase unless `base_patience` is set). |
 | `base_num_epochs` | Optional[int] | None | Epoch count for the base-model phase of hybrid / full-finetuning training. `None` falls back to `num_epochs`. |
 | `base_patience` | Optional[int] | None | Early-stopping patience for the base-model phase. `None` falls back to `patience`. |
-| `read_scaler` | int | 100 | For dataset read scaling (e.g. SQL). |
+| `read_scaler` | int | 100 | Batch multiplier for reads from the feature store when `--sql` streams rows. |
 | `save_model` | bool | False | Save/push model (e.g. to Hub). |
 | `push_raw_probe` | bool | False | With save_model, push raw probe class to Hub (load with Class.from_pretrained(repo_id)) instead of packaged AutoModel. |
 | `seed` | int | 42 | Random seed. |
@@ -161,9 +306,12 @@ Calling `trainer_args(probe=True)` or `trainer_args(probe=False)` returns Huggin
 ## Training flows
 
 - **run_nn_probes():** For each (model, dataset), load embeddings from disk (or use in-memory dict), build probe with `get_probe(probe_args)`, run `trainer_probe()`. Single run or `num_runs` with aggregation (mean and std, best run by test loss).
+- **run_default_probes():** The default probe on ESMC bases, which `main.py` runs in place of `run_nn_probes` when `MainProcess.uses_default_probe()` holds (see `--no_default_probe` in [CLI and config](cli_and_config.md#probe)). `apply_current_settings` sets the head to `projected` before `ProbeArguments` is built. For each base, `embed_default_branches` fills the two caches that `data.branch_features.default_branch_specs` names: the depth-layer SAE, max-pooled, and the final hidden state's mean and variance. Each is read from its ordinary cache and joined per sequence, the standardizer is fitted on the training rows, and `trainer_probe` trains over `JoinedBranchDataset`s with `branch_widths` set, so `num_runs`, saving, and plots behave as for any probe. Metrics are logged under the joined name, such as `ESMC-300-SAE-l23-k64-c16384_max+ESMC-300_mean-var`.
 - **run_full_finetuning():** Uses raw sequences; builds base model for training (no probe head for sequence-level; base outputs go to loss). Same single/multi-run pattern via `trainer_base_model()`.
 - **run_hybrid_probes():** For each run: (1) train probe only (`trainer_probe`, skip_plot=True), (2) wrap base + trained probe in `HybridProbe`, (3) run `trainer_base_model(hybrid_model, ...)`. Aggregates metrics; optionally plots best run.
 - **run_scikit_scheme():** Uses `prepare_scikit_dataset` and sklearn/lazy-predict; no probe training.
+
+Every neural probe trains through `TrainerMixin._train`. After `trainer.train()` restores the best weights, `_train` calls `fit_posterior(trainer.get_train_dataloader())` on any probe that defines it, which today is only `sngp`, so validation and test predictions read the fitted posterior. `trainer_probe` builds its datasets and collator through `_build_probe_datasets`, unless the caller hands it `probe_datasets`, as `run_default_probes` does.
 
 ---
 
@@ -337,6 +485,8 @@ When `save_model` is True, after training the code can export to the HuggingFace
 - **Raw probe (`--push_raw_probe`):** Skip packaged export and push only the raw probe class plus a README. Load with the probe class directly. For hybrid runs, only the probe submodule is pushed, not the full hybrid.
 
 For `parallel_probe_runs=True`, the save/export target is the selected best run converted back to a normal `LinearProbe`.
+
+`projected` and `sngp` probes are not packaged yet: `export_packaged_model_to_hub` refuses them and the fallback pushes the raw probe.
 
 Production export uses the same probe rebuild API so that the packaged artifact can be loaded elsewhere.
 

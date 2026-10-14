@@ -1,7 +1,9 @@
 import numpy as np
 import pandas as pd
+
+from typing import Any
 from sklearn.model_selection import RandomizedSearchCV
-from typing import Dict, Any, Tuple, Optional
+
 
 try:
     from metrics import (
@@ -10,7 +12,7 @@ try:
         compute_single_label_classification_metrics,
         compute_regression_metrics,
     )
-    from utils import print_message
+    from console_output import print_message
     from seed_utils import get_global_seed
 except ImportError:
     from ..metrics import (
@@ -19,7 +21,7 @@ except ImportError:
         compute_single_label_classification_metrics,
         compute_regression_metrics,
     )
-    from ..utils import print_message
+    from ..console_output import print_message
     from ..seed_utils import get_global_seed
 
 from transformers import EvalPrediction
@@ -42,16 +44,16 @@ class ScikitArguments:
         # Tuning arguments
         n_iter: int = 100,
         cv: int = 3,
-        random_state: Optional[int] = None,
+        random_state: int | None = None,
         # Specific model arguments (optional)
-        model_name: Optional[str] = None,
-        scikit_model_name: Optional[str] = None,  # CLI arg name
-        scikit_model_args: Optional[str] = None,  # CLI arg - JSON string
-        model_args: Optional[Dict[str, Any]] = None,
+        model_name: str | None = None,
+        scikit_model_name: str | None = None,  # CLI arg name
+        scikit_model_args: str | None = None,  # CLI arg - JSON string
+        model_args: dict[str, Any] | None = None,
         production_model: bool = False,
         n_jobs: int = 1,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         import json
         # Tuning arguments
         self.n_iter = n_iter
@@ -67,7 +69,7 @@ class ScikitArguments:
                 self.model_args = json.loads(scikit_model_args)
                 print_message(f"Using pre-specified hyperparameters (skipping tuning): {self.model_args}")
             except json.JSONDecodeError as e:
-                raise ValueError(f"Failed to parse --scikit_model_args JSON: {e}")
+                raise ValueError(f"Failed to parse --scikit_model_args JSON: {e}") from e
         else:
             self.model_args = model_args if model_args is not None else {}
 
@@ -78,12 +80,12 @@ class ScikitArguments:
 class ModelResults:
     def __init__(
         self,
-        initial_scores: Optional[pd.DataFrame],
+        initial_scores: pd.DataFrame | None,
         best_model_name: str,
-        best_params: Optional[Dict[str, Any]],
-        final_scores: Dict[str, float],
+        best_params: dict[str, Any] | None,
+        final_scores: dict[str, float],
         best_model: Any
-    ):
+    ) -> None:
         self.initial_scores = initial_scores
         self.best_model_name = best_model_name
         self.best_params = best_params
@@ -102,7 +104,7 @@ class ScikitProbe:
     """
     A class for finding and tuning the best scikit-learn models for a given dataset.
     """
-    def __init__(self, args: ScikitArguments):
+    def __init__(self, args: ScikitArguments) -> None:
         self.args = args
         self.n_jobs = args.n_jobs
     
@@ -113,10 +115,11 @@ class ScikitProbe:
         X_train: np.ndarray,
         y_train: np.ndarray,
         custom_scorer: Any,
-    ) -> Tuple[Any, Dict[str, Any]]:
+    ) -> tuple[Any, dict[str, Any]]:
         """
         Perform hyperparameter tuning using RandomizedSearchCV.
         """
+        # X_train: (n_train, f), y_train: (n_train,)
         param_distributions = HYPERPARAMETER_DISTRIBUTIONS.get(model_name, {})
         if not param_distributions:
             print_message(f"No hyperparameter distributions defined for {model_name}, using defaults")
@@ -160,7 +163,8 @@ class ScikitProbe:
             ModelResults object containing all results and the best model
         """
         # Initial lazy prediction
-        print_message(f"Initial lazy prediction started")
+        # X_train: (n_train, f), y_train: (n_train,), X_test: (n_test, f), y_test: (n_test,)
+        print_message("Initial lazy prediction started")
         regressor = LazyRegressor(
             verbose=0,
             ignore_warnings=False,
@@ -168,7 +172,7 @@ class ScikitProbe:
             n_jobs=self.n_jobs,
         )
         initial_scores = regressor.fit(X_train, X_test, y_train, y_test)
-        if isinstance(initial_scores, Tuple):
+        if isinstance(initial_scores, tuple):
             initial_scores = initial_scores[0]
         
         # Get best model name and class
@@ -179,7 +183,7 @@ class ScikitProbe:
         print_message(f"Best model class: {best_model_class}")
         print_message(f"Initial scores: \n{initial_scores}")
 
-        print_message(f"Tuning hyperparameters")
+        print_message("Tuning hyperparameters")
         # Tune hyperparameters
         scorer = get_regression_scorer()
         best_model, best_params = self._tune_hyperparameters(
@@ -224,7 +228,8 @@ class ScikitProbe:
             ModelResults object containing all results and the best model
         """
         # Initial lazy prediction
-        print_message(f"Initial lazy prediction started")
+        # X_train: (n_train, f), y_train: (n_train,), X_test: (n_test, f), y_test: (n_test,)
+        print_message("Initial lazy prediction started")
         classifier = LazyClassifier(
             verbose=0,
             ignore_warnings=False,
@@ -232,7 +237,7 @@ class ScikitProbe:
             n_jobs=self.n_jobs,
         )
         initial_scores = classifier.fit(X_train, X_test, y_train, y_test)
-        if isinstance(initial_scores, Tuple):
+        if isinstance(initial_scores, tuple):
             initial_scores = initial_scores[0]
 
         # Get best model name and class
@@ -243,7 +248,7 @@ class ScikitProbe:
         print_message(f"Best model class: {best_model_class}")
         print_message(f"Initial scores: \n{initial_scores}")
 
-        print_message(f"Tuning hyperparameters")
+        print_message("Tuning hyperparameters")
         # Tune hyperparameters
         scorer = get_classification_scorer()
         best_model, best_params = self._tune_hyperparameters(
@@ -274,11 +279,12 @@ class ScikitProbe:
         X: np.ndarray,
         y: np.ndarray,
         model_name: str,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """
         Delegate to the shared metric functions in metrics.py via EvalPrediction,
         keeping a single source of truth for metric calculation across the codebase.
         """
+        # X: (n, f), y: (n,)
         if model_name in CLASSIFIER_DICT:
             if hasattr(model, 'predict_proba'):
                 predictions = model.predict_proba(X)
@@ -305,7 +311,7 @@ class ScikitProbe:
         y_valid: np.ndarray,
         X_test: np.ndarray,
         y_test: np.ndarray,
-        model_results: Optional[ModelResults] = None,
+        model_results: ModelResults | None = None,
     ) -> ModelResults:
         """
         Run a specific model with given arguments or based on a previous ModelResults.
@@ -323,9 +329,10 @@ class ScikitProbe:
         Returns:
             ModelResults object containing results and the model
         """
+        # X_train: (n_train, f), y_train: (n_train,), X_valid: (n_valid, f), y_valid: (n_valid,), X_test: (n_test, f), y_test: (n_test,)
         print_message("Running specific model")
         if self.args.production_model:
-            print_message(f"Running in production mode, train and validation are combined")
+            print_message("Running in production mode, train and validation are combined")
             X_train = np.concatenate([X_train, X_valid])
             y_train = np.concatenate([y_train, y_valid])
 
@@ -341,7 +348,7 @@ class ScikitProbe:
             cls = model_class(**model_params)
             print_message(f"Training model {cls}")
             cls.fit(X_train, y_train)
-            print_message(f"Model trained")
+            print_message("Model trained")
             
             final_scores = self._calculate_metrics(cls, X_test, y_test, model_name)
             print_message(f"Final scores: {final_scores}")
@@ -384,7 +391,7 @@ class ScikitProbe:
                 print_message(f"Best parameters: {best_params}")
             
             # Train final model with best parameters
-            print_message(f"Training final model with best parameters")
+            print_message("Training final model with best parameters")
             best_model.fit(X_train, y_train)
             
             final_scores = self._calculate_metrics(best_model, X_test, y_test, model_name)

@@ -3,10 +3,12 @@ import logging
 import os
 import sys
 import torch
+
 from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from typing import TypedDict
 from tqdm import tqdm
+
 
 _FASTPLMS = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
@@ -46,7 +48,7 @@ class E1Predictor:
         use_cache: bool = True,
         cache_size: int = 4,
         save_masked_positions_only: bool = False,
-        fields_to_save: list[str] = ["logits", "token_embeddings", "mean_token_embeddings"],
+        fields_to_save: Sequence[str] | None = None,
         keep_predictions_in_gpu: bool = False,
     ) -> None:
         self.model = model
@@ -55,7 +57,7 @@ class E1Predictor:
         self.model.eval()
         self.kv_cache = KVCache(cache_size=cache_size) if use_cache else None
 
-        self.fields_to_save = fields_to_save
+        self.fields_to_save = ["logits", "token_embeddings", "mean_token_embeddings"] if fields_to_save is None else list(fields_to_save)
         self.save_masked_positions_only = save_masked_positions_only
         self.keep_predictions_in_gpu = keep_predictions_in_gpu
 
@@ -202,11 +204,11 @@ class E1Predictor:
             sequences_with_context = [
                 (ctx + "," + seq, {"context_id": ctx_id, "id": sequence_id})
                 for ctx_id, ctx in context_seqs.items()
-                for seq, sequence_id in zip(sequences, sequence_ids)
+                for seq, sequence_id in zip(sequences, sequence_ids, strict=True)
             ]
         else:
-            sequences_with_context = [(seq, {"id": sequence_id}) for seq, sequence_id in zip(sequences, sequence_ids)]
-        sequences, sequence_metadata = tuple(zip(*sequences_with_context))
+            sequences_with_context = [(seq, {"id": sequence_id}) for seq, sequence_id in zip(sequences, sequence_ids, strict=True)]
+        sequences, sequence_metadata = tuple(zip(*sequences_with_context, strict=True))
         sequence_batch_indices: list[tuple[list[int], bool]] = self.batch_sequences(sequences)
         logger.info(f"Predicting for {len(sequence_batch_indices)} batches")
 
@@ -220,5 +222,4 @@ class E1Predictor:
             if not is_valid_batch:
                 continue
 
-            for prediction in batch_predictions:
-                yield prediction
+            yield from batch_predictions

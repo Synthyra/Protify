@@ -6,19 +6,21 @@ This page documents W&B (Weights and Biases) hyperparameter sweeps in Protify: s
 
 ## Overview
 
-When `--use_wandb_hyperopt` is set, the pipeline runs a W&B sweep over the parameters defined in the sweep YAML. For each (model, dataset) combination (skipping random/onehot), it runs multiple trials, selects the best config by the chosen metric, writes a CSV of results, and then runs one final training with the best config and logs that run to W&B.
+When `--use_wandb_hyperopt` is set, the pipeline searches the parameters defined in the sweep YAML. For each (model, dataset) combination (skipping random/onehot), it runs multiple trials, selects the best config by the chosen metric, writes a CSV of results, and then runs one final training with the best config.
+
+The search runs in process with Optuna, and each (model, dataset) sweep is one W&B run: its trials are rows of the `tuning/trials` table, updated after every trial, and the final fit charts its `train/` and `val/` curves and its `val/` and `test/` metrics. A W&B sweep made one run per trial, which the workspace's W&B convention retired because the run list buried the runs worth reading.
 
 ---
 
 ## How it works
 
 1. **Sweep config** is loaded from `full_args.sweep_config_path` (default `yamls/sweep.yaml`). Required: `parameters` (W&B format). Optional: `early_terminate` (e.g. hyperband).
-2. Parameters are filtered by probe type and LoRA: only keys in `mlp_probe_params` or `transformer_probe_params` (and optionally `lora_params`) are passed to the sweep; the rest are ignored for that run.
+2. Parameters are filtered by probe type and LoRA: only keys in `mlp_probe_params` or `transformer_probe_params` (and optionally `lora_params`) are passed to the sweep; the rest are ignored for that run. The `probe_pooling_types` values are then narrowed to those the probe type takes: Lyra takes one pooling type, and only the transformer sequence probe takes `bom`. A sweep that can land on the transformer probe offers only hidden sizes that every head size it can draw divides: a `values` list keeps its multiples, and a `min`/`max` range becomes a `q_uniform` or `q_log_uniform_values` range over them. A sweep over `probe_type` keeps only values that every listed probe type takes. A parameter left with no value is not swept, so its configured value stays.
 3. For each (model_name, data_name), embeddings are loaded, `num_labels` and `task_type` are set, and a **HyperoptModule** is created with the sweep config and a shared `results_list`.
-4. **W&B sweep** is created: `wandb.sweep(sweep, project, entity)` then `wandb.agent(sweep_id, function=hyperopt_module.objective, count=sweep_count)`.
-5. **HyperoptModule.objective()** is the W&B trial entry: `wandb.init(project, entity, config=sweep_config, reinit=True)`; `apply_config(wandb.config)`; optionally reload embeddings if `embedding_pooling_types` or `embedding_hidden_state_index` changed; `train_model(sweep_mode=True)`; select metric via `sweep_metric_cls` or `sweep_metric_reg` by task_type; log metrics to W&B; append to results_list; return metric value.
-6. After the agent finishes, results_list is sorted by the chosen metric (max or min per `sweep_goal`), and a CSV is written to log_dir: `{random_id}_sweep_{data_name}_{model_name}.csv` with columns such as rank, wandb_run_id, metric, config, valid_metrics, test_metrics.
-7. Best config is applied via `apply_config(best_config)`; `make_plots=True`; one **final** training run with the best config is executed, logged to W&B as a new run, then finished.
+4. **The search** is an Optuna study from `sweep_search(sweep, seed)`: TPE for `bayes`, a random sampler for `random`, and a grid for `grid`, which needs every parameter to list its `values`. `suggest` draws each W&B-format entry (`value`, `values`, `uniform`, `log_uniform_values`, `int_uniform`, `q_uniform`, `q_log_uniform_values`). `early_terminate` is not applied: a trial reports its metrics once, when it ends, so the W&B sweep never applied it either. One W&B run opens for the sweep, through `run_tracking.training_job`, before `sweep_count` trials run.
+5. **HyperoptModule.objective(trial)** draws the trial's configuration, `apply_config`s it, optionally reloads embeddings if `embedding_pooling_types` or `embedding_hidden_state_index` changed, runs `train_model(sweep_mode=True)` with the run's curve closed, selects the metric via `sweep_metric_cls` or `sweep_metric_reg` by task_type, appends to results_list, resends the trial table, and returns the metric value.
+6. After the search, results_list is sorted by the chosen metric (max or min per `sweep_goal`), and a CSV is written to log_dir: `{random_id}_sweep_{data_name}_{model_name}.csv` with columns rank, trial, metric, config, valid_metrics, test_metrics.
+7. Best config is applied via `apply_config(best_config)`; `make_plots=True`; one **final** training run with the best config is executed and charted in the sweep's run, whose summary takes its final metrics.
 
 ---
 
@@ -26,11 +28,11 @@ When `--use_wandb_hyperopt` is set, the pipeline runs a W&B sweep over the param
 
 Defined in [hyperopt_utils.py](../src/protify/hyperopt_utils.py).
 
-- **Constructor:** `HyperoptModule(main_process, model_name, data_name, dataset, emb_dict, sweep_config, results_list, swept_param_keys=None)`. Keeps deep copies of base `probe_args` and `trainer_args` and defines which keys are probe/trainer/embedding and which are int-cast.
-- **apply_config(cfg):** Restores base probe and trainer args, then applies `cfg`: legacy `n_heads` (deprecated) is migrated to `head_size = hidden_size // n_heads` with a `DeprecationWarning`; asserts `hidden_size % head_size == 0`; ints for int_keys; `transformer_dropout` from `dropout`; `pooling_types` from `probe_pooling_types`; sets attributes on `mp.probe_args`, `mp.trainer_args`, and embedding options such as `mp.embedding_args.pooling_types` and `mp.embedding_args.hidden_state_index` where applicable.
+- **Constructor:** `HyperoptModule(main_process, model_name, data_name, dataset, emb_dict, sweep_config, results_list, swept_param_keys=None, parameters=None)`; `parameters` are the narrowed W&B-format entries each trial draws from. Keeps deep copies of base `probe_args` and `trainer_args` and defines which keys are probe/trainer/embedding and which are int-cast.
+- **apply_config(cfg):** Restores base probe and trainer args, then applies `cfg`: legacy `n_heads` (deprecated) is migrated to `head_size = hidden_size // n_heads` with a `DeprecationWarning`; asserts `hidden_size % head_size == 0` when the trial's probe type is `transformer`, the one probe with attention heads; ints for int_keys; `transformer_dropout` from `dropout`; `pooling_types` from `probe_pooling_types`; sets attributes on `mp.probe_args`, `mp.trainer_args`, and embedding options such as `mp.embedding_args.pooling_types` and `mp.embedding_args.hidden_state_index` where applicable.
 - **train_model(sweep_mode=True):** Dispatches to `_run_full_finetuning`, `_run_hybrid_probe`, or `_run_nn_probe` depending on `full_args`; returns (model/probe, valid_metrics, test_metrics).
 - **select_metric(valid_metrics, test_metrics, sweep_metric):** Returns the float value for `sweep_metric` from valid or test; raises with available keys if missing.
-- **objective():** W&B entry: init, apply_config, train_model, log metrics, append to results_list, return metric for the goal.
+- **objective(trial):** one Optuna trial: draw, apply_config, train_model, append to results_list and the trial table, return metric for the goal.
 
 ---
 
@@ -72,7 +74,7 @@ parameters:
 | `--sweep_metric_reg` | str | eval_loss | Regression metric to optimize. |
 | `--sweep_goal` | choice | minimize | maximize, minimize. |
 
-Set `WANDB_API_KEY` or `--wandb_api_key` for authentication.
+Set `WANDB_API_KEY`, or put it in the `.secrets.env` that `foundry.secrets_env` loads, for authentication. `foundry.logging.Run` reads the key from the environment, so a key that only `wandb login` stored is not enough.
 
 ---
 

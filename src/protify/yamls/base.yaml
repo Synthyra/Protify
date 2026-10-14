@@ -1,8 +1,5 @@
 # ID
 hf_username: Synthyra
-hf_token: null
-synthyra_api_key: null
-wandb_api_key: null
 
 
 # Random seeds
@@ -68,8 +65,9 @@ head_size: !!int 2048  # n_heads = hidden_size // head_size; 8192/2048=4 to matc
 rotary: !!bool true
 attention_backend: flex
 output_s_max: !!bool false
-probe_pooling_types:
-  - cls
+# Transformer and Lyra probes only. null keeps each probe's default: mean and cls for the
+# transformer probe, mean for Lyra, which takes one pooling type.
+probe_pooling_types: null
 save_model: !!bool false
 push_raw_probe: !!bool false
 production_model: !!bool false

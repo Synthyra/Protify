@@ -1,9 +1,12 @@
+import json
 import os
+import safetensors
 import torch
 import torch.nn as nn
-import safetensors
-import json
-from typing import Optional, Tuple, Union, List, Dict
+
+from typing import Any
+from huggingface_hub import hf_hub_download
+from torch.nn.functional import scaled_dot_product_attention
 from transformers import (
     AutoTokenizer,
     PretrainedConfig,
@@ -11,19 +14,17 @@ from transformers import (
     AutoModel,
     AutoModelForTokenClassification,
     AutoModelForSequenceClassification,
-    AutoModelForMaskedLM
 )
-from torch.nn.functional import scaled_dot_product_attention
 from transformers.modeling_outputs import MaskedLMOutput
-from .base_tokenizer import BaseSequenceTokenizer
-from .utils import select_hidden_state
+
 from .amplify_utils import (
     SwiGLU,
     RMSNorm,
     apply_rotary_emb,
     precompute_freqs_cis,
 )
-from huggingface_hub import hf_hub_download
+from .base_tokenizer import BatchSequenceTokenizer
+from .hidden_state_selection import select_hidden_state
 
 
 presets = {
@@ -55,8 +56,8 @@ class AMPLIFYConfig(PretrainedConfig):
         pad_token_id: int = 0,
         max_length: int = 2048,
         use_xformers: bool = False,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         
         self.hidden_size = hidden_size
@@ -82,7 +83,7 @@ class AMPLIFYConfig(PretrainedConfig):
 class EncoderBlock(nn.Module):
     """Transformer encoder block."""
 
-    def __init__(self, config: AMPLIFYConfig):
+    def __init__(self, config: AMPLIFYConfig) -> None:
         """Initialize a EncoderBlock.
 
         Args:
@@ -145,21 +146,27 @@ class EncoderBlock(nn.Module):
 
         self.ffn_dropout = nn.Dropout(config.dropout_prob)
 
-    def forward(self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor, output_attentions: bool):
-        attn, contact = self._att_block(self.attention_norm(x), pad_mask, freqs_cis, output_attentions)
-        x = x + attn
-        x = x + self._ff_block(self.ffn_norm(x))
-        return x, contact
+    def forward(
+        self, x: torch.Tensor, pad_mask: torch.Tensor | None, freqs_cis: torch.Tensor, output_attentions: bool
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # x: (b, l, d); pad_mask: (b, h, l, l) additive, or None; freqs_cis: (l, d_h / 2), complex
+        attn, contact = self._att_block(self.attention_norm(x), pad_mask, freqs_cis, output_attentions)  # (b, l, d), (b, h, l, l) or None
+        x = x + attn  # (b, l, d)
+        x = x + self._ff_block(self.ffn_norm(x))  # (b, l, d)
+        return x, contact  # (b, l, d), (b, h, l, l) or None
 
-    def _att_block(self, x: torch.Tensor, pad_mask: torch.Tensor, freqs_cis: torch.Tensor, output_attentions: bool):
+    def _att_block(
+        self, x: torch.Tensor, pad_mask: torch.Tensor | None, freqs_cis: torch.Tensor, output_attentions: bool
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # x: (b, l, d); pad_mask: (b, h, l, l) additive, or None; freqs_cis: (l, d_h / 2), complex
         batch_size, seq_len, _ = x.shape
-        xq, xk, xv = self.q(x), self.k(x), self.v(x)
+        xq, xk, xv = self.q(x), self.k(x), self.v(x)  # each (b, l, d)
 
         # Reshape for rotary embeddings
-        xq = xq.view(batch_size, seq_len, self.config.num_attention_heads, self.d_head)
-        xk = xk.view(batch_size, seq_len, self.config.num_attention_heads, self.d_head)
-        xv = xv.view(batch_size, seq_len, self.config.num_attention_heads, self.d_head)
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis)
+        xq = xq.view(batch_size, seq_len, self.config.num_attention_heads, self.d_head)  # (b, l, h, d_h)
+        xk = xk.view(batch_size, seq_len, self.config.num_attention_heads, self.d_head)  # (b, l, h, d_h)
+        xv = xv.view(batch_size, seq_len, self.config.num_attention_heads, self.d_head)  # (b, l, h, d_h)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cis)  # (b, l, h, d_h) each
 
         if self.config.use_xformers:
             try:
@@ -170,7 +177,7 @@ class EncoderBlock(nn.Module):
                     value=xv,
                     attn_bias=pad_mask,
                     p=self.config.dropout_prob if self.training else 0,
-                )
+                )  # (b, l, h, d_h)
             except ImportError:
                 print("xformers not available, falling back to SDPA implementation")
                 attn = scaled_dot_product_attention(
@@ -179,7 +186,7 @@ class EncoderBlock(nn.Module):
                     value=xv.transpose(1, 2),
                     attn_mask=pad_mask,
                     dropout_p=self.config.dropout_prob if self.training else 0,
-                ).transpose(1, 2)        
+                ).transpose(1, 2)  # (b, l, h, d_h)
         else:
             attn = scaled_dot_product_attention(
                 query=xq.transpose(1, 2),
@@ -187,25 +194,27 @@ class EncoderBlock(nn.Module):
                 value=xv.transpose(1, 2),
                 attn_mask=pad_mask,
                 dropout_p=self.config.dropout_prob if self.training else 0,
-            ).transpose(1, 2)
+            ).transpose(1, 2)  # (b, l, h, d_h)
 
         _attn = None
         if output_attentions:
-            _attn = xq.permute(0, 2, 1, 3) @ xk.permute(0, 2, 3, 1) / (xq.size(-1) ** 0.5)
+            _attn = xq.permute(0, 2, 1, 3) @ xk.permute(0, 2, 3, 1) / (xq.size(-1) ** 0.5)  # (b, h, l, l)
             if pad_mask is not None:
-                _attn = _attn + pad_mask
-            _attn = _attn.softmax(-1)
-        return self.resid_dropout(self.wo(attn.view(batch_size, seq_len, self.config.num_attention_heads * self.d_head))), _attn
+                _attn = _attn + pad_mask  # (b, h, l, l)
+            _attn = _attn.softmax(-1)  # (b, h, l, l)
+        projected = self.resid_dropout(self.wo(attn.view(batch_size, seq_len, self.config.num_attention_heads * self.d_head)))  # (b, l, d)
+        return projected, _attn  # (b, l, d), (b, h, l, l) or None
 
-    def _ff_block(self, x: torch.Tensor):
-        return self.ffn_dropout(self.ffn(x))
+    def _ff_block(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (b, l, d)
+        return self.ffn_dropout(self.ffn(x))  # (b, l, d)
 
 
 class AMPLIFYPreTrainedModel(PreTrainedModel):
     config_class = AMPLIFYConfig
     all_tied_weights_keys = {}
 
-    def _init_weights(self, module):
+    def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear):
             module.weight.data.uniform_(-self.config.decoder_init_range, self.config.decoder_init_range)
             if module.bias is not None:
@@ -220,7 +229,7 @@ class AMPLIFY(AMPLIFYPreTrainedModel):
        Args:
           config (amplify.model.amplify.AMPLIFYConfig): model configuration, usually defined from the Hydra configuration.
     """
-    def __init__(self, config: AMPLIFYConfig, **kwargs):
+    def __init__(self, config: AMPLIFYConfig, **kwargs: Any) -> None:
         super().__init__(config)
 
         self.config = config
@@ -244,13 +253,20 @@ class AMPLIFY(AMPLIFYPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def forward(self, src, pad_mask=None, output_hidden_states=False, output_attentions=False):
+    def forward(
+        self,
+        src: torch.Tensor,
+        pad_mask: torch.Tensor | None = None,
+        output_hidden_states: bool = False,
+        output_attentions: bool = False,
+    ) -> MaskedLMOutput:
+        # src: (b, l); pad_mask: (b, l) additive, or None
         # Initialize
         hidden_states, attentions = [], []
 
         # Expand and repeat: (Batch, Length) -> (Batch, Heads, Length, Length)
         if pad_mask is not None and not torch.all(pad_mask == 0):
-            pad_mask = pad_mask.unsqueeze(1).unsqueeze(1).repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)
+            pad_mask = pad_mask.unsqueeze(1).unsqueeze(1).repeat(1, self.config.num_attention_heads, pad_mask.size(-1), 1)  # (b, h, l, l)
         else:
             pad_mask = None
 
@@ -259,49 +275,39 @@ class AMPLIFY(AMPLIFYPreTrainedModel):
             self.freqs_cis = precompute_freqs_cis(self.config.hidden_size // self.config.num_attention_heads, src.shape[1]).to(src.device)
             
         self.freqs_cis = self.freqs_cis.to(src.device, non_blocking=True)
-        freqs_cis = self.freqs_cis[: src.shape[1]]
+        freqs_cis = self.freqs_cis[: src.shape[1]]  # (l, d_h / 2), complex
 
         # Embedding
-        x = self.encoder(src)
+        x = self.encoder(src)  # (b, l, d)
         if self.config.layer_norm_after_embedding:
-            x = self.layer_norm_1(x)
+            x = self.layer_norm_1(x)  # (b, l, d)
 
         # Transformer encoder
         for layer in self.transformer_encoder:
-            x, attn = layer(x, pad_mask, freqs_cis, output_attentions)
+            x, attn = layer(x, pad_mask, freqs_cis, output_attentions)  # (b, l, d), (b, h, l, l) or None
             if output_hidden_states:
                 hidden_states.append(x)
             if output_attentions:
                 attentions.append(attn)
 
         # Classification head with layer norm
-        logits = self.decoder(self.layer_norm_2(x) if self.config.layer_norm_before_last_layer else x)
+        logits = self.decoder(self.layer_norm_2(x) if self.config.layer_norm_before_last_layer else x)  # (b, l, v)
 
         # Return logits or the output of the last hidden layer
         return MaskedLMOutput(logits=logits, hidden_states=hidden_states, attentions=attentions)
 
 
-class AmplifyTokenizerWrapper(BaseSequenceTokenizer):
-    def __init__(self, tokenizer: AutoTokenizer):
+class AmplifyTokenizerWrapper(BatchSequenceTokenizer):
+    def __init__(self, tokenizer: AutoTokenizer) -> None:
         super().__init__(tokenizer)
-
-    def __call__(self, sequences: Union[str, List[str]], **kwargs) -> Dict[str, torch.Tensor]:
-        if isinstance(sequences, str):
-            sequences = [sequences]
-        kwargs.setdefault('return_tensors', 'pt')
-        kwargs.setdefault('padding', 'max_length')
-        kwargs.setdefault('truncation', True)
-        kwargs.setdefault('add_special_tokens', True)
-        tokenized = self.tokenizer(sequences, **kwargs)
-        return tokenized
 
 
 class AmplifyForEmbedding(nn.Module):
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str) -> None:
         super().__init__()
         # Load config from HuggingFace
         config_file = hf_hub_download(repo_id=model_path, filename="config.json")
-        with open(config_file, 'r') as f:
+        with open(config_file) as f:
             config_dict = json.load(f)
         
         config = AMPLIFYConfig(**config_dict)
@@ -314,18 +320,17 @@ class AmplifyForEmbedding(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = True,
+        attention_mask: torch.Tensor | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = True,
         hidden_state_index: int = -1,
-        **kwargs,
-    ) -> torch.Tensor:
+        **kwargs: Any,
+    ) -> torch.Tensor | tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        # input_ids: (b, l); attention_mask: (b, l), 1 for real tokens, or None
         output_hidden_states = output_hidden_states or hidden_state_index != -1
         # Convert attention_mask to additive format
         if attention_mask is not None:
-            attention_mask = torch.where(attention_mask.bool(), 
-                                        float(0.0), 
-                                        float('-inf'))
+            attention_mask = torch.where(attention_mask.bool(), 0.0, float("-inf"))  # (b, l)
         out = self.plm(
             src=input_ids,
             pad_mask=attention_mask,
@@ -336,19 +341,19 @@ class AmplifyForEmbedding(nn.Module):
             out.hidden_states[-1],
             out.hidden_states,
             hidden_state_index,
-        )
+        )  # (b, l, d)
         if output_attentions:
-            return hidden_state, out.attentions
-        return hidden_state
+            return hidden_state, out.attentions  # (b, l, d), tuple of (b, h, l, l)
+        return hidden_state  # (b, l, d)
 
 
 class AmplifyForMaskedLM(nn.Module):
     """Wrapper for AMPLIFY model to use for Masked Language Modeling tasks."""
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str) -> None:
         super().__init__()
         # Load config from HuggingFace
         config_file = hf_hub_download(repo_id=model_path, filename="config.json")
-        with open(config_file, 'r') as f:
+        with open(config_file) as f:
             config_dict = json.load(f)
         
         config = AMPLIFYConfig(**config_dict)
@@ -363,15 +368,14 @@ class AmplifyForMaskedLM(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = False,
+        attention_mask: torch.Tensor | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = False,
     ) -> MaskedLMOutput:
+        # input_ids: (b, l); attention_mask: (b, l), 1 for real tokens, or None
         # Convert attention_mask to additive format
         if attention_mask is not None:
-            attention_mask = torch.where(attention_mask.bool(), 
-                                        float(0.0), 
-                                        float('-inf'))
+            attention_mask = torch.where(attention_mask.bool(), 0.0, float("-inf"))  # (b, l)
 
         return self.plm(
             src=input_ids,
@@ -381,11 +385,11 @@ class AmplifyForMaskedLM(nn.Module):
         )
 
 
-def get_amplify_tokenizer(preset: str, model_path: str = None):
+def get_amplify_tokenizer(preset: str, model_path: str | None = None) -> AmplifyTokenizerWrapper:
     return AmplifyTokenizerWrapper(AutoTokenizer.from_pretrained(model_path or presets[preset], trust_remote_code=True))
 
 
-def build_amplify_model(preset: str, masked_lm: bool = False, model_path: str = None, **kwargs) -> Tuple[nn.Module, AutoTokenizer]:
+def build_amplify_model(preset: str, masked_lm: bool = False, model_path: str | None = None, **kwargs: Any) -> tuple[nn.Module, AutoTokenizer]:
     model_path = model_path or presets[preset]
     if masked_lm:
         model = AmplifyForMaskedLM(model_path).eval()
@@ -395,7 +399,14 @@ def build_amplify_model(preset: str, masked_lm: bool = False, model_path: str = 
     return model, tokenizer
 
 
-def get_amplify_for_training(preset: str, tokenwise: bool = False, num_labels: int = None, hybrid: bool = False, dtype: torch.dtype = None, model_path: str = None):
+def get_amplify_for_training(
+    preset: str,
+    tokenwise: bool = False,
+    num_labels: int | None = None,
+    hybrid: bool = False,
+    dtype: torch.dtype | None = None,
+    model_path: str | None = None,
+) -> tuple[nn.Module, AmplifyTokenizerWrapper]:
     model_path = model_path or presets[preset]
     if hybrid:
         model = AutoModel.from_pretrained(model_path, dtype=dtype, trust_remote_code=True).eval()

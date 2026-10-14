@@ -1,8 +1,8 @@
 """Verify that Protify resolves the FastPLMs 1.0 submodule source contract."""
 
+import importlib.util
 import os
 import sys
-
 import pytest
 
 
@@ -14,6 +14,11 @@ def _ensure_fastplms_on_path() -> str:
         "fastplms",
         "src",
     )
+    # The research foundry keeps one FastPLMs, at models/fastplms, importable as `fastplms`.
+    # Without the submodule, that source is the one Protify resolves.
+    importable = importlib.util.find_spec("fastplms")
+    if not os.path.isdir(os.path.join(fastplms_root, "fastplms")) and importable and importable.origin:
+        return os.path.dirname(os.path.dirname(importable.origin))
     if fastplms_root in sys.path:
         sys.path.remove(fastplms_root)
     sys.path.insert(0, fastplms_root)

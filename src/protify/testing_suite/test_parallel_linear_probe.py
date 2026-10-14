@@ -1,10 +1,11 @@
 import json
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
+
+from types import SimpleNamespace
+
 
 try:
     from src.protify import probes as probes_package
@@ -1871,7 +1872,7 @@ def test_parallel_probe_ensemble_metrics_average_logits() -> None:
 
     metrics = mixin._parallel_probe_ensemble_metrics(logits, labels, 'test')
     expected_logits = logits.mean(axis=1)
-    expected_loss = F.cross_entropy(torch.tensor(expected_logits), torch.tensor(labels))
+    expected_loss = F.cross_entropy(torch.tensor(expected_logits), torch.tensor(labels, dtype=torch.long))
 
     assert metrics['test_accuracy'] == 1.0
     assert metrics['test_loss'] == pytest.approx(float(expected_loss.item()))
@@ -1905,7 +1906,7 @@ def test_seed_ensemble_metrics_from_sequential_run_results() -> None:
 
     metrics = mixin._seed_ensemble_metrics_from_run_results(run_results, 'test')
     expected_logits = np.stack([run_0_logits, run_1_logits], axis=1).mean(axis=1)
-    expected_loss = F.cross_entropy(torch.tensor(expected_logits), torch.tensor(labels))
+    expected_loss = F.cross_entropy(torch.tensor(expected_logits), torch.tensor(labels, dtype=torch.long))
 
     assert metrics['test_accuracy'] == 1.0
     assert metrics['test_loss'] == pytest.approx(float(expected_loss.item()))
@@ -1946,7 +1947,7 @@ def test_parallel_trainer_reports_chunked_ensemble_metrics(monkeypatch) -> None:
 
     def logits_for_seed(seed: int) -> np.ndarray:
         scale = 1.0 + (float(seed - 42) * 0.25)
-        return np.array(
+        return np.array(  # (4, 2)
             [
                 [4.0 * scale, 0.0],
                 [0.0, 4.0 * scale],
@@ -2012,7 +2013,7 @@ def test_parallel_trainer_reports_chunked_ensemble_metrics(monkeypatch) -> None:
         [logits_for_seed(seed) for seed in (42, 43, 44, 45)],
         axis=1,
     ).mean(axis=1)
-    expected_loss = F.cross_entropy(torch.tensor(expected_logits), torch.tensor(labels))
+    expected_loss = F.cross_entropy(torch.tensor(expected_logits), torch.tensor(labels, dtype=torch.long))
 
     assert valid_metrics['parallel_probe_ensemble_eval_accuracy'] == 1.0
     assert test_metrics['parallel_probe_ensemble_test_accuracy'] == 1.0

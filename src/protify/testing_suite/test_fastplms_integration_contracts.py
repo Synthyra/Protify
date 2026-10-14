@@ -3,20 +3,24 @@
 import pytest
 import torch
 import torch.nn as nn
+
+from importlib.metadata import version
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
+from packaging.requirements import Requirement
 
 from src.protify.base_models.dplm import presets as dplm_presets
 from src.protify.base_models.dplm2 import DPLM2TokenizerWrapper
 from src.protify.base_models.dplm2 import presets as dplm2_presets
 from src.protify.base_models.e1 import E1ForEmbedding
 from src.protify.base_models.esm2 import presets as esm2_presets
+from src.protify.base_models.fastplms_loading import DEFAULT_ATTENTION_IMPLEMENTATION, load_fastplms_model
 from src.protify.base_models.supported_models import (
     all_presets_with_paths,
     currently_supported_models,
     standard_models,
 )
-from src.protify.base_models.utils import load_fastplms_model
 
 
 _DSM_PRESETS = {
@@ -51,7 +55,7 @@ def test_loader_uses_v1_attention_and_fp32_parameter_policy():
 
     assert model.kwargs == {
         "dtype": torch.float32,
-        "attn_implementation": "flex_attention",
+        "attn_implementation": "sdpa",
     }
 
 
@@ -93,12 +97,12 @@ def test_dplm2_tokenizer_wrapper_adds_amino_acid_boundaries():
     tokenizer = RecordingTokenizer()
     wrapped = DPLM2TokenizerWrapper(tokenizer)
 
-    result = wrapped(["ACD"], padding="longest")  # input_ids: (b=1, l=3)
+    encoded = wrapped(["ACD"], padding="longest")  # input_ids: (b=1, l=3)
 
     assert tokenizer.sequences == ["<cls_aa>ACD<eos_aa>"]
     assert tokenizer.kwargs["add_special_tokens"] is False
     assert tokenizer.kwargs["padding"] == "longest"
-    assert "input_ids" in result
+    assert "input_ids" in encoded
 
 
 def test_e1_embedding_drops_batch_preparer_labels():
@@ -155,8 +159,61 @@ def test_dsm_presets_appear_once_in_supported_model_lists(models: list[str]):
     assert len(models) == len(set(models))
 
 
-def test_fastplms_validation_dependency_versions():
-    import transformers
+def _fastplms_validation_pins() -> dict[str, Requirement]:
+    """FastPLMs' validation pins, read from the FastPLMs tree Protify imports.
 
-    assert torch.__version__.split("+", 1)[0] == "2.13.0"
-    assert transformers.__version__ == "5.13.0"
+    The research workspace keeps `requirements/` beside the `fastplms` package; a FastPLMs
+    repository, such as Protify's submodule checkout, keeps the package under `src/`.
+    """
+    import fastplms
+
+    package = Path(fastplms.__file__).resolve().parent
+    candidates = [
+        root / "requirements" / "constraints" / "validation.txt"
+        for root in (package, package.parents[1])
+    ]
+    constraints = next((path for path in candidates if path.is_file()), None)
+    assert constraints is not None, f"FastPLMs validation constraints not found near {package}"
+    pins = {}
+    for line in constraints.read_text(encoding="utf-8").splitlines():
+        declaration = line.partition("#")[0].strip()
+        if declaration:
+            requirement = Requirement(declaration)
+            pins[requirement.name] = requirement
+    return pins
+
+
+def test_fastplms_validation_dependency_versions():
+    """Protify runs on the exact stack FastPLMs validates, whatever that file pins."""
+    pins = _fastplms_validation_pins()
+    assert {"torch", "transformers"} <= set(pins)
+    for name, requirement in pins.items():
+        installed = version(name)
+        assert requirement.specifier.contains(installed), (
+            f"{name} {installed} is outside FastPLMs' validated {requirement.specifier}"
+        )
+
+
+# Every FastPLMs family Protify loads through load_fastplms_model. dplm2 advertises
+# sdpa alone, and e1 advertises no FlashAttention backend at all, so a shared default
+# has to be one all of them accept.
+LOADED_FASTPLMS_FAMILIES = ("dplm", "dplm2", "e1", "esm2", "esm_plusplus")
+
+
+def test_default_attention_backend_is_advertised_by_every_loaded_family():
+    """FastPLMs raises on a backend a family does not advertise, so the default must fit all.
+
+    Reading the manifest keeps this honest against a FastPLMs update: if a family
+    ever drops the default backend, this fails instead of the failure surfacing as a
+    load-time error deep in a campaign run.
+    """
+    from fastplms import get_model_registry
+
+    families = get_model_registry().families
+
+    for family in LOADED_FASTPLMS_FAMILIES:
+        advertised = families[family].attention
+        assert DEFAULT_ATTENTION_IMPLEMENTATION in advertised, (
+            f"{family} advertises {advertised}, which excludes the Protify default "
+            f"{DEFAULT_ATTENTION_IMPLEMENTATION!r}."
+        )

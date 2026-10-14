@@ -1,6 +1,6 @@
 import json
-
 import pytest
+
 
 try:
     from src.protify.scripts import monitor_parallel_probe_hardware as monitor

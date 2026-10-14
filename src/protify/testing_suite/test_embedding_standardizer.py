@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 
+
 try:
     from src.protify.data.dataset_classes import (
         EmbeddingStandardizer,

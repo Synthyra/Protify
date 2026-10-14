@@ -1,6 +1,6 @@
 # GUI
 
-This page documents the Tk-based GUI: structure (tabs, settings_vars, full_args), the recommended flow (Start session, Get data, Get embeddings, Run trainer), and how background tasks keep the UI responsive. For Modal submission from the GUI, see [Modal](modal.md).
+This page documents the Tk-based GUI: structure (tabs, settings_vars, full_args), the recommended flow (Start session, Get data, Get embeddings, Run trainer), and how background tasks keep the UI responsive. For cloud submission from the GUI, see [Cloud Compute](cloud.md).
 
 ---
 
@@ -65,7 +65,7 @@ Alternatively, run **ProteinGym** (ProteinGym tab) or **Scikit** (Scikit tab) in
 
 ## See also
 
-- [Modal](modal.md) for the Modal tab and backend
+- [Cloud Compute](cloud.md) for the Cloud tab and backend
 - [Getting started](getting_started.md) for how to launch the GUI
 - [Configuration](cli_and_config.md) for the meaning of options (same as GUI)
 - [Logging and replay](logging_and_replay.md) for session log and replay

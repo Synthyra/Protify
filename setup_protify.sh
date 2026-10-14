@@ -22,10 +22,10 @@ pip install pip setuptools -U
 echo "Installing requirements"
 pip install -r requirements.txt -U
 
-# Reinstall the FastPLMs 1.0 validation build from the CUDA wheel index.
-echo "Installing PyTorch 2.13..."
-pip install --force-reinstall torch==2.13.0 --index-url https://download.pytorch.org/whl/cu130
-pip install --force-reinstall numpy==1.26.4
+# Reinstall the FastPLMs validation build from the CUDA wheel index.
+echo "Installing PyTorch 2.14..."
+pip install --force-reinstall torch==2.14.0 --index-url https://download.pytorch.org/whl/cu130
+pip install --force-reinstall numpy==2.5.3
 
 # List installed packages for verification
 echo -e "\nInstalled packages:"

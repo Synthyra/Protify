@@ -1,3 +1,4 @@
+import importlib
 import torch
 
 from typing import Any
@@ -5,9 +6,11 @@ from torch import nn
 from transformers import AutoConfig, AutoModel, PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import SequenceClassifierOutput, TokenClassifierOutput
 
-from ..base_models.supported_models import all_presets_with_paths
-from ..pooler import Pooler
 from .get_probe import rebuild_probe_from_saved_config
+from ..base_models.sae_pooling import pool_sae_outputs
+from ..base_models.supported_models import all_presets_with_paths
+from ..data.pair_features import pair_vector_halves
+from ..pooler import Pooler
 
 
 class PackagedProbeConfig(PretrainedConfig):
@@ -24,10 +27,21 @@ class PackagedProbeConfig(PretrainedConfig):
         task_type: str = "singlelabel",
         num_labels: int = 2,
         ppi: bool = False,
+        pair_feature_mode: str = "concat",
         add_token_ids: bool = False,
         sep_token_id: int | None = None,
+        sae_repository: str | None = None,
+        sae_layer: int | None = None,
+        sae_codebook_dim: int | None = None,
+        sae_k: int | None = None,
+        feature_indices: list[int] | None = None,
+        feature_input_size: int | None = None,
         **kwargs: Any,
     ) -> None:
+        # Transformers 5 saves the label count only as `id2label`, which `super().__init__` restores
+        # from a saved config. The default here would otherwise overwrite it on every load.
+        if kwargs.get("id2label") and num_labels == 2:
+            num_labels = len(kwargs["id2label"])
         super().__init__(**kwargs)
         self.base_model_name = base_model_name
         self.probe_type = probe_type
@@ -38,8 +52,23 @@ class PackagedProbeConfig(PretrainedConfig):
         self.task_type = task_type
         self.num_labels = num_labels
         self.ppi = ppi
+        # How the two pooled protein vectors are joined into the row the probe reads.
+        # A probe trained on [min, max] cannot read [A, B], so this travels with it.
+        self.pair_feature_mode = pair_feature_mode
         self.add_token_ids = add_token_ids
         self.sep_token_id = sep_token_id
+        # A sparse autoencoder replaces dense pooling: the backbone emits codebook
+        # features and `pooling_types` reduces those instead of the hidden states.
+        self.sae_repository = sae_repository
+        self.sae_layer = sae_layer
+        # The codebook's shape contract. Needed to rebuild the layer's structure when the
+        # weights come from this checkpoint rather than from a fresh Hub download.
+        self.sae_codebook_dim = sae_codebook_dim
+        self.sae_k = sae_k
+        # The columns the probe was trained on, and the width they were selected from.
+        # Both are needed: applying an index array to the wrong width silently reindexes.
+        self.feature_indices = feature_indices
+        self.feature_input_size = feature_input_size
 
 
 class PackagedProbeModel(PreTrainedModel):
@@ -60,10 +89,7 @@ class PackagedProbeModel(PreTrainedModel):
         self.pooler = Pooler(self.config.pooling_types)
 
     def _load_base_model(self) -> nn.Module:
-        if self.config.base_model_name in all_presets_with_paths:
-            model_path = all_presets_with_paths[self.config.base_model_name]
-        else:
-            model_path = self.config.base_model_name
+        model_path = all_presets_with_paths.get(self.config.base_model_name, self.config.base_model_name)
 
         # Transformers 5 initializes custom architectures on the meta device
         # before loading the outer checkpoint. A nested from_pretrained call is
@@ -74,8 +100,97 @@ class PackagedProbeModel(PreTrainedModel):
             model = AutoModel.from_config(backbone_config, trust_remote_code=True)
         else:
             model = AutoModel.from_pretrained(model_path, trust_remote_code=True)
+
+        if self.config.sae_repository is not None:
+            if torch.get_default_device().type == "meta":
+                # load_sae_models places the codebook on the model's device, and
+                # safetensors rejects meta, which is where from_pretrained builds. This
+                # checkpoint carries the codebook weights, so only the structure is needed
+                # here and the outer load fills it, exactly as it fills the backbone.
+                model.add_sae_models([self._build_sae_structure(model.config.hidden_size)])
+            else:
+                model.load_sae_models(self.config.sae_repository, [self.config.sae_layer])
         model.eval()
         return model
+
+    def _build_sae_structure(self, d_model: int) -> nn.Module:
+        """An unpopulated SAE layer of the recorded shape.
+
+        Resolved through importlib rather than an import statement. FastPLMs is not a pip
+        dependency of an exported repository: the backbone's own remote code installs it a
+        few lines above this. Transformers scans a trust_remote_code file for import
+        statements and refuses to load it when one names a package pip cannot find, so a
+        plain `from fastplms ...` here would make every exported SAE repository unloadable.
+        """
+        sae_module = importlib.import_module(
+            "fastplms.models.esm_plusplus.modeling_esm_plusplus_sae"
+        )
+        sae_layer_class = sae_module.ESMplusplusSAELayer
+        sae_params_class = sae_module.ESMplusplusSAEParams
+
+        missing = [
+            name
+            for name in ("sae_codebook_dim", "sae_k", "sae_layer")
+            if getattr(self.config, name, None) is None
+        ]
+        if missing:
+            raise ValueError(
+                f"This repository records a sparse autoencoder but not its shape: {missing}. "
+                "Re-export it with a Protify version that persists the codebook contract."
+            )
+        return sae_layer_class(
+            sae_params_class(
+                d_model=d_model,
+                codebook_dim=self.config.sae_codebook_dim,
+                k=self.config.sae_k,
+                layer=self.config.sae_layer,
+            )
+        )
+
+    @property
+    def uses_sae(self) -> bool:
+        return self.config.sae_repository is not None
+
+    def _select_features(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Keep the columns the probe was trained on.
+
+        A probe trained on a selected subspace cannot read a full-width embedding, and an
+        index array applied to the wrong width would reindex silently rather than fail,
+        so the width is checked against the one selection was fit on.
+        """
+        # embeddings: (b, f) -> (b, s)
+        if self.config.feature_indices is None:
+            return embeddings  # (b, f) or (b, s)
+        if embeddings.shape[-1] != self.config.feature_input_size:
+            raise ValueError(
+                f"Feature selection was fit on width {self.config.feature_input_size}, but "
+                f"this embedding is {embeddings.shape[-1]} wide."
+            )
+        # Built per call from the config rather than held as a buffer. from_pretrained
+        # constructs the module on the meta device and materializes only the keys the
+        # checkpoint carries, so a buffer would still be meta here and index_select would
+        # read out of bounds instead of raising.
+        index = torch.as_tensor(
+            self.config.feature_indices, dtype=torch.long, device=embeddings.device
+        )  # (s,)
+        return embeddings.index_select(-1, index)  # (b, s)
+
+    @classmethod
+    def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
+        """Refresh the backbone's non-persistent buffers after the checkpoint load.
+
+        ESM++ registers its rotary tables with persistent=False, so they appear in no
+        checkpoint and its own from_pretrained recomputes them afterwards. This model
+        builds its backbone with from_config and then loads through its own checkpoint,
+        which never runs that hook, leaving the tables as whatever the meta materialization
+        produced. The symptom is a model whose predictions change from run to run.
+        """
+        loaded = super().from_pretrained(*args, **kwargs)
+        model = loaded[0] if isinstance(loaded, tuple) else loaded
+        refresh = getattr(model.backbone, "_reset_rotary_embeddings", None)
+        if callable(refresh):
+            refresh()
+        return loaded
 
     def _load_probe(self) -> nn.Module:
         return rebuild_probe_from_saved_config(
@@ -107,7 +222,7 @@ class PackagedProbeModel(PreTrainedModel):
         attention_mask: torch.Tensor,
         token_type_ids: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # input_ids, attention_mask, and token_type_ids (when present): (b, l).
+        # input_ids: (b, l), attention_mask: (b, l), token_type_ids: (b, l) or None
         if token_type_ids is not None and torch.any(token_type_ids == 1):
             mask_a = ((token_type_ids == 0) & (attention_mask == 1)).long()  # (b, l)
             mask_b = ((token_type_ids == 1) & (attention_mask == 1)).long()  # (b, l)
@@ -159,7 +274,7 @@ class PackagedProbeModel(PreTrainedModel):
         token_type_ids: torch.Tensor | None,
         attentions: Any | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # hidden_states: (b, l, d); ids/masks: (b, l).
+        # hidden_states: (b, l, d), input_ids: (b, l), attention_mask: (b, l), token_type_ids: (b, l) or None
         if self.config.ppi and (not self.config.matrix_embed) and (not self.config.tokenwise):
             mask_a, mask_b = self._build_ppi_segment_masks(
                 input_ids,
@@ -169,8 +284,11 @@ class PackagedProbeModel(PreTrainedModel):
             # p is the configured number of pooling operations.
             vec_a = self.pooler(hidden_states, attention_mask=mask_a, attentions=attentions)  # (b, p * d)
             vec_b = self.pooler(hidden_states, attention_mask=mask_b, attentions=attentions)  # (b, p * d)
-            probe_embeddings = torch.cat((vec_a, vec_b), dim=-1)  # (b, 2 * p * d)
-            return probe_embeddings, None
+            half_a, half_b = pair_vector_halves(
+                vec_a, vec_b, self.config.pair_feature_mode
+            )  # two of (b, p * d)
+            probe_embeddings = torch.cat((half_a, half_b), dim=-1)  # (b, 2 * p * d)
+            return probe_embeddings, None  # (b, 2 * p * d), None
 
         if self.config.matrix_embed or self.config.tokenwise:
             return hidden_states, attention_mask  # (b, l, d), (b, l)
@@ -189,7 +307,7 @@ class PackagedProbeModel(PreTrainedModel):
         token_type_ids: torch.Tensor | None = None,
         labels: torch.Tensor | None = None,
     ) -> SequenceClassifierOutput | TokenClassifierOutput:
-        # input_ids, attention_mask, and token_type_ids (when present): (b, l).
+        # input_ids: (b, l), attention_mask: (b, l) or None, token_type_ids: (b, l) or None, labels: (b,), (b, c), (b, l) or (b, l, c) by the task and probe.
         # Label shape is task- and probe-dependent.
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids, dtype=torch.long)  # (b, l)
@@ -205,19 +323,33 @@ class PackagedProbeModel(PreTrainedModel):
         }
         if requires_attentions:
             backbone_kwargs["output_attentions"] = True
+        if self.uses_sae:
+            backbone_kwargs["compute_sae"] = True
         backbone_output = self.backbone(**backbone_kwargs)
-        hidden_states = self._extract_hidden_states(backbone_output)  # (b, l, d)
-        attentions = self._extract_attentions(backbone_output)
-        # Backbone-specific payload, typically per-layer (b, h, l, l) tensors, or None.
-        if requires_attentions:
-            assert attentions is not None, "parti pooling requires base model attentions"
-        probe_embeddings, probe_attention_mask = self._build_probe_inputs(
-            hidden_states=hidden_states,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            token_type_ids=token_type_ids,
-            attentions=attentions,
-        )  # (b, d_probe) or (b, l, d); mask is (b, l) or None
+
+        if self.uses_sae:
+            # The backbone emits codebook features over the batch's valid tokens instead
+            # of hidden states, so pooling reduces those and the dense Pooler is unused.
+            features = backbone_output.sae_outputs[f"layer{self.config.sae_layer}"].coalesce()
+            probe_embeddings = pool_sae_outputs(
+                features, attention_mask, tuple(self.config.pooling_types)
+            )  # (b, p * c)
+            probe_attention_mask = None
+        else:
+            hidden_states = self._extract_hidden_states(backbone_output)  # (b, l, d)
+            attentions = self._extract_attentions(backbone_output)
+            # Backbone-specific payload, typically per-layer (b, h, l, l) tensors, or None.
+            if requires_attentions:
+                assert attentions is not None, "parti pooling requires base model attentions"
+            probe_embeddings, probe_attention_mask = self._build_probe_inputs(
+                hidden_states=hidden_states,
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+                attentions=attentions,
+            )  # (b, d_probe) or (b, l, d); mask is (b, l) or None
+
+        probe_embeddings = self._select_features(probe_embeddings)
 
         # Exported repositories predating the rename still carry "linear".
         if self.config.probe_type in ("mlp", "linear"):

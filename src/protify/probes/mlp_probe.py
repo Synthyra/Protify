@@ -5,6 +5,7 @@ from torch import nn
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import SequenceClassifierOutput
 
+
 try:
     from ..model_components.mlp import intermediate_correction_fn
 except ImportError:
@@ -12,7 +13,7 @@ except ImportError:
         from protify.model_components.mlp import intermediate_correction_fn
     except ImportError:
         from model_components.mlp import intermediate_correction_fn
-from .losses import get_loss_fct
+from .losses import compute_probe_loss, get_loss_fct
 
 
 class MLPProbeConfig(PretrainedConfig):
@@ -32,6 +33,10 @@ class MLPProbeConfig(PretrainedConfig):
         use_bias: bool = False,
         **kwargs: Any,
     ) -> None:
+        # Transformers 5 saves the label count only as `id2label`, which `super().__init__` restores
+        # from a saved config. The default here would otherwise overwrite it on every load.
+        if kwargs.get("id2label") and num_labels == 2:
+            num_labels = len(kwargs["id2label"])
         super().__init__(**kwargs)
         self.input_size = input_size
         self.hidden_size = hidden_size
@@ -88,6 +93,7 @@ class MLPProbe(PreTrainedModel):
     ) -> SequenceClassifierOutput:
         # embeddings: (b, d), where d is config.input_size; attention_mask is unused.
         # labels: (b,), (b, 1), or (b, c), depending on the task.
+        # attention_mask: (b, l), unused
         embeddings = embeddings.to(next(self.layers.parameters()).dtype)  # (b, d)
         logits = self.layers(embeddings)  # (b, c)
         if self.task_type == 'sigmoid_regression':
@@ -95,27 +101,13 @@ class MLPProbe(PreTrainedModel):
 
         loss = None
         if labels is not None:
-            batch_size = logits.size(0)
-            if self.task_type == 'regression':
-                loss = self.loss_fct(
-                    logits.view(-1),  # (b * c,)
-                    labels.view(-1).float(),  # (b * c,)
-                )  # ()
-            elif self.task_type == 'sigmoid_regression':
-                loss = self.loss_fct(
-                    logits.view(-1),  # (b * c,)
-                    labels.view(-1).float(),  # (b * c,)
-                )  # ()
-            elif self.task_type == 'multilabel':
-                loss = self.loss_fct(
-                    logits.view(batch_size, -1),  # (b, c)
-                    labels.view(batch_size, -1).float(),  # (b, c)
-                )  # ()
-            else:
-                loss = self.loss_fct(
-                    logits.view(-1, self.num_labels),  # (b, c)
-                    labels.view(-1).long(),  # (b,)
-                )  # ()
+            loss = compute_probe_loss(
+                self.loss_fct,
+                logits,  # (b, c)
+                labels,
+                self.task_type,
+                self.num_labels,
+            )  # ()
 
         # logits: (b, c); loss: () or None.
         return SequenceClassifierOutput(

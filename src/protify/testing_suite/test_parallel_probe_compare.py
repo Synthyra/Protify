@@ -1,7 +1,7 @@
 import csv
 import json
-
 import pytest
+
 
 try:
     from src.protify.scripts import compare_parallel_probe_runs as compare

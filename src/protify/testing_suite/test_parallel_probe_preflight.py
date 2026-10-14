@@ -1,5 +1,6 @@
 import pytest
 
+
 try:
     from src.protify.scripts import plan_parallel_probes as preflight
 except ImportError:

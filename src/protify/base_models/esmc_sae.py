@@ -2,9 +2,11 @@
 
 FastPLMs owns the SAE runtime: `ESMplusplusModel.load_sae_models` reads a Biohub
 repository and `compute_sae=True` returns one sparse `(n, c)` tensor per attached layer,
-covering the valid tokens of the whole batch. This module owns what is Protify's instead:
-which checkpoints the registry offers, how a model name encodes one, how the per-residue
-features pool into one vector per protein, and whether that vector is stored sparsely.
+covering the valid tokens of the whole batch. `foundry.embedding` owns pooling those rows
+back into sequences, through `sae_pooling`, which an exported probe shares. This module owns
+what is Protify's instead: which checkpoints the registry offers, how a model name encodes
+one, which reductions and which tokens pool into one vector per protein, and whether that
+vector is stored sparsely.
 
 Model names carry the full checkpoint identity, for example
 `ESMC-300-SAE-l23-k64-c8192`, so embedding cache filenames, result tables, and plots
@@ -19,12 +21,19 @@ import torch.nn as nn
 from dataclasses import dataclass
 from typing import Any
 
-from .utils import ensure_fastplms_submodule_on_path, load_fastplms_model
+from .fastplms_loading import ensure_fastplms_submodule_on_path, load_fastplms_model
+from .sae_pooling import pool_sae_outputs, validate_sae_pooling_types
 
 
 ensure_fastplms_submodule_on_path()
 
-from fastplms.models.esm_plusplus.modeling_esm_plusplus import ESMplusplusModel
+# The SAE layer and its loader come through the ESM++ modeling module, which imports both,
+# so every FastPLMs name still arrives in the one statement this path barrier allows.
+from fastplms.models.esm_plusplus.modeling_esm_plusplus import (
+    ESMplusplusModel,
+    ESMplusplusSAELayer,
+    load_esmc_sae_layers,
+)
 
 from .esmc import ESMTokenizerWrapper, get_esmc_tokenizer
 
@@ -59,13 +68,9 @@ ALL_LAYER_K = 64
 DEFAULT_SAE_K = 64
 DEFAULT_SAE_CODEBOOK_DIM = 8192
 
-# Pooling names this adapter reduces the sparse feature tensor with. Anything else would
-# need the dense (b, l, c) activation tensor, which is the cost sparse output avoids.
-SAE_POOLING_TYPES = ('max', 'mean', 'sum')
-
 # Active feature fraction, k / codebook_dim, below which pooled features stay sparse
 # enough across the whole length range to store as coordinates. See
-# EsmcSaeForEmbedding.sparse_storage for the measurements this sits between.
+# EsmcSaeSelection.sparse_storage for the measurements this sits between.
 SPARSE_ACTIVE_FRACTION = 0.005
 
 _NAME_PATTERN = re.compile(
@@ -85,12 +90,38 @@ class EsmcSaeSelection:
     codebook_dim: int
 
     @property
+    def sparse_storage(self) -> bool:
+        """Whether these features belong in the store's sparse `csr` layout, which keeps exact nonzeros.
+
+        Per residue exactly `k` of `codebook_dim` features are active, whatever the
+        sequence length. Pooling unions those sets across residues, so pooled density
+        does grow with length, and how fast it grows tracks the active fraction
+        `k / codebook_dim` rather than either number alone.
+
+        Measured max-pooled density at codebook 16384, from short proteins to past 1200
+        residues: 1.7% to 5.1% at k=16, 9.7% to 34.2% at k=64, and 19.6% to 56.5% at
+        k=256. Only the last crosses the roughly 45% break-even. The threshold below sits
+        between the k=64 and k=256 active fractions, and independently reproduces the
+        codebook 8192 result at k=64, where measured storage split almost evenly between
+        the two formats and dense was the better single choice.
+        """
+        return self.k / self.codebook_dim <= SPARSE_ACTIVE_FRACTION
+
+    @property
     def repository(self) -> str:
+        """The Biohub repository publishing this checkpoint.
+
+        Biohub splits publication two ways. The depth layer has one repository per
+        sparsity and width, and names the layer. Every other layer is served by an
+        all-layer repository that ships one shard per layer and leaves the layer out of
+        its name, so a `layer{n}` name there resolves to no repository at all.
+        """
         coverage = ESMC_SAE_COVERAGE[self.backbone]
-        return (
-            f'biohub/{coverage.biohub_name}-sae'
-            f'-layer{self.layer}-k{self.k}-codebook{self.codebook_dim}'
-        )
+        stem = f'biohub/{coverage.biohub_name}-sae'
+        if self.layer == coverage.depth_layer:
+            return f'{stem}-layer{self.layer}-k{self.k}-codebook{self.codebook_dim}'
+
+        return f'{stem}-k{self.k}-codebook{self.codebook_dim}'
 
 
 def resolve_sae_selection(backbone: str, layer: int, k: int, codebook_dim: int) -> EsmcSaeSelection:
@@ -217,13 +248,7 @@ class EsmcSaeForEmbedding(nn.Module):
         dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
-        unsupported = [name for name in pooling_types if name not in SAE_POOLING_TYPES]
-        if unsupported:
-            raise ValueError(
-                f"SAE embeddings support pooling types {SAE_POOLING_TYPES}; received "
-                f"{unsupported}. Other pooling would need the dense (b, l, c) activation "
-                f"tensor, which is {selection.codebook_dim} wide per residue."
-            )
+        validate_sae_pooling_types(tuple(pooling_types), selection.codebook_dim)
 
         self.esm = load_fastplms_model(ESMplusplusModel, model_path, dtype=dtype)
         self.esm.load_sae_models(selection.repository, [selection.layer])
@@ -233,21 +258,42 @@ class EsmcSaeForEmbedding(nn.Module):
 
     @property
     def sparse_storage(self) -> bool:
-        """Whether these features belong in the coordinate-list blob format.
+        """Storage format for these features, decided by the checkpoint that produced them.
 
-        Per residue exactly `k` of `codebook_dim` features are active, whatever the
-        sequence length. Pooling unions those sets across residues, so pooled density
-        does grow with length, and how fast it grows tracks the active fraction
-        `k / codebook_dim` rather than either number alone.
-
-        Measured max-pooled density at codebook 16384, from short proteins to past 1200
-        residues: 1.7% to 5.1% at k=16, 9.7% to 34.2% at k=64, and 19.6% to 56.5% at
-        k=256. Only the last crosses the roughly 45% break-even. The threshold below sits
-        between the k=64 and k=256 active fractions, and independently reproduces the
-        codebook 8192 result at k=64, where measured storage split almost evenly between
-        the two formats and dense was the better single choice.
+        See `EsmcSaeSelection.sparse_storage` for the density measurements behind it.
         """
-        return self.selection.k / self.selection.codebook_dim <= SPARSE_ACTIVE_FRACTION
+        return self.selection.sparse_storage
+
+    def sae_and_hidden_states(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...]]:
+        """Pooled codebook features and every hidden state of the pass that produced them.
+
+        Returning the hidden states needs every block, so this pass also computes the
+        final normalized state. The codebook's own layer and that final state are therefore
+        both already on hand when the features exist, and one backbone pass can fill the
+        SAE cache and a dense cache at any depth, instead of running the backbone again
+        over every protein for another view of the same pass.
+        """
+        # input_ids: (b, l); attention_mask: (b, l) or None
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)  # (b, l)
+
+        model_output = self.esm(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            compute_sae=True,
+            output_hidden_states=True,
+        )
+        features = model_output.sae_outputs[self.sae_key]  # sparse (n, c)
+        pooled = pool_sae_outputs(features, attention_mask, self.pooling_types)  # (b, p * c)
+        # The input to each block, then the final normalized state: n_layers + 1 states of
+        # (b, l, d). Index `layer` is the residual stream the codebook read, and index -1 is
+        # `last_hidden_state`, the state an ordinary run pools by default.
+        hidden_states = model_output.hidden_states  # n_layers + 1 of (b, l, d)
+        return pooled, hidden_states  # (b, p * c) pooled, then n_layers + 1 states of (b, l, d)
 
     def forward(
         self,
@@ -274,52 +320,56 @@ class EsmcSaeForEmbedding(nn.Module):
             attention_mask=attention_mask,
             compute_sae=True,
         )
-        # FastPLMs returns valid tokens of the whole batch flattened, in row-major order.
-        features = model_output.sae_outputs[self.sae_key].coalesce()  # sparse (n, c)
-        token_counts = attention_mask.sum(dim=1).to(torch.long)  # (b,)
+        features = model_output.sae_outputs[self.sae_key]  # sparse (n, c)
+        return pool_sae_outputs(features, attention_mask, self.pooling_types)  # (b, p * c)
 
-        pooled = [
-            self._pool(features, token_counts, name)  # (b, c)
-            for name in self.pooling_types
-        ]
-        return torch.cat(pooled, dim=-1)  # (b, p * c), p = len(pooling_types)
 
-    def _pool(
-        self, features: torch.Tensor, token_counts: torch.Tensor, pooling: str
-    ) -> torch.Tensor:
-        """Reduce sparse per-residue codebook features to one vector per sequence.
+class EsmcSaeResidueEncoder(nn.Module):
+    """A published sparse autoencoder reading residues some earlier ESM++ pass produced.
 
-        The leading and trailing special tokens are dropped, matching the Biohub reference
-        workflow: those positions carry activations that describe no residue.
-        """
-        # features: sparse (n, c) over the batch's valid tokens; token_counts: (b,)
-        batch_size = int(token_counts.shape[0])  # b
-        codebook_dim = int(features.shape[1])  # c
-        device = features.device
+    Every sparse autoencoder trained at one layer reads the same residual stream, so a whole
+    grid of sparsities and codebook widths follows from a single backbone pass:
+    `EsmcSaeForEmbedding.sae_and_hidden_states` hands back that pass's hidden states, the
+    layer's residues among them, and one encoder here turns those residues into one more set
+    of pooled codebook features. Adding a grid cell therefore costs its codebook shards and
+    one more encode, never another trip through the blocks.
 
-        owner = torch.repeat_interleave(  # (n,) sequence index of each valid token
-            torch.arange(batch_size, device=device), token_counts
-        )
-        sequence_start = torch.cumsum(token_counts, dim=0) - token_counts  # (b,)
-        position = torch.arange(int(owner.shape[0]), device=device) - sequence_start[owner]  # (n,)
-        residue_rows = (position > 0) & (position < (token_counts[owner] - 1))  # (n,)
+    FastPLMs still owns the encoder. This loads it through the published loader and calls it
+    through the same `get_sae_output` contract `ESMplusplusModel` uses internally, so the
+    features match what an attached run would have produced.
+    """
 
-        indices = features.indices()  # (2, nnz)
-        values = features.values().float()  # (nnz,)
-        keep = residue_rows[indices[0]]  # (nnz,)
-        flat_positions = owner[indices[0][keep]] * codebook_dim + indices[1][keep]  # (kept,)
+    def __init__(
+        self,
+        selection: EsmcSaeSelection,
+        pooling_types: tuple[str, ...] = ('max',),
+        device: torch.device | str = 'cpu',
+        dtype: torch.dtype | None = None,
+    ) -> None:
+        super().__init__()
+        validate_sae_pooling_types(tuple(pooling_types), selection.codebook_dim)
 
-        pooled = torch.zeros(batch_size * codebook_dim, dtype=torch.float32, device=device)
-        reduce = 'amax' if pooling == 'max' else 'sum'
-        pooled.scatter_reduce_(0, flat_positions, values[keep], reduce=reduce, include_self=True)
-        pooled = pooled.reshape(batch_size, codebook_dim)  # (b, c)
+        # Pass the backbone's dtype so the codebook consumes its hidden states directly.
+        self.sae: ESMplusplusSAELayer = load_esmc_sae_layers(
+            selection.repository, [selection.layer], device=device, dtype=dtype
+        )[selection.layer]
+        self.selection = selection
+        self.pooling_types = tuple(pooling_types)
 
-        if pooling == 'mean':
-            # Two special tokens were dropped, so a length-2 input has no residues to average.
-            residue_counts = (token_counts - 2).clamp(min=1).to(pooled.dtype)  # (b,)
-            pooled = pooled / residue_counts.unsqueeze(-1)  # (b, c)
+    @property
+    def sparse_storage(self) -> bool:
+        """Storage format for these features, decided by the checkpoint that produced them."""
+        return self.selection.sparse_storage
 
-        return pooled  # (b, c)
+    def forward(self, residues: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        # residues: (b, l, d) hidden state this checkpoint was trained on; attention_mask: (b, l)
+        token_mask = attention_mask.to(torch.bool)  # (b, l)
+        # get_sae_output gathers valid tokens by boolean mask, which copies, and every step of
+        # the encoder is out of place. The residues tensor therefore survives untouched for the
+        # next configuration and for the dense pooling that reads the same layer.
+        encoded = self.sae.get_sae_output(residues, token_mask)
+        features = encoded.feature_magnitudes.detach()  # (n, c)
+        return pool_sae_outputs(features, attention_mask, self.pooling_types)  # (b, p * c)
 
 
 def build_esmc_sae_model(

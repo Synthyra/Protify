@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import subprocess
+
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -109,10 +110,7 @@ def embedding_jobs_by_command_id(
     assert isinstance(embedding_jobs, list), "embedding_prerequisites embedding_jobs must be a list."
     for job_index, job in enumerate(embedding_jobs):
         assert isinstance(job, dict), "Each embedding prerequisite job must be an object."
-        if "command_id" in job:
-            command_id = job["command_id"]
-        else:
-            command_id = f"embedding-{job_index + 1}"
+        command_id = job.get("command_id", f"embedding-{job_index + 1}")
         assert isinstance(command_id, str), "Embedding prerequisite command_id must be a string."
         assert command_id not in jobs_by_id, f"Duplicate embedding command_id in launch manifest: {command_id}"
         job_copy = dict(job)
@@ -400,9 +398,9 @@ def run_command(command_entry: dict[str, object]) -> dict[str, object]:
         check=False,
         env=subprocess_environment(command_entry),
     )
-    result = dict(command_entry)
-    result["returncode"] = completed.returncode
-    return result
+    completed_entry = dict(command_entry)
+    completed_entry["returncode"] = completed.returncode
+    return completed_entry
 
 
 def run_wave_sequential(
@@ -416,9 +414,9 @@ def run_wave_sequential(
         if command_entry["skipped"]:
             wave_results.append(command_entry)
             continue
-        result = run_command(command_entry)
-        wave_results.append(result)
-        if result["returncode"] != 0:
+        completed_entry = run_command(command_entry)
+        wave_results.append(completed_entry)
+        if completed_entry["returncode"] != 0:
             failure_count += 1
             if not continue_on_failure:
                 should_stop = True
@@ -444,11 +442,11 @@ def run_wave_concurrent(
     failure_count = 0
     for command_index, command_entry, process in processes:
         returncode = process.wait()
-        result = dict(command_entry)
-        result["returncode"] = returncode
+        completed_entry = dict(command_entry)
+        completed_entry["returncode"] = returncode
         if returncode != 0:
             failure_count += 1
-        wave_results[command_index] = result
+        wave_results[command_index] = completed_entry
 
     return wave_results, failure_count, False
 

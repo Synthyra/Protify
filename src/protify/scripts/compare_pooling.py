@@ -1,6 +1,8 @@
 """Grid-run Protify over pooling configurations and plot cross-pooling comparisons.
 
-Each --pooling_types token is one pooling configuration. Dashes concatenate:
+Each --pooling_types token is one pooling configuration, passed as both
+--embedding_pooling_types and --probe_pooling_types. A Lyra probe takes one pooling type,
+so compare it on single-type tokens only. Dashes concatenate:
     mean       -> --embedding_pooling_types mean
     mean-var   -> --embedding_pooling_types mean var
     max        -> --embedding_pooling_types max
@@ -31,11 +33,11 @@ import platform
 import subprocess
 import sys
 import time
-from pathlib import Path
-
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+
+from pathlib import Path
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -46,7 +48,7 @@ LOGS_DIR = PROTIFY_DIR / 'logs'
 PLOTS_DIR = REPO_ROOT / 'plots'
 
 sys.path.insert(0, str(PROTIFY_DIR))
-from visualization.utils import MODEL_NAMES, DATASET_NAMES, CLS_PREFS, REG_PREFS
+from visualization.plot_labels import MODEL_NAMES, DATASET_NAMES, CLS_PREFS, REG_PREFS
 
 
 def _timestamp() -> str:
@@ -75,7 +77,7 @@ def expand_pooling(spec: str) -> list[str]:
     return parts
 
 
-def snapshot_tsvs() -> set:
+def snapshot_tsvs() -> set[str]:
     return set(glob.glob(str(RESULTS_DIR / '*.tsv')))
 
 
@@ -168,7 +170,6 @@ def plot_bars(df: pd.DataFrame, out_dir: Path) -> None:
         if sub_m.empty:
             ax.set_visible(False)
             continue
-        pivot_models = [pretty_model(m) for m in sub_m['model'].unique()]
         sub_m = sub_m.assign(model_disp=sub_m['model'].map(pretty_model))
         sns.barplot(data=sub_m, x='pooling', y='value', hue='model_disp', ax=ax)
         ax.set_title(f'{pretty_dataset(dataset)}  ({metric_label})')

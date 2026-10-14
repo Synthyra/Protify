@@ -1,10 +1,10 @@
 import os
 import re
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union
-
 import torch
 import torch.nn as nn
+
+from pathlib import Path
+from typing import Any
 from transformers import (
     AutoModel,
     AutoModelForSequenceClassification,
@@ -13,7 +13,7 @@ from transformers import (
 
 from .base_tokenizer import BaseSequenceTokenizer
 from .carbon_tokenizer import AuditedCarbonTokenizer
-from .utils import select_hidden_state
+from .hidden_state_selection import select_hidden_state
 
 
 presets = {
@@ -67,9 +67,9 @@ def _validate_pinned_revision(revision: str) -> str:
 
 def resolve_carbon_source(
     preset: str,
-    model_path: Optional[str] = None,
-    revision: Optional[str] = None,
-) -> Tuple[str, Optional[str]]:
+    model_path: str | None = None,
+    revision: str | None = None,
+) -> tuple[str, str | None]:
     """Resolve a local model path or a revision-pinned Hub model reference.
 
     A custom remote model can be supplied as ``org/repo@<40-char commit>`` or by
@@ -106,12 +106,12 @@ def resolve_carbon_source(
     return remote_path, _validate_pinned_revision(resolved_revision)
 
 
-def _revision_kwargs(revision: Optional[str]) -> Dict[str, str]:
+def _revision_kwargs(revision: str | None) -> dict[str, str]:
     return {} if revision is None else {"revision": revision}
 
 
 class CarbonTokenizerWrapper(BaseSequenceTokenizer):
-    def __init__(self, tokenizer: AutoTokenizer):
+    def __init__(self, tokenizer: AutoTokenizer) -> None:
         super().__init__(tokenizer)
         # Right padding is the safest default for CARBON's closing DNA boundary
         # token and its Llama sequence-classification head.
@@ -126,7 +126,7 @@ class CarbonTokenizerWrapper(BaseSequenceTokenizer):
         self.pooling_token_id = self.dna_close_token_id
 
     @staticmethod
-    def _prepare_sequence(sequence: str, char_budget: Optional[int]) -> str:
+    def _prepare_sequence(sequence: str, char_budget: int | None) -> str:
         if not isinstance(sequence, str):
             raise TypeError(f"CARBON sequences must be strings, got {type(sequence).__name__}")
         lowered = sequence.lower()
@@ -151,9 +151,9 @@ class CarbonTokenizerWrapper(BaseSequenceTokenizer):
             raise ValueError(
                 f"CARBON tokenizer {field_name} must be rank 2, got shape {tuple(tensor.shape)}"
             )
-        return tensor
+        return tensor  # (b, n), n the token count
 
-    def _validate_boundaries(self, encoded: Dict[str, object]) -> None:
+    def _validate_boundaries(self, encoded: dict[str, object]) -> None:
         if "input_ids" not in encoded:
             raise ValueError("CARBON tokenizer did not return input_ids")
         input_ids = self._as_batched_tensor(encoded["input_ids"], "input_ids")
@@ -178,7 +178,7 @@ class CarbonTokenizerWrapper(BaseSequenceTokenizer):
                     f"sample; samples {invalid} had counts {observed}"
                 )
 
-    def _post_pad_max_length(self, encoded: Dict[str, object], max_length: int) -> None:
+    def _post_pad_max_length(self, encoded: dict[str, object], max_length: int) -> None:
         """Force exact right padding despite the upstream tokenizer's short padding."""
         input_ids = self._as_batched_tensor(encoded["input_ids"], "input_ids")
         current_length = input_ids.shape[1]
@@ -213,9 +213,9 @@ class CarbonTokenizerWrapper(BaseSequenceTokenizer):
 
     def __call__(
         self,
-        sequences: Union[str, List[str]],
-        **kwargs,
-    ) -> Dict[str, torch.Tensor]:
+        sequences: str | list[str],
+        **kwargs: Any,
+    ) -> dict[str, torch.Tensor]:
         if isinstance(sequences, str):
             sequences = [sequences]
         else:
@@ -236,7 +236,7 @@ class CarbonTokenizerWrapper(BaseSequenceTokenizer):
         if kwargs["padding"] == "max_length" and max_length is not None:
             self._post_pad_max_length(encoded, max_length)
         self._validate_boundaries(encoded)
-        return encoded
+        return encoded  # input_ids and attention_mask: (b, n), n the token count
 
 
 class CarbonForEmbedding(nn.Module):
@@ -244,8 +244,8 @@ class CarbonForEmbedding(nn.Module):
         self,
         model_path: str,
         dtype: torch.dtype = None,
-        revision: Optional[str] = None,
-    ):
+        revision: str | None = None,
+    ) -> None:
         super().__init__()
         # CARBON is a stock Llama backbone. AutoModel avoids allocating the
         # unused causal-language-model head for embedding extraction.
@@ -258,11 +258,11 @@ class CarbonForEmbedding(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = False,
+        attention_mask: torch.Tensor | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = False,
         hidden_state_index: int = -1,
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor:
         # input_ids: (b, l); attention_mask: (b, l); l counts 6-mer tokens plus two boundaries
         if output_attentions:
@@ -299,7 +299,7 @@ def _check_vocabulary_agreement(model: nn.Module, tokenizer: BaseSequenceTokeniz
 def get_carbon_tokenizer(
     preset: str,
     model_path: str = None,
-    revision: Optional[str] = None,
+    revision: str | None = None,
 ) -> BaseSequenceTokenizer:
     source, resolved_revision = resolve_carbon_source(preset, model_path, revision)
     base_tokenizer = AutoTokenizer.from_pretrained(
@@ -324,9 +324,9 @@ def build_carbon_model(
     masked_lm: bool = False,
     dtype: torch.dtype = None,
     model_path: str = None,
-    revision: Optional[str] = None,
-    **kwargs,
-) -> Tuple[nn.Module, BaseSequenceTokenizer]:
+    revision: str | None = None,
+    **kwargs: Any,
+) -> tuple[nn.Module, BaseSequenceTokenizer]:
     if masked_lm:
         raise ValueError(f"Model {preset} does not support masked language modeling")
     source, resolved_revision = resolve_carbon_source(preset, model_path, revision)
@@ -343,8 +343,8 @@ def get_carbon_for_training(
     hybrid: bool = False,
     dtype: torch.dtype = None,
     model_path: str = None,
-    revision: Optional[str] = None,
-):
+    revision: str | None = None,
+) -> tuple[nn.Module, BaseSequenceTokenizer]:
     if tokenwise:
         raise NotImplementedError(
             "CARBON uses 6-mer DNA tokens (one token spans 6 nt), so per-token labels do "

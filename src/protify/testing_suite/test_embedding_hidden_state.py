@@ -1,8 +1,8 @@
 import os
 import sys
-
 import pytest
 import torch
+
 from types import SimpleNamespace
 
 
@@ -14,7 +14,7 @@ for path in (PROTIFY_ROOT, SRC_ROOT, REPO_ROOT):
         sys.path.insert(0, path)
 
 
-from src.protify.base_models.utils import select_hidden_state
+from src.protify.base_models.hidden_state_selection import select_hidden_state
 from src.protify.embedder import (
     PUBLISHED_EMBEDDING_MAX_LENGTH,
     Embedder,

@@ -1,9 +1,9 @@
 """Tests for seed_utils.py reproducibility utilities."""
 
 import random
-
 import numpy as np
 import torch
+
 
 try:
     from src.protify.seed_utils import set_global_seed, get_global_seed, seed_worker, dataloader_generator
@@ -15,8 +15,8 @@ except ImportError:
 
 
 def test_set_global_seed_returns_seed() -> None:
-    result = set_global_seed(42)
-    assert result == 42
+    returned_seed = set_global_seed(42)
+    assert returned_seed == 42
 
 
 def test_get_global_seed_after_set() -> None:
@@ -25,9 +25,9 @@ def test_get_global_seed_after_set() -> None:
 
 
 def test_set_global_seed_none_generates_seed() -> None:
-    result = set_global_seed(None)
-    assert isinstance(result, int)
-    assert result >= 0
+    returned_seed = set_global_seed(None)
+    assert isinstance(returned_seed, int)
+    assert returned_seed >= 0
 
 
 def test_reproducibility_torch() -> None:

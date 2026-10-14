@@ -1,11 +1,12 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Union, List, Dict, Any
-from transformers import T5EncoderModel, AutoTokenizer, T5ForConditionalGeneration
 
-from .base_tokenizer import BaseSequenceTokenizer
+from typing import Any
+from transformers import T5EncoderModel, AutoTokenizer, PreTrainedTokenizerBase, T5ForConditionalGeneration
+
+from .base_tokenizer import BatchSequenceTokenizer
+from .hidden_state_selection import select_hidden_state
 from .t5 import T5ForSequenceClassification, T5ForTokenClassification
-from .utils import select_hidden_state
 
 
 presets = {
@@ -15,35 +16,26 @@ presets = {
 }
 
 
-class ANKHTokenizerWrapper(BaseSequenceTokenizer):
-    def __init__(self, tokenizer):
+class ANKHTokenizerWrapper(BatchSequenceTokenizer):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase) -> None:
         super().__init__(tokenizer)
-
-    def __call__(self, sequences: Union[str, List[str]], **kwargs) -> Dict[str, torch.Tensor]:
-        if isinstance(sequences, str):
-            sequences = [sequences]
-        kwargs.setdefault('return_tensors', 'pt')
-        kwargs.setdefault('padding', 'max_length')
-        kwargs.setdefault('truncation', True)
-        kwargs.setdefault('add_special_tokens', True)
-        tokenized = self.tokenizer(sequences, **kwargs)
-        return tokenized
 
 
 class AnkhForEmbedding(nn.Module):
-    def __init__(self, model_path: str, dtype: torch.dtype = None):
+    def __init__(self, model_path: str, dtype: torch.dtype = None) -> None:
         super().__init__()
         self.plm = T5EncoderModel.from_pretrained(model_path, dtype=dtype)
 
     def forward(
             self,
             input_ids: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = False,
+            attention_mask: torch.Tensor | None = None,
+            output_attentions: bool | None = None,
+            output_hidden_states: bool | None = False,
             hidden_state_index: int = -1,
-            **kwargs,
+            **kwargs: Any,
     ) -> torch.Tensor:
+        # input_ids: (b, l); attention_mask: (b, l)
         output_hidden_states = output_hidden_states or hidden_state_index != -1
         out = self.plm(
             input_ids,
@@ -57,12 +49,12 @@ class AnkhForEmbedding(nn.Module):
             hidden_state_index,
         )
         if output_attentions:
-            return hidden_state, out.attentions
-        return hidden_state
+            return hidden_state, out.attentions  # (b, l, d), one (b, h, l, l) per layer
+        return hidden_state  # (b, l, d)
 
 
 class AnkhForProteinGym(nn.Module):
-    def __init__(self, model_path: str, dtype: torch.dtype = None):
+    def __init__(self, model_path: str, dtype: torch.dtype = None) -> None:
         super().__init__()
         self.plm = T5ForConditionalGeneration.from_pretrained(model_path, dtype=dtype)
 
@@ -72,7 +64,7 @@ class AnkhForProteinGym(nn.Module):
         seq: str,
         pos: int,
         tokenizer: Any,
-        device: Optional[torch.device] = None,
+        device: torch.device | None = None,
         sentinel: str = "<extra_id_0>",
     ) -> torch.Tensor:
         """
@@ -84,7 +76,7 @@ class AnkhForProteinGym(nn.Module):
         - The logits at the last decoder position correspond to the first token of the span,
           i.e., the masked residue distribution.
 
-        Returns: tensor of shape [vocab_size] (log-probs).
+        Returns: tensor of shape (v,), the log-probs over the vocabulary.
         """
         assert 0 <= pos < len(seq), f"pos {pos} out of range for len={len(seq)}"
 
@@ -107,11 +99,11 @@ class AnkhForProteinGym(nn.Module):
         if sent_id is None:
             raise ValueError(f"Sentinel token {sentinel} not found in tokenizer.")
 
-        enc_ids = torch.tensor([left_ids + [sent_id] + right_ids], dtype=torch.long, device=device)
-        enc_mask = torch.ones_like(enc_ids, device=device)
+        enc_ids = torch.tensor([left_ids + [sent_id] + right_ids], dtype=torch.long, device=device)  # (1, l)
+        enc_mask = torch.ones_like(enc_ids, device=device)  # (1, l)
 
         # Decoder primed with the SAME sentinel; the next token distribution is what we want.
-        dec_ids = torch.tensor([[sent_id]], dtype=torch.long, device=device)
+        dec_ids = torch.tensor([[sent_id]], dtype=torch.long, device=device)  # (1, 1)
 
         out = self(
             input_ids=enc_ids,
@@ -121,16 +113,16 @@ class AnkhForProteinGym(nn.Module):
             output_hidden_states=False,
             output_attentions=False,
         )
-        logits = out.logits  # [1, 1, vocab]
-        log_probs = torch.log_softmax(logits[0, -1, :], dim=-1)
-        return log_probs
+        logits = out.logits  # (1, 1, v), v the vocabulary size
+        log_probs = torch.log_softmax(logits[0, -1, :], dim=-1)  # (v,)
+        return log_probs  # (v,)
 
 
-def get_ankh_tokenizer(preset: str, model_path: str = None):
+def get_ankh_tokenizer(preset: str, model_path: str = None) -> ANKHTokenizerWrapper:
     return ANKHTokenizerWrapper(AutoTokenizer.from_pretrained('Synthyra/ANKH_base'))
 
 
-def build_ankh_model(preset: str, masked_lm: bool = False, dtype: torch.dtype = None, model_path: str = None, **kwargs):
+def build_ankh_model(preset: str, masked_lm: bool = False, dtype: torch.dtype = None, model_path: str = None, **kwargs: Any) -> tuple[nn.Module, ANKHTokenizerWrapper]:
     model_path = model_path or presets[preset]
     if masked_lm:
         model = T5ForConditionalGeneration.from_pretrained(model_path, dtype=dtype).eval()
@@ -140,7 +132,7 @@ def build_ankh_model(preset: str, masked_lm: bool = False, dtype: torch.dtype = 
     return model, tokenizer
 
 
-def get_ankh_for_training(preset: str, tokenwise: bool = False, num_labels: int = None, hybrid: bool = False, dtype: torch.dtype = None, model_path: str = None):
+def get_ankh_for_training(preset: str, tokenwise: bool = False, num_labels: int = None, hybrid: bool = False, dtype: torch.dtype = None, model_path: str = None) -> tuple[nn.Module, ANKHTokenizerWrapper]:
     model_path = model_path or presets[preset]
     if hybrid:
         model = T5EncoderModel.from_pretrained(model_path, dtype=dtype).eval()

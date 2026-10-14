@@ -5,7 +5,7 @@ External packages can register custom backends via register_cloud_backend().
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any
 
 
 class CloudBackend(ABC):
@@ -17,15 +17,15 @@ class CloudBackend(ABC):
     @abstractmethod
     def submit_job(
         self,
-        config: Dict[str, Any],
+        config: dict[str, Any],
         gpu_type: str = "A100",
         timeout_seconds: int = 86400,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Submit a training/eval job. Returns dict with at least 'job_id' and 'status'."""
         ...
 
     @abstractmethod
-    def get_job_status(self, job_id: str) -> Dict[str, Any]:
+    def get_job_status(self, job_id: str) -> dict[str, Any]:
         """Poll job status. Returns dict with 'job_id', 'status', 'phase', etc."""
         ...
 
@@ -35,22 +35,22 @@ class CloudBackend(ABC):
         job_id: str,
         offset: int = 0,
         max_chars: int = 50000,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Read log delta. Returns dict with 'content', 'offset', 'next_offset', 'total_size'."""
         ...
 
     @abstractmethod
-    def cancel_job(self, job_id: str) -> Dict[str, Any]:
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
         """Cancel a running job. Returns dict with 'job_id' and 'status'."""
         ...
 
     @abstractmethod
-    def get_results(self, job_id: str) -> Dict[str, Any]:
+    def get_results(self, job_id: str) -> dict[str, Any]:
         """Fetch job results (metrics TSV, base64 plot images, hub URL). Returns result dict."""
         ...
 
     @abstractmethod
-    def list_jobs(self) -> Dict[str, Any]:
+    def list_jobs(self) -> dict[str, Any]:
         """List all jobs. Returns dict with 'jobs' list."""
         ...
 
@@ -73,9 +73,9 @@ class HTTPCloudBackend(CloudBackend):
     def _post(
         self,
         path: str,
-        json_data: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+        json_data: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         response = self._session.post(
             self._url(path),
             json=json_data,
@@ -85,7 +85,7 @@ class HTTPCloudBackend(CloudBackend):
         response.raise_for_status()
         return response.json()
 
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         response = self._session.get(
             self._url(path),
             params=params,
@@ -96,10 +96,10 @@ class HTTPCloudBackend(CloudBackend):
 
     def submit_job(
         self,
-        config: Dict[str, Any],
+        config: dict[str, Any],
         gpu_type: str = "A100",
         timeout_seconds: int = 86400,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         payload = {
             "config": config,
             "gpu_type": gpu_type,
@@ -107,7 +107,7 @@ class HTTPCloudBackend(CloudBackend):
         }
         return self._post("/v1/protify/train", json_data=payload)
 
-    def get_job_status(self, job_id: str) -> Dict[str, Any]:
+    def get_job_status(self, job_id: str) -> dict[str, Any]:
         return self._get("/v1/protify/job", params={"job_id": job_id})
 
     def get_job_logs(
@@ -115,7 +115,7 @@ class HTTPCloudBackend(CloudBackend):
         job_id: str,
         offset: int = 0,
         max_chars: int = 50000,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         return self._get(
             "/v1/protify/logs",
             params={
@@ -125,19 +125,19 @@ class HTTPCloudBackend(CloudBackend):
             },
         )
 
-    def cancel_job(self, job_id: str) -> Dict[str, Any]:
+    def cancel_job(self, job_id: str) -> dict[str, Any]:
         return self._post("/v1/protify/cancel", params={"job_id": job_id})
 
-    def get_results(self, job_id: str) -> Dict[str, Any]:
+    def get_results(self, job_id: str) -> dict[str, Any]:
         return self._get("/v1/protify/results", params={"job_id": job_id})
 
-    def list_jobs(self) -> Dict[str, Any]:
+    def list_jobs(self) -> dict[str, Any]:
         return self._get("/v1/protify/jobs")
 
 
 # Process-wide backend registry.
 
-_CLOUD_BACKEND: Optional[CloudBackend] = None
+_CLOUD_BACKEND: CloudBackend | None = None
 
 
 def register_cloud_backend(backend: CloudBackend) -> None:
@@ -147,15 +147,15 @@ def register_cloud_backend(backend: CloudBackend) -> None:
     _CLOUD_BACKEND = backend
 
 
-def get_cloud_backend() -> Optional[CloudBackend]:
+def get_cloud_backend() -> CloudBackend | None:
     """Return the currently registered cloud backend, or None."""
     return _CLOUD_BACKEND
 
 
 def get_or_create_cloud_backend(
-    api_key: Optional[str] = None,
-    base_url: Optional[str] = None,
-) -> Optional[CloudBackend]:
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> CloudBackend | None:
     """Return the registered backend, or create an HTTPCloudBackend from credentials.
 
     Returns None if no backend is registered and no api_key is provided.

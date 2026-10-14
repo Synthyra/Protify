@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
+
 from __future__ import annotations
+
 import argparse
 import json
 import math
-from pathlib import Path
-from typing import Dict, List, Tuple
-
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from visualization.utils import CLS_PREFS, DATASET_NAMES, MODEL_NAMES, REG_PREFS
+
+from pathlib import Path
+from matplotlib.axes import Axes
+from matplotlib.figure import Figure
 
 
-def is_regression(metrics: Dict[str, float]) -> bool:
+try:
+    from visualization.plot_labels import CLS_PREFS, DATASET_NAMES, MODEL_NAMES, REG_PREFS
+except ImportError:
+    from .plot_labels import CLS_PREFS, DATASET_NAMES, MODEL_NAMES, REG_PREFS
+
+
+def is_regression(metrics: dict[str, float]) -> bool:
     """Heuristic based on key names."""
     reg = ("spearman", "pearson", "r_squared", "rmse", "mse")
     cls = ("accuracy", "f1", "mcc", "auc", "precision", "recall")
@@ -28,7 +36,7 @@ def is_regression(metrics: Dict[str, float]) -> bool:
     return False  # default to classification
 
 
-def pick_metric(metrics: Dict[str, float], prefs: List[Tuple[str, str]]) -> Tuple[str, str]:
+def pick_metric(metrics: dict[str, float], prefs: list[tuple[str, str]]) -> tuple[str, str]:
     """Return (key, pretty_name) for the first preference present in metrics."""
     for k, nice in prefs:
         for mk in metrics:
@@ -40,7 +48,7 @@ def pick_metric(metrics: Dict[str, float], prefs: List[Tuple[str, str]]) -> Tupl
     raise KeyError("No preferred metric found.")
 
 
-def parse_metric_value(value) -> Tuple[float, float]:
+def parse_metric_value(value: object) -> tuple[float, float]:
     """
     Parse a metric value that may be in 'mean±std' format or a plain number.
     Returns (mean, std) where std is 0.0 if not present.
@@ -58,7 +66,7 @@ def parse_metric_value(value) -> Tuple[float, float]:
     return math.nan, 0.0
 
 
-def get_metric_value(metrics: Dict[str, float], key_suffix: str) -> float:
+def get_metric_value(metrics: dict[str, float], key_suffix: str) -> float:
     """Fetch metric value case-/prefix-insensitively; NaN if absent.
     For mean±std format, returns only the mean value."""
     for k, v in metrics.items():
@@ -73,7 +81,7 @@ def get_metric_value(metrics: Dict[str, float], key_suffix: str) -> float:
     return math.nan
 
 
-def get_metric_value_with_std(metrics: Dict[str, float], key_suffix: str) -> Tuple[float, float, str]:
+def get_metric_value_with_std(metrics: dict[str, float], key_suffix: str) -> tuple[float, float, str]:
     """
     Fetch metric value with std case-/prefix-insensitively.
     Returns (mean, std, display_string) where display_string is formatted for heatmap display.
@@ -94,36 +102,36 @@ def get_metric_value_with_std(metrics: Dict[str, float], key_suffix: str) -> Tup
     return math.nan, 0.0, ""
 
 
-def radar_factory(n_axes: int):
+def radar_factory(n_axes: int) -> tuple[Figure, Axes, np.ndarray]:
     theta = np.linspace(0, 2 * np.pi, n_axes, endpoint=False)
     fig, ax = plt.subplots(figsize=(10, 10), subplot_kw={"polar": True})
     ax.set_theta_offset(np.pi / 2)
     ax.set_theta_direction(-1)
-    return fig, ax, theta
+    return fig, ax, theta  # (n_axes,) theta, after the figure and axes
 
 
 def plot_radar(*,
-               categories: List[str],
-               models: List[str],
-               data: List[List[float]],
+               categories: list[str],
+               models: list[str],
+               scores: list[list[float]],
                title: str,
                outfile: Path,
                normalize: bool = False,
-               no_title: bool = False):
+               no_title: bool = False) -> None:
     # Use pretty names for categories (datasets) and models
     pretty_categories = [DATASET_NAMES.get(cat, cat) for cat in categories]
     pretty_models = [MODEL_NAMES.get(m, m) for m in models]
 
     if normalize:
-        arr = np.asarray(data)
+        arr = np.asarray(scores)
         rng = np.where(np.ptp(arr, axis=0) == 0, 1, np.ptp(arr, axis=0))
-        data = (arr - arr.min(0)) / rng
+        scores = (arr - arr.min(0)) / rng
         # Convert back to list of lists for consistency
-        data = data.tolist()
+        scores = scores.tolist()
 
     # append mean column (do this after normalization if normalize=True)
     pretty_categories = pretty_categories + ["Avg"]
-    data = [row + [np.nanmean(row)] for row in data]
+    scores = [row + [np.nanmean(row)] for row in scores]
 
     fig, ax, theta = radar_factory(len(pretty_categories))
     ax.set_thetagrids(np.degrees(theta), pretty_categories, fontsize=11)
@@ -131,7 +139,7 @@ def plot_radar(*,
     ax.set_yticks(np.linspace(0, 1, 11))
 
     palette = [plt.cm.tab20(i / len(pretty_models)) for i in range(len(pretty_models))]
-    for i, (m, vals) in enumerate(zip(pretty_models, data)):
+    for i, (m, vals) in enumerate(zip(pretty_models, scores, strict=True)):
         ang = np.concatenate([theta, [theta[0]]])
         val = np.concatenate([vals,  [vals[0]]])
         ax.plot(ang, val, lw=2, label=m, color=palette[i])
@@ -146,16 +154,16 @@ def plot_radar(*,
     plt.close(fig)
 
 
-def bar_plot(datasets: List[str],
-             models: List[str],
-             data: List[List[float]],
+def bar_plot(datasets: list[str],
+             models: list[str],
+             scores: list[list[float]],
              metric_name: str,
              outfile: Path,
-             no_title: bool = False):
+             no_title: bool = False) -> None:
     rows = [
         {"Dataset": DATASET_NAMES.get(d, d), "Model": MODEL_NAMES.get(m, m), "Score": s}
-        for m, col in zip(models, data)
-        for d, s in zip(datasets, col)
+        for m, col in zip(models, scores, strict=True)
+        for d, s in zip(datasets, col, strict=True)
     ]
     dfp = pd.DataFrame(rows)
     plt.figure(figsize=(max(12, .8 * len(datasets)), 8))
@@ -178,6 +186,7 @@ def normalize_per_dataset(arr: np.ndarray) -> np.ndarray:
     Returns:
         Normalized array of same shape, with each row normalized to [0, 1]
     """
+    # arr: (num_datasets, num_models)
     normalized_data = np.zeros_like(arr)
     for i in range(arr.shape[0]):
         lowest_performance = np.nanmin(arr[i, :])
@@ -185,31 +194,31 @@ def normalize_per_dataset(arr: np.ndarray) -> np.ndarray:
         denom = best_performance - lowest_performance
         denom = 1 if denom == 0 else denom
         normalized_data[i, :] = (arr[i, :] - lowest_performance) / denom
-    return normalized_data
+    return normalized_data  # (num_datasets, num_models)
 
-def heatmap_plot(datasets: List[str],
-                 models: List[str],
-                 data: List[List[float]],
+def heatmap_plot(datasets: list[str],
+                 models: list[str],
+                 scores: list[list[float]],
                  metric_name: str,
                  outfile: Path,
                  normalize: bool = False,
-                 display_strings: List[List[str]] = None,
+                 display_strings: list[list[str]] | None = None,
                  no_std: bool = False,
-                 no_title: bool = False):
+                 no_title: bool = False) -> None:
     """
     Create a heatmap plot.
     
     Args:
         datasets: List of dataset names
         models: List of model names
-        data: List of lists of mean values (for coloring)
+        scores: List of lists of mean values (for coloring)
         metric_name: Name of the metric being plotted
         outfile: Output file path
         normalize: Whether to normalize display values
         display_strings: Optional list of lists of display strings (e.g., "0.85±0.01").
                         If provided, these are used for annotations instead of raw values.
     """
-    arr = np.array(data).T  # shape: (num_datasets, num_models)
+    arr = np.array(scores).T  # shape: (num_datasets, num_models)
     # Compute average row (mean across datasets for each model)
     avg_row = np.nanmean(arr, axis=0, keepdims=True)
     arr_with_avg = np.vstack([arr, avg_row])
@@ -312,7 +321,7 @@ def heatmap_plot(datasets: List[str],
                     text_str = f'{annot_arr[i, j]:.4f}'
                 else:
                     text_str = f'{annot_arr[i, j]:.2f}'
-            text = ax.text(j, i, text_str,
+            ax.text(j, i, text_str,
                           ha="center", va="center", color="black", fontsize=font_size)
     
     # Add black boxes around best performers in each row
@@ -345,7 +354,7 @@ def load_tsv(tsv: Path) -> pd.DataFrame:
     return df
 
 
-def create_plots(tsv: str, outdir: str, no_std: bool = False, no_title: bool = False):
+def create_plots(tsv: str, outdir: str, no_std: bool = False, no_title: bool = False) -> None:
     tsv, outdir = Path(tsv), Path(outdir)
     df = load_tsv(tsv)
     models = [c for c in df.columns if c != "dataset"]
@@ -392,7 +401,7 @@ def create_plots(tsv: str, outdir: str, no_std: bool = False, no_title: bool = F
     ordered_types = []  # Keep track of ordered dataset types
     
     # First add datasets that are in DATASET_NAMES in their defined order
-    for ds in DATASET_NAMES.keys():
+    for ds in DATASET_NAMES:
         if ds in datasets:
             idx = datasets.index(ds)
             ordered_datasets.append(ds)
@@ -464,14 +473,14 @@ def create_plots(tsv: str, outdir: str, no_std: bool = False, no_title: bool = F
     # Radar plot keeps original order
     plot_radar(categories=datasets,
                models=models,
-               data=plot_matrix,
+               scores=plot_matrix,
                title=subtitle,
                outfile=radar_path,
                normalize=False,
                no_title=no_title)
     plot_radar(categories=datasets,
                models=models,
-               data=plot_matrix,
+               scores=plot_matrix,
                title=subtitle + " (Normalized)",
                outfile=radar_path_norm,
                normalize=True,
@@ -526,27 +535,27 @@ if __name__ == "__main__":
         # Dummy data
         categories = ["A", "B", "C"]
         models = ["Model1", "Model2"]
-        data = [
+        test_scores = [
             [0.8, 0.6, 0.7],
             [0.5, 0.9, 0.4],
         ]
         # Radar plot
         radar_path = tmpdir / "test_radar.png"
-        plot_radar(categories=categories, models=models, data=data, title="Test Radar", outfile=radar_path)
+        plot_radar(categories=categories, models=models, scores=test_scores, title="Test Radar", outfile=radar_path)
         assert radar_path.exists(), "Radar plot not created!"
         print(f"Radar plot test passed: {radar_path}")
         # Normalized radar plot
         radar_path_norm = tmpdir / "test_radar_normalized.png"
-        plot_radar(categories=categories, models=models, data=data, title="Test Radar (Normalized)", outfile=radar_path_norm, normalize=True)
+        plot_radar(categories=categories, models=models, scores=test_scores, title="Test Radar (Normalized)", outfile=radar_path_norm, normalize=True)
         assert radar_path_norm.exists(), "Normalized radar plot not created!"
         print(f"Normalized radar plot test passed: {radar_path_norm}")
         # Bar plot
         bar_path = tmpdir / "test_bar.png"
-        bar_plot(categories, models, data, "Test Metric", bar_path)
+        bar_plot(categories, models, test_scores, "Test Metric", bar_path)
         assert bar_path.exists(), "Bar plot not created!"
         print(f"Bar plot test passed: {bar_path}")
         # Normalized bar plot
-        arr = np.asarray(data)
+        arr = np.asarray(test_scores)
         rng = np.where(np.ptp(arr, axis=0) == 0, 1, np.ptp(arr, axis=0))
         arr_norm = (arr - arr.min(0)) / rng
         bar_path_norm = tmpdir / "test_bar_normalized.png"
@@ -555,12 +564,12 @@ if __name__ == "__main__":
         print(f"Normalized bar plot test passed: {bar_path_norm}")
         # Heatmap plot
         heatmap_path = tmpdir / "test_heatmap.png"
-        heatmap_plot(categories, models, data, "Test Metric", heatmap_path)
+        heatmap_plot(categories, models, test_scores, "Test Metric", heatmap_path)
         assert heatmap_path.exists(), "Heatmap plot not created!"
         print(f"Heatmap plot test passed: {heatmap_path}")
         # Normalized heatmap plot
         heatmap_path_norm = tmpdir / "test_heatmap_normalized.png"
-        heatmap_plot(categories, models, data, "Test Metric", heatmap_path_norm, normalize=True)
+        heatmap_plot(categories, models, test_scores, "Test Metric", heatmap_path_norm, normalize=True)
         assert heatmap_path_norm.exists(), "Normalized heatmap plot not created!"
         print(f"Normalized heatmap plot test passed: {heatmap_path_norm}")
         # Heatmap plot with mean±std display strings
@@ -569,7 +578,7 @@ if __name__ == "__main__":
             ["0.50±0.05", "0.90±0.02", "0.40±0.01"],
         ]
         heatmap_path_std = tmpdir / "test_heatmap_with_std.png"
-        heatmap_plot(categories, models, data, "Test Metric", heatmap_path_std, display_strings=display_strings)
+        heatmap_plot(categories, models, test_scores, "Test Metric", heatmap_path_std, display_strings=display_strings)
         assert heatmap_path_std.exists(), "Heatmap with std not created!"
         print(f"Heatmap with std test passed: {heatmap_path_std}")
         print("All plot function tests passed!\n")

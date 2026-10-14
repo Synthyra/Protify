@@ -2,9 +2,11 @@
 
 import torch
 import torch.nn as nn
+
 from typing import Any
 
-from .utils import ensure_fastplms_submodule_on_path, load_fastplms_model, select_hidden_state
+from .fastplms_loading import ensure_fastplms_submodule_on_path, load_fastplms_model
+from .hidden_state_selection import select_hidden_state
 
 
 ensure_fastplms_submodule_on_path()
@@ -16,7 +18,7 @@ from fastplms.models.esm_plusplus.modeling_esm_plusplus import (
     ESMplusplusForTokenClassification,
     EsmSequenceTokenizer,
 )
-from .base_tokenizer import BaseSequenceTokenizer
+from .base_tokenizer import BatchSequenceTokenizer
 
 
 presets = {
@@ -26,19 +28,9 @@ presets = {
 }
 
 
-class ESMTokenizerWrapper(BaseSequenceTokenizer):
+class ESMTokenizerWrapper(BatchSequenceTokenizer):
     def __init__(self, tokenizer: EsmSequenceTokenizer) -> None:
         super().__init__(tokenizer)
-
-    def __call__(self, sequences: str | list[str], **kwargs: Any) -> dict[str, torch.Tensor]:
-        if isinstance(sequences, str):
-            sequences = [sequences]
-        kwargs.setdefault("return_tensors", "pt")
-        kwargs.setdefault("padding", "max_length")
-        kwargs.setdefault("truncation", True)
-        kwargs.setdefault("add_special_tokens", True)
-        token_batch = self.tokenizer(sequences, **kwargs)
-        return token_batch  # default tensor fields: (b, l)
 
 
 class ESMplusplusForEmbedding(nn.Module):

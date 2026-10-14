@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+
 from typing import Any
 from transformers import (
     AutoModel,
@@ -9,7 +10,7 @@ from transformers import (
 )
 
 from .base_tokenizer import BaseSequenceTokenizer
-from .utils import select_hidden_state
+from .hidden_state_selection import select_hidden_state
 
 
 presets = {
@@ -64,13 +65,13 @@ class ProtCLMForEmbedding(nn.Module):
         return hidden_state  # (b, l, d)
 
 
-def get_protCLM_tokenizer(preset: str, model_path: str | None = None) -> ProtCLMTokenizerWrapper:
+def get_protclm_tokenizer(preset: str, model_path: str | None = None) -> ProtCLMTokenizerWrapper:
     return ProtCLMTokenizerWrapper(
         AutoTokenizer.from_pretrained(model_path or presets[preset], trust_remote_code=True)
     )
 
 
-def build_protCLM(
+def build_protclm(
     preset: str,
     masked_lm: bool = False,
     dtype: torch.dtype | None = None,
@@ -81,11 +82,11 @@ def build_protCLM(
         raise ValueError(f"Model {preset} does not support masked language modeling")
     model_path = model_path or presets[preset]
     model = ProtCLMForEmbedding(model_path, dtype=dtype).eval()
-    tokenizer = get_protCLM_tokenizer(preset)
+    tokenizer = get_protclm_tokenizer(preset)
     return model, tokenizer
 
 
-def get_protCLM_for_training(
+def get_protclm_for_training(
     preset: str,
     tokenwise: bool = False,
     num_labels: int | None = None,
@@ -105,13 +106,13 @@ def get_protCLM_for_training(
             model = AutoModelForSequenceClassification.from_pretrained(
                 model_path, num_labels=num_labels, dtype=dtype, trust_remote_code=True
             ).eval()
-    tokenizer = get_protCLM_tokenizer(preset)
+    tokenizer = get_protclm_tokenizer(preset)
     return model, tokenizer
 
 
 if __name__ == "__main__":
     # py -m src.protify.base_models.protCLM
-    model, tokenizer = build_protCLM("ProtCLM-1b")
+    model, tokenizer = build_protclm("ProtCLM-1b")
     print(model)
     print(tokenizer)
     print(tokenizer("MEKVQYLTRSAIRRASTIEMPQQARQKLQNLFINFCLILICBBOLLICIIVMLL"))

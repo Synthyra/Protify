@@ -1,12 +1,12 @@
 # Models and Embeddings
 
-This page documents base (protein/chemical) models and embedding generation: `BaseModelArguments` (model_names vs model_paths/model_types), `get_base_model` and `get_tokenizer`, `EmbeddingArguments`, the `Embedder` flow, `get_embedding_filename`, storage (SQL vs PTH), and pooling. To list supported models from the CLI or Python, see [Resource listing](resource_listing.md).
+This page documents base (protein/chemical) models and embedding generation: `BaseModelArguments` (model_names vs model_paths/model_types), `get_base_model` and `get_tokenizer`, `EmbeddingArguments`, the `Embedder` flow, the feature store and `--sql`, converting old caches, and pooling. To list supported models from the CLI or Python, see [Resource listing](resource_listing.md).
 
 ---
 
 ## Overview
 
-Protify supports two ways to specify models: **preset names** (`model_names`, e.g. ESM2-8, ProtT5) resolved from a built-in map, or **explicit paths and types** (`model_paths` plus `model_types`) for custom or local models. Embeddings are produced by running the base model (or downloading/reading from disk) and optionally pooling per-residue outputs to vectors. They can be saved as `.pth` (dict of sequence -> tensor) or in SQLite (`.db`).
+Protify supports two ways to specify models: **preset names** (`model_names`, e.g. ESM2-8, ProtT5) resolved from a built-in map, or **explicit paths and types** (`model_paths` plus `model_types`) for custom or local models. Embeddings are produced by running the base model (or downloading/reading from disk) and optionally pooling per-residue outputs to vectors. They are saved in the workspace's feature store, one directory per representation under `--embedding_save_dir`. Caches written before that change (`.pth` dictionaries and SQLite `.db` files) are converted into the store, never recomputed; see [Old caches](#old-caches).
 
 ---
 
@@ -14,8 +14,8 @@ Protify supports two ways to specify models: **preset names** (`model_names`, e.
 
 1. **BaseModelArguments** is built from config. Either `model_names` is set (preset mode) or `model_paths` and `model_types` are set (path mode). They are mutually exclusive.
 2. **model_entries()** yields `(display_name, dispatch_type, model_path)` for each model. Preset mode: `dispatch_type` is the preset name, `model_path` is None. Path mode: `dispatch_type` is the type keyword (e.g. esm2, custom), `model_path` is the path.
-3. **Embedder** is called per model. For each model it may: download precomputed embeddings (if `download_embeddings`), read existing embeddings from disk (SQL or PTH), or compute new embeddings via `get_base_model()` and forward passes, then optionally save them.
-4. **get_embedding_filename()** defines the cache key from model name, `matrix_embed`, pooling, hidden-state index, and tokenizer `max_length`. CARBON keys also include the resolved model commit and preprocessing schema.
+3. **Embedder** is called per model. For each model it may: download precomputed embeddings (if `download_embeddings`), read the rows the feature store already holds, or compute the rest via `get_base_model()` and forward passes, then optionally save them.
+4. **`EmbeddingArguments.cache_descriptor()`** defines the store key from the model name, `matrix_embed`, pooling in column order, hidden-state index, tokenizer `max_length`, the special-token policy, and the stored dtype. CARBON keys also include the resolved model commit and preprocessing schema. `get_embedding_filename()` names old cache files only.
 
 ---
 
@@ -63,60 +63,62 @@ Defined in [embedder.py](../src/protify/embedder.py). Constructor maps long name
 | `embedding_pooling_types` | List[str] | ['mean'] | Pooling for vectors (e.g. mean, var, parti). |
 | `embedding_hidden_state_index` | int | -1 | Hidden-state tuple index to pool from. `-1` uses `last_hidden_state` without requesting all intermediate states. |
 | `save_embeddings` | bool | False | Whether to write computed embeddings to disk. |
-| `embed_dtype` | dtype | torch.float32 | Dtype for stored embeddings. |
+| `embed_dtype` | dtype | torch.float32 | Dtype for stored embeddings, part of the store's key: float64, float32, float16, or bfloat16. |
 | `model_dtype` | dtype | None | Dtype for base model (None uses default). |
-| `sql` | bool | False | Store in SQLite (`.db`) instead of `.pth`. |
-| `embedding_save_dir` | str | embeddings | Directory for save/load paths. |
+| `sql` | bool | False | Stream rows from the store at train time instead of holding them in memory, and commit embedded rows as they are produced. The name is kept from when this chose a SQLite file; the store is the same either way. |
+| `embedding_save_dir` | str | embeddings | The feature store root: each representation is a directory under it. |
 | `padding` | str | max_length | Padding strategy for the embedding collator. `max_length` pads all batches to `max_length` tokens (optimal for torch.compile + flex attention). `longest` pads to the longest sequence in each batch (skips compile, but avoids wasted padding compute). |
 | `max_length` | int | 2048 | Maximum tokenizer length, including special and model boundary tokens. Always passed to the tokenizer for truncation. CARBON uses two boundary tokens and one token per DNA 6-mer, so its raw DNA budget is `6 * (max_length - 2)` base pairs. |
 | `multi_gpu` | bool | False | Split sequences across all available GPUs via `mp.Process`. Each GPU loads its own model copy and embeds a shard. |
 | `autocast` | bool | False | Wrap forward pass in `torch.autocast` for mixed-precision inference. Useful when `model_dtype` is float32 but you want float16 compute speed (~1.5x). |
 
-`read_scaler` (CLI/embedding) is used for SQL read batching in dataset building.
+`read_scaler` (CLI/embedding) is used for streamed (`--sql`) read batching in dataset building.
 
 ---
 
 ## Embedder flow
 
 1. **__call__(model_name, model_type=None, model_path=None)**  
-   - If `download_embeddings`: `_download_embeddings(model_name)` (download, unzip, optional merge, save under `embedding_save_dir`).
+   - If `download_embeddings`: `_download_embeddings(model_name)` (download, unzip, and convert the published file into the store; see [Old caches](#old-caches)).
 2. **_read_embeddings_from_disk(model_name)**  
-   - Builds path via `get_embedding_filename(model_name, matrix_embed, pooling_types, extension='pth' or 'db', hidden_state_index=...)`.
-   - **SQL:** Opens/creates `.db`, table `embeddings (sequence, embedding)`; returns `(to_embed, save_path, {})`.  
-   - **PTH:** If file exists, loads dict `{seq -> tensor}`; returns `(to_embed, save_path, embeddings_dict)`.
+   - Builds the run's descriptor with `EmbeddingArguments.cache_descriptor(...)` and finds its store under `embedding_save_dir` (`feature_directory`). A store that holds the run's dtype exactly, or a wider one, serves it.
+   - If the store does not exist and an old `.db` or `.pth` cache of the same representation does, that file is converted first (the file of the run's own mode first).
+   - **Store missing:** every sequence is still to embed; returns `(to_embed, save_path, {})`, where `save_path` is the directory the store will be made in.
+   - **Store present:** `to_embed` is what `FeatureReader.missing` reports. Under `--sql` the rows stay on disk and the dictionary is empty; otherwise it holds the already embedded rows of this run's sequences, read once.
 3. If there are sequences left to embed (`len(to_embed) > 0`): get base model and tokenizer via `get_base_model(dispatch_name, ...)`, then **_embed_sequences(...)**.
-4. **_embed_sequences** builds a DataLoader over sequences, runs forward passes, applies pooling (or keeps matrix), and either inserts into SQLite or updates the embeddings dict; if `save_embeddings` and not SQL, saves the dict to PTH at the end.
+4. **_embed_sequences** builds a DataLoader over sequences, runs forward passes, applies pooling (or keeps matrix), and hands each batch of rows to a `CacheWriter` (when `--save_embeddings` or `--sql` is set) and to the in-memory dictionary (unless `--sql`). The writer commits one segment per window of 2,048 rows or 256 MiB, so a run that dies keeps every committed window and the next run embeds only what is missing. With neither flag nothing is written.
 
 ---
 
-## get_embedding_filename
+## The feature store
 
-```text
-get_embedding_filename(model_name, matrix_embed, pooling_types, extension='pth', hidden_state_index=-1, max_length=2048, model_type=None, model_path=None)
-```
+Every cache is one directory of the workspace's feature store (`fastplms.features`), named by a key that `foundry.embedding.plain_feature_key` computes from a descriptor. The descriptor states every fact that changes the stored numbers, and the store keeps it unchanged in its `feature.json`:
 
-Returns a filename containing `{model_name}`, matrix mode, optional hidden-state index, `max_length`, and pooling types. CARBON filenames additionally contain the full immutable model revision and preprocessing schema. For vector embeddings, pooling types are sorted and joined with underscore (e.g. `mean_var`). Extension is `pth` or `db` for SQL.
+| Field | Meaning |
+|-------|---------|
+| `schema` | `protify_embedding_v1` |
+| `model` | the resolved model name, which already carries an SAE model's layer, sparsity, and codebook width |
+| `revision`, `preprocessing` | a CARBON model's immutable revision and preprocessing schema; `null` for every other model |
+| `form` | `vector` (pooled) or `matrix` (per token) |
+| `pooling` | pooling types in the order the columns are concatenated; `null` for a matrix |
+| `hidden_state_index` | the hidden state read, `-1` for the last |
+| `max_length` | the tokenizer truncation limit |
+| `special_tokens` | `included`: every pooled statistic, SAE max included, covers all `len(sequence) + 2` rows, and a matrix has that many rows. `excluded` names only a cache an older Protify wrote for an SAE model, which pooled the interior tokens; no current reader asks for it and the converter alone can label a cache so |
+| `dtype` | the stored dtype |
 
-The default `hidden_state_index=-1` omits the hidden-state suffix. Cache names intentionally changed when `max_length` became part of the identity, preventing embeddings produced under different truncation limits from being mixed. Locally cached embeddings written before that change are not reused, so they are recomputed once.
+A directory reads like `protify__ESM2-8__vector__mean-var__len1024__float16__fa78626840a79fd2`; the digest, not the words, is the identity. `max_length` is in the key so embeddings produced under different truncation limits are never mixed. A pooled vector is stored `dense`, an SAE vector `csr` when the model's `sparse_storage` says it pays, and a matrix `ragged`.
 
-`--download_embeddings` still finds the published files. They were uploaded under the older naming and all produced at the default `max_length`, so `_download_embeddings` requests the current name first and then falls back to `legacy_embedding_filename`, and only when this run uses that same default. Below it, the published file would carry more of each sequence than the run asked for, so the fallback is skipped and the embeddings are computed locally.
+A store serves a request for any dtype it holds exactly: a float32 store serves float16 and bfloat16 runs, and rows written into a wider store widen and are never narrowed. `--sql` keeps its name and now means streaming rows from the store during training instead of holding them in memory: the run holds one `FeatureReader` and reads a few rows per batch. Without it the rows a run needs are read once into memory. A missing store raises `FileNotFoundError` that says how to make one.
 
----
+### Old caches
 
-## SQL vs PTH
+Caches written before the feature store were SQLite `.db` files (table `embeddings(sequence, embedding)`, compact blobs) and pickled `.pth` dictionaries, named by `get_embedding_filename(model_name, matrix_embed, pooling_types, extension, hidden_state_index, max_length, ...)`. That name lists `{model_name}`, matrix mode, an optional hidden-state suffix, `max_length`, and the pooling types sorted and joined with underscores (for example `ESM2-8_False_len2048_mean_var.db`); CARBON names add the model revision and preprocessing schema. Nothing writes these formats now. [legacy_cache.py](../src/protify/legacy_cache.py) reads them, and converts them with `fastplms.features.convert_rows`, which compares every stored row with the decoded one bit for bit. The old file is never changed.
 
-- **PTH:** One file per (model_name, matrix_embed, pooling_types). Dict mapping sequence string to tensor. Load/save with `torch.load` / `torch.save`.
-- **SQL:** One `.db` file per same key. Table `embeddings(sequence, embedding)`. New sequences use INSERT OR REPLACE. Better for very large sequence sets, incremental updates, and Modal volume storage.
+- **By hand:** `py -m src.protify.legacy_cache embeddings/ESM2-8_False_len2048_mean.db` writes the store next to the file. `--root`, `--model`, `--matrix` or `--vector`, `--pooling`, `--hidden_state_index`, `--max_length`, `--dtype`, and `--skip_existing` override what the file name says. The store dtype is the narrowest that holds every row, and a cast that would change a value raises.
+- **On first use:** a run that finds an old file of its own representation and no store converts it before embedding, the file of its own mode first.
+- **On download:** `--download_embeddings` converts the published file into the store instead of copying it.
 
-### SQL performance optimizations
-
-The SQL path uses several optimizations to minimize the gap with in-memory dict storage:
-
-- **Compact blob format:** Embeddings are serialized as a small binary header + raw numpy bytes instead of `torch.save`. For float16 vectors this is 3.4x smaller and ~18x faster to serialize than pickle-based `torch.save`.
-- **Batch serialization:** `batch_tensor_to_blobs()` converts an entire batch of identically-shaped embeddings in one numpy call, avoiding per-embedding overhead.
-- **Async writer thread:** SQLite INSERTs run in a background thread via `queue.Queue`, so the GPU never blocks on I/O.
-- **Aggressive pragmas:** `PRAGMA synchronous=OFF` and `PRAGMA cache_size=-64000` (64MB) during embedding. Data is reproducible, so fsync is unnecessary.
-- **Batch reads:** Training dataset classes use batch `SELECT ... WHERE sequence IN (?)` queries with persistent connections instead of per-sequence lookups.
+The file name loses the pooling order, so the first use and the download convert only when the run's pooling types are sorted. A cache pooled in another order converts by hand with `--pooling` naming the order it was written in. `--download_embeddings` finds the published files, which were uploaded under the older naming (no `max_length`) at the default `max_length`, so `_download_embeddings` requests the current name first and then falls back to `legacy_embedding_filename`, and only when this run uses that same default. Below it, the published file would carry more of each sequence than the run asked for, so the fallback is skipped and the embeddings are computed locally. Rerunning an interrupted conversion resumes it; one that ends in a mismatch leaves its `segments/convert-*` directories committed, and removing them undoes it.
 
 ---
 
@@ -133,7 +135,7 @@ py -m src.protify.main --model_names ESMC-300-SAE --data_names solubility \
 
 ### Choosing a checkpoint
 
-A bare alias resolves to the layer at 75% depth, the only layer Biohub publishes across the whole sparsity and width grid, at `k=64` and codebook width 8192. Override with `--sae_layer`, `--sae_k`, and `--sae_codebook_dim`. The resolved name carries the full identity, for example `ESMC-300-SAE-l23-k64-c8192`, and that name is what appears in embedding cache filenames, the results table, and plots. Two variants therefore never share a cache.
+A bare alias resolves to the layer at 75% depth, the only layer Biohub publishes across the whole sparsity and width grid, at `k=64` and codebook width 8192. Override with `--sae_layer`, `--sae_k`, and `--sae_codebook_dim`. The resolved name carries the full identity, for example `ESMC-300-SAE-l23-k64-c8192`, and that name is what appears in embedding store keys, the results table, and plots. Two variants therefore never share a cache.
 
 Published coverage, from `ESMC_SAE_COVERAGE` in [esmc_sae.py](../src/protify/base_models/esmc_sae.py):
 
@@ -151,7 +153,7 @@ FastPLMs owns the SAE runtime. `ESMplusplusModel.load_sae_models` attaches the B
 
 SAE models accept `max`, `mean`, and `sum` in `--embedding_pooling_types`. Several pooling types concatenate as usual, so `max mean` yields `2 * w` features. Other pooling types, and `--matrix_embed`, raise: a single residue at codebook width 131072 costs 256 KiB dense.
 
-Embeddings go to a coordinate-list blob format when the SAE they came from is sparse enough to pay for it, decided once from the checkpoint by `EsmcSaeForEmbedding.sparse_storage`. Every other model stores dense and pays nothing for the feature.
+Embeddings go to the store's `csr` layout, which keeps each row's exact nonzero coordinates, when the SAE they came from is sparse enough to pay for it (`k / codebook_dim` of at most 0.005), decided once from the checkpoint by `EsmcSaeForEmbedding.sparse_storage`. Every other model stores dense and pays nothing for the feature.
 
 The deciding quantity is the active fraction `k / codebook_dim`, not either number alone. Per residue exactly `k` of `codebook_dim` features are active whatever the sequence length. Pooling unions those sets across residues, so pooled density does grow with length, and how fast it grows tracks the active fraction. Measured max-pooled density at codebook 16384, from short proteins to past 1200 residues:
 
@@ -165,9 +167,61 @@ Only k=256 crosses the roughly 45% break-even. The threshold sits between the k=
 
 At the widths where coordinates win, they win by a lot: 200 proteins at codebook 65536 stored 3.2 MB against 26.2 MB dense, an eight-fold reduction, with every protein in coordinate form.
 
+### Choosing k when the pooled vector has to be sparse
+
+Widening the codebook at fixed `k` makes the pooled vector sparser; raising `k` at fixed width makes it denser, faster than width can compensate. Measured over 384 cached proteins per cell at ESMC-6B layer 60, max pooled:
+
+| cell | entries stored | columns non-zero for at least one protein |
+|---|---|---|
+| k=16, c=131072 | 1.07% | 16.9% |
+| k=64, c=131072 | 4.47% | 71.6% |
+| k=256, c=131072 | 24.94% | 99.9% |
+| k=512, c=131072 | 35.21% | 99.9% |
+| k=512, c=8192 | 74.28% | 100% |
+
+So "sparse autoencoder" describes the per-residue code, not the pooled vector. At `k=512` with codebook 131072 the pooled vector is a third full and essentially every column is live, which is why that cell stores about 237 KB per protein where `k=16` at the same width stores about 9.5 KB, a twenty-five fold difference. Pick low `k` with a wide codebook whenever the pooled vector's sparsity matters, which is whenever it reaches a tree learner or a wide feature matrix. Accuracy does not follow the same ordering, so sweep the cell per task rather than assuming the sparsest is best.
+
+### Filling many caches from one pass
+
+[precompute_sae_and_dense.py](../src/protify/precompute_sae_and_dense.py) fills dense caches and any number of codebook caches from a single backbone forward, since every sparse autoencoder trained at one layer reads the same residual stream:
+
+```bash
+py src/protify/precompute_sae_and_dense.py --model_names ESMC-6B-SAE --sae_layer 60 \
+  --sae_k 16 64 --sae_codebook_dim 65536 131072 \
+  --embedding_pooling_types max max,mean \
+  --data_names gold-ppi --embedding_batch_size 20
+```
+
+`--sae_k` and `--sae_codebook_dim` fill their cross product. `--embedding_pooling_types` takes one pooling set per token, with names inside a token joined by commas, and writes one float32 store per (configuration, pooling set) under exactly the keys separate runs would have used. Every set is a subset of the union the encoder reduces to once, so a second pooling set costs a column slice rather than another pass. Resumption is per cache: a protein already present in some and missing from others is embedded once and written only where it is missing.
+
+`--dense_hidden_state_indices` names the hidden states the dense `mean var` caches pool, one cache per index, each named as an ordinary run with that `--embedding_hidden_state_index` names its cache. It defaults to the SAE's layer. The SAE pass requests every hidden state, so it runs every block, and FastPLMs ends that tuple with the final normalized state, the `last_hidden_state` an ordinary run pools by default. Index -1 therefore fills the plain backbone's store (`ESMC-600`, vector, `mean` and `var`, `max_length` 2048), without a second forward:
+
+```bash
+py src/protify/precompute_sae_and_dense.py --model_names ESMC-600-SAE --sae_layer 27 \
+  --sae_k 64 --sae_codebook_dim 16384 --dense_hidden_state_indices 27 -1 \
+  --data_names DeepLoc-2
+```
+
+Each index must be a Python index into the backbone's `num_hidden_layers + 1` states, -37 to 36 for ESMC-600, and is checked before any data or weights load; a repeated index opens its cache once. Dense rows are pooled from an fp32 copy of the hidden state and stored as fp32, where an ordinary run stores `--embed_dtype`.
+
+The script also takes `--data_revisions`, the [row caps](data.md#split-row-caps) (`--max_train_rows`, `--max_valid_rows`, `--max_test_rows`, `--split_row_cap_seed`), and `--dna_to_aa` as `main.py` does. Each decides which sequences a run reads, and the sequences are the cache keys, so give the precompute the values the training runs use.
+
+### Comparing cells in one run
+
+Because the resolved name is the model's whole identity, a fully qualified name is a valid `--model_names` entry and several of them sweep the grid in one command, one results column each:
+
+```bash
+py -m src.protify.main --data_names designed-binder --probe_type xgboost \
+  --embedding_pooling_types max --pair_feature_mode minmax --tune_estimator \
+  --model_names ESMC-6B-SAE-l60-k16-c65536 ESMC-6B-SAE-l60-k16-c131072 \
+                ESMC-6B-SAE-l60-k64-c65536 ESMC-6B-SAE-l60-k64-c131072
+```
+
+Omit `--sae_layer`, `--sae_k`, and `--sae_codebook_dim` here: they would contradict the names, and `resolve_sae_model_name` raises rather than silently picking one. Which cell suits a dataset is a per-task question with no general answer, so measure it; the precompute above makes the embeddings for the whole grid cost one backbone pass.
+
 ### Normalization statistics
 
-Biohub normalizes activations as `(features / max) * idf`. FastPLMs exposes this as `normalize_sae=True` and reads the `max` and `idf` buffers from the checkpoint, defaulting both to ones for shards that never trained them. Protify embeds unnormalized, matching the Biohub reference PPI workflow. Normalization is a per-feature positive rescaling, so it cannot change which features max pooling selects, only their magnitudes; it is not currently exposed as a Protify flag because it would have to reach the embedding cache filename to keep the two variants separable.
+Biohub normalizes activations as `(features / max) * idf`. FastPLMs exposes this as `normalize_sae=True` and reads the `max` and `idf` buffers from the checkpoint, defaulting both to ones for shards that never trained them. Protify embeds unnormalized, matching the Biohub reference PPI workflow. Normalization is a per-feature positive rescaling, so it cannot change which features max pooling selects, only their magnitudes; it is not currently exposed as a Protify flag because it would have to reach the embedding descriptor, and so the store key, to keep the two variants separable.
 
 ---
 
@@ -229,10 +283,16 @@ py -m src.protify.main --model_names ESMC-300 --data_names DeepLoc-2 --save_embe
 py -m src.protify.main --model_names ESM2-150 --data_names DeepLoc-2 --download_embeddings
 ```
 
-### SQLite storage
+### Stream rows from the store
 
 ```bash
 py -m src.protify.main --model_names ESM2-8 --data_names DeepLoc-2 --sql --save_embeddings
+```
+
+### Convert an old cache
+
+```bash
+py -m src.protify.legacy_cache embeddings/ESM2-8_False_len2048_mean.db
 ```
 
 ---

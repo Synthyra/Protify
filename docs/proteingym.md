@@ -52,7 +52,7 @@ For **indels**, only PLL over sliding windows is supported; `scoring_window` is 
 
 - **load_proteingym_dms(dms_id, mode, repo_id="GleghornLab/ProteinGym_DMS")** ([data_loader.py](../src/protify/benchmarks/proteingym/data_loader.py)) downloads `by_dms_id/{dms_id}.parquet` from HuggingFace.
 - **Modes:** `"benchmark"` (substitutions, no indels), `"indels"`, `"singles"`, `"multiples"`.
-- **expand_dms_ids_all(dms_ids, mode)** ([utils.py](../src/protify/utils.py)): If any element is `"all"`, replaces with `ALL_INDEL_DMS_IDS` or `ALL_SUBSTITUTION_DMS_IDS` from [dms_ids.py](../src/protify/benchmarks/proteingym/dms_ids.py).
+- **expand_dms_ids_all(dms_ids, mode)** ([dms_ids.py](../src/protify/benchmarks/proteingym/dms_ids.py)): If any element is `"all"`, replaces with `ALL_INDEL_DMS_IDS` or `ALL_SUBSTITUTION_DMS_IDS` from [dms_ids.py](../src/protify/benchmarks/proteingym/dms_ids.py).
 
 ---
 

@@ -1,10 +1,11 @@
+import pytest
+import torch
+
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-
-import pytest
-import torch
 from datasets import Dataset
+
 
 try:
     from src.protify.base_models import carbon
@@ -487,12 +488,12 @@ def test_raw_sequence_budget_combines_models_and_survives_an_empty_selection():
 
 def test_carbon_lora_targets_do_not_leak_into_other_models():
     try:
-        from src.protify.base_models.utils import LLAMA_LORA_TARGET_MODULES, LORA_TARGET_MODULES
+        from src.protify.base_models.lora import LLAMA_LORA_TARGET_MODULES, LORA_TARGET_MODULES
     except ImportError:
         try:
-            from protify.base_models.utils import LLAMA_LORA_TARGET_MODULES, LORA_TARGET_MODULES
+            from protify.base_models.lora import LLAMA_LORA_TARGET_MODULES, LORA_TARGET_MODULES
         except ImportError:
-            from ..base_models.utils import LLAMA_LORA_TARGET_MODULES, LORA_TARGET_MODULES
+            from ..base_models.lora import LLAMA_LORA_TARGET_MODULES, LORA_TARGET_MODULES
 
     # PEFT matches by name suffix, so a global union would attach adapters inside any other
     # Llama-derived checkpoint loaded through --model_types custom.

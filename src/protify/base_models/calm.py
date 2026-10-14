@@ -20,23 +20,31 @@
 # For additional terms and clarifications, please refer to our License FAQ at:
 # <https://multimolecule.danling.org/about/license-faq>.
 
-
 from __future__ import annotations
 
 import torch
+
+from itertools import product
+from typing import Any
+from warnings import warn
 from torch import Tensor, nn
 from torch.nn import functional as F
 from transformers import PretrainedConfig
+from transformers import initialization as init
 from transformers.activations import ACT2FN
 from transformers.modeling_outputs import BaseModelOutputWithPastAndCrossAttentions, BaseModelOutputWithPoolingAndCrossAttentions
 from transformers.modeling_utils import PreTrainedModel
 from transformers.pytorch_utils import apply_chunking_to_forward
-from typing import Tuple, Union, List, Dict, Optional
-from warnings import warn
 
-from .calm_utils import RotaryEmbedding, RnaTokenizer
-from .base_tokenizer import BaseSequenceTokenizer
-from .utils import select_hidden_state
+from .base_tokenizer import BatchSequenceTokenizer
+from .calm_utils import RotaryEmbedding, DnaTokenizer
+from .fastplms_loading import ensure_fastplms_submodule_on_path
+from .hidden_state_selection import select_hidden_state
+
+
+ensure_fastplms_submodule_on_path()
+
+from fastplms.models.dplm.modeling_dplm import FAST_DPLM_ENCODER
 
 
 class CaLmConfig(PretrainedConfig):
@@ -88,6 +96,9 @@ class CaLmConfig(PretrainedConfig):
             with Better Relative Position Embeddings (Huang et al.)](https://arxiv.org/abs/2009.13658).
         is_decoder:
             Whether the model is used as a decoder or not. If `False`, the model is used as an encoder.
+        add_cross_attention:
+            Whether each layer also attends to an encoder's hidden states. Only a decoder can. Transformers 5
+            no longer gives every configuration this field, so CaLM declares it.
         use_cache:
             Whether or not the model should return the last key/values attentions (not used by all models). Only
             relevant if `config.is_decoder=True`.
@@ -128,13 +139,14 @@ class CaLmConfig(PretrainedConfig):
         layer_norm_eps: float = 1e-12,
         position_embedding_type: str = "rotary",
         is_decoder: bool = False,
+        add_cross_attention: bool = False,
         use_cache: bool = True,
         emb_layer_norm_before: bool = False,
         token_dropout: bool = False,
         head: None = None,
         lm_head: None = None,
-        **kwargs,
-    ):
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
         if vocab_size is None:
             vocab_size = 131 if codon else 26
@@ -152,6 +164,7 @@ class CaLmConfig(PretrainedConfig):
         self.layer_norm_eps = layer_norm_eps
         self.position_embedding_type = position_embedding_type
         self.is_decoder = is_decoder
+        self.add_cross_attention = add_cross_attention
         self.use_cache = use_cache
         self.emb_layer_norm_before = emb_layer_norm_before
         self.token_dropout = token_dropout
@@ -172,9 +185,15 @@ class CaLmPreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["CaLmLayer", "CaLmEmbeddings"]
 
-    # Copied from transformers.models.bert.modeling_bert.BertPreTrainedModel._init_weights
-    def _init_weights(self, module: nn.Module):
-        """Initialize the weights"""
+    # Adapted from transformers.models.bert.modeling_bert.BertPreTrainedModel._init_weights
+    def _init_weights(self, module: nn.Module) -> None:
+        """Initialize the weights, and rebuild the buffers no checkpoint holds.
+
+        `CaLmEmbeddings.position_ids` and `RotaryEmbedding.inv_freq` are registered with
+        `persistent=False`. Transformers 5 loads a checkpoint into a model built on the meta device
+        and passes each module whose tensors the checkpoint lacks here, with those tensors on
+        uninitialized memory, so both are recomputed from the formulas their constructors use.
+        """
         if isinstance(module, nn.Linear):
             # Slightly different from the TF version which uses truncated_normal for initialization
             # cf https://github.com/pytorch/pytorch/pull/5617
@@ -188,31 +207,67 @@ class CaLmPreTrainedModel(PreTrainedModel):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+        elif isinstance(module, CaLmEmbeddings):
+            positions = torch.arange(module.position_ids.shape[-1], device=module.position_ids.device)  # (l_max,)
+            init.copy_(module.position_ids, positions.expand_as(module.position_ids))  # (1, l_max)
+        elif isinstance(module, RotaryEmbedding):
+            init.copy_(module.inv_freq, module.compute_inv_freq(module.inv_freq.device))  # (d_h / 2,)
 
-    # transformers v5 no longer exposes get_head_mask on this base in our setup.
-    # Keep local compatibility for CaLM attention masking.
-    def _convert_head_mask_to_5d(self, head_mask: Tensor, num_hidden_layers: int) -> Tensor:
-        if head_mask.dim() == 1:
-            head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
-            head_mask = head_mask.expand(num_hidden_layers, -1, -1, -1, -1)
-        elif head_mask.dim() == 2:
-            head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
-        assert head_mask.dim() == 5, f"head_mask.dim != 5, got {head_mask.dim()}"
-        head_mask = head_mask.to(dtype=self.dtype)
-        return head_mask
+    # Transformers 5 removed `get_extended_attention_mask`, `invert_attention_mask`, and
+    # `get_head_mask` from `PreTrainedModel`. CaLM's forward pass still calls all three, so they
+    # are defined here with the behavior Transformers 4 gave them, except `get_head_mask`, which
+    # is FastPLMs' DPLM encoder's (below).
+    def get_extended_attention_mask(self, attention_mask: Tensor, input_shape: tuple[int, int]) -> Tensor:
+        """The additive form of a self-attention mask that holds 1 where a key may be attended.
 
-    def get_head_mask(
-        self,
-        head_mask: Tensor | None,
-        num_hidden_layers: int,
-        is_attention_chunked: bool = False,
-    ) -> Tensor | List[None]:
-        if head_mask is None:
-            return [None] * num_hidden_layers
-        head_mask = self._convert_head_mask_to_5d(head_mask, num_hidden_layers)
-        if is_attention_chunked:
-            head_mask = head_mask.unsqueeze(-1)
-        return head_mask
+        A `(b, l_k)` padding mask becomes `(b, 1, 1, l_k)`, broadcast over heads and queries. A
+        decoder also hides each position from the ones before it, giving `(b, 1, l, l_k)`, where
+        every query sees the `l_k - l` cached keys ahead of the current `l` positions. A
+        `(b, l, l_k)` mask becomes `(b, 1, l, l_k)`.
+        """
+        # attention_mask: (b, l_k) or (b, l, l_k)
+        if attention_mask.dim() == 3:
+            extended_mask = attention_mask[:, None, :, :]  # (b, 1, l, l_k)
+        elif attention_mask.dim() == 2 and self.config.is_decoder:
+            seq_length = input_shape[1]  # l
+            positions = torch.arange(seq_length, device=attention_mask.device)  # (l,)
+            causal_mask = (positions[None, :] <= positions[:, None]).to(attention_mask.dtype)  # (l, l), query by key
+            cached_length = attention_mask.shape[1] - seq_length  # l_k - l
+            causal_mask = torch.cat(
+                [causal_mask.new_ones(seq_length, cached_length), causal_mask], dim=-1
+            )  # (l, l_k)
+            extended_mask = causal_mask[None, None, :, :] * attention_mask[:, None, None, :]  # (b, 1, l, l_k)
+        elif attention_mask.dim() == 2:
+            extended_mask = attention_mask[:, None, None, :]  # (b, 1, 1, l_k)
+        else:
+            raise ValueError(
+                f"Wrong shape for input_ids (shape {input_shape}) or attention_mask (shape {attention_mask.shape})"
+            )
+        return self._additive_mask(extended_mask)  # (b, 1, 1, l_k) or (b, 1, l, l_k), additive
+
+    def invert_attention_mask(self, encoder_attention_mask: Tensor) -> Tensor:
+        """The additive form of a cross-attention mask that holds 1 where an encoder position may be attended."""
+        # encoder_attention_mask: (b, l_e) or (b, l, l_e)
+        if encoder_attention_mask.dim() == 3:
+            extended_mask = encoder_attention_mask[:, None, :, :]  # (b, 1, l, l_e)
+        elif encoder_attention_mask.dim() == 2:
+            extended_mask = encoder_attention_mask[:, None, None, :]  # (b, 1, 1, l_e)
+        else:
+            raise ValueError(
+                f"An encoder attention mask has 2 or 3 dimensions, not {encoder_attention_mask.dim()}"
+            )
+        return self._additive_mask(extended_mask)  # (b, 1, 1, l_e) or (b, 1, l, l_e), additive
+
+    def _additive_mask(self, mask: Tensor) -> Tensor:
+        """0 where `mask` is 1 and the dtype's minimum where it is 0, to be added to attention scores."""
+        # mask: (b, 1, 1, l_k) or (b, 1, l, l_k)
+        mask = mask.to(dtype=self.dtype)
+        return (1.0 - mask) * torch.finfo(self.dtype).min  # (b, 1, 1, l_k) or (b, 1, l, l_k), the shape of mask
+
+    # FastPLMs' DPLM encoder carries the same Transformers 4 head mask, a `(h,)` or `(n_layers, h)`
+    # mask as `(n_layers, 1, h, 1, 1)` in the model's dtype, so CaLM uses its two methods as they are.
+    _convert_head_mask_to_5d = FAST_DPLM_ENCODER._convert_head_mask_to_5d
+    get_head_mask = FAST_DPLM_ENCODER.get_head_mask
 
 
 class CaLmModel(CaLmPreTrainedModel):
@@ -231,7 +286,7 @@ class CaLmModel(CaLmPreTrainedModel):
         torch.Size([1, 768])
     """
 
-    def __init__(self, config: CaLmConfig, add_pooling_layer: bool = True):
+    def __init__(self, config: CaLmConfig, add_pooling_layer: bool = True) -> None:
         super().__init__(config)
         self.pad_token_id = config.pad_token_id
         self.embeddings = CaLmEmbeddings(config)
@@ -241,10 +296,10 @@ class CaLmModel(CaLmPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_input_embeddings(self):
+    def get_input_embeddings(self) -> nn.Embedding:
         return self.embeddings.word_embeddings
 
-    def set_input_embeddings(self, value):
+    def set_input_embeddings(self, value: nn.Embedding) -> None:
         self.embeddings.word_embeddings = value
 
     def forward(
@@ -256,13 +311,13 @@ class CaLmModel(CaLmPreTrainedModel):
         inputs_embeds: Tensor | None = None,
         encoder_hidden_states: Tensor | None = None,
         encoder_attention_mask: Tensor | None = None,
-        past_key_values: Tuple[Tuple[Tensor, Tensor, Tensor, Tensor], ...] | None = None,
+        past_key_values: tuple[tuple[Tensor, Tensor, Tensor, Tensor], ...] | None = None,
         use_cache: bool | None = None,
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
         return_dict: bool | None = None,
-        **kwargs,
-    ) -> Tuple[Tensor, ...] | BaseModelOutputWithPoolingAndCrossAttentions:
+        **kwargs: Any,
+    ) -> tuple[Tensor, ...] | BaseModelOutputWithPoolingAndCrossAttentions:
         r"""
         Args:
             encoder_hidden_states:
@@ -292,17 +347,19 @@ class CaLmModel(CaLmPreTrainedModel):
                 If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
                 (see `past_key_values`).
         """
+        # input_ids: (b, l), attention_mask: (b, l), position_ids: (b, l), head_mask: (h,) or (n_layers, h), inputs_embeds: (b, l, d), encoder_hidden_states: (b, l_e, d), encoder_attention_mask: (b, l_e), past_key_values: (b, h, l_p, d_h) per cached tensor, 4 per layer
         if kwargs:
             warn(
                 f"Additional keyword arguments `{', '.join(kwargs)}` are detected in "
                 f"`{self.__class__.__name__}.forward`, they will be ignored.\n"
-                "This is provided for backward compatibility and may lead to unexpected behavior."
+                "This is provided for backward compatibility and may lead to unexpected behavior.",
+                stacklevel=2,
             )
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         if self.config.is_decoder:
             use_cache = use_cache if use_cache is not None else self.config.use_cache
@@ -332,7 +389,8 @@ class CaLmModel(CaLmPreTrainedModel):
                 attention_mask = torch.ones(((batch_size, seq_length + past_key_values_length)), device=device)
                 warn(
                     "attention_mask is not specified, and cannot be inferred from input_ids."
-                    "Assuming all tokens are not masked."
+                    "Assuming all tokens are not masked.",
+                    stacklevel=2,
                 )
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
@@ -380,9 +438,9 @@ class CaLmModel(CaLmPreTrainedModel):
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
         if not return_dict:
-            return (sequence_output, pooled_output) + encoder_outputs[1:]
+            return (sequence_output, pooled_output) + encoder_outputs[1:]  # (b, l, d), (b, d), then the encoder outputs after the first
 
-        return BaseModelOutputWithPoolingAndCrossAttentions(
+        return BaseModelOutputWithPoolingAndCrossAttentions(  # last_hidden_state (b, l, d), pooler_output (b, d)
             last_hidden_state=sequence_output,
             pooler_output=pooled_output,
             past_key_values=encoder_outputs.past_key_values,
@@ -397,7 +455,7 @@ class CaLmEmbeddings(nn.Module):
     Same as BertEmbeddings with a tiny tweak for positional embeddings indexing.
     """
 
-    def __init__(self, config: CaLmConfig):
+    def __init__(self, config: CaLmConfig) -> None:
         super().__init__()
         self.word_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, padding_idx=config.pad_token_id)
 
@@ -429,7 +487,8 @@ class CaLmEmbeddings(nn.Module):
         position_ids: Tensor | None = None,
         inputs_embeds: Tensor | None = None,
         past_key_values_length: int = 0,
-    ):
+    ) -> Tensor:
+        # input_ids: (b, l), attention_mask: (b, l), position_ids: (b, l), inputs_embeds: (b, l, d)
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
 
@@ -461,11 +520,11 @@ class CaLmEmbeddings(nn.Module):
             embeddings = self.layer_norm(embeddings)
         if attention_mask is not None:
             embeddings = (embeddings * attention_mask.unsqueeze(-1)).to(embeddings.dtype)
-        return embeddings
+        return embeddings  # (b, l, d)
 
 
 class CaLmEncoder(nn.Module):
-    def __init__(self, config: CaLmConfig):
+    def __init__(self, config: CaLmConfig) -> None:
         super().__init__()
         self.config = config
         self.layer = nn.ModuleList([CaLmLayer(config) for _ in range(config.num_hidden_layers)])
@@ -479,18 +538,19 @@ class CaLmEncoder(nn.Module):
         head_mask: torch.FloatTensor | None = None,
         encoder_hidden_states: torch.FloatTensor | None = None,
         encoder_attention_mask: torch.FloatTensor | None = None,
-        past_key_values: Tuple[Tuple[torch.FloatTensor, ...], ...] | None = None,
+        past_key_values: tuple[tuple[torch.FloatTensor, ...], ...] | None = None,
         use_cache: bool | None = None,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
         return_dict: bool = True,
-    ) -> Tuple[Tensor, ...] | BaseModelOutputWithPastAndCrossAttentions:
+    ) -> tuple[Tensor, ...] | BaseModelOutputWithPastAndCrossAttentions:
+        # hidden_states: (b, l, d), attention_mask: (b, 1, l, l_k), head_mask: (n_layers, 1, h, 1, 1), encoder_hidden_states: (b, l_e, d), encoder_attention_mask: (b, 1, 1, l_e), past_key_values: (b, h, l_p, d_h) per cached tensor, 4 per layer
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
         all_cross_attentions = () if output_attentions and self.config.add_cross_attention else None
 
         if self.gradient_checkpointing and self.training and use_cache:
-            warn("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...")
+            warn("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...", stacklevel=2)
             use_cache = False
 
         next_decoder_cache = () if use_cache else None
@@ -538,7 +598,7 @@ class CaLmEncoder(nn.Module):
             all_hidden_states = all_hidden_states + (hidden_states,)  # type: ignore[operator]
 
         if not return_dict:
-            return tuple(
+            return tuple(  # (b, l, d), then the caches and attentions that are not None
                 v
                 for v in [
                     hidden_states,
@@ -549,7 +609,7 @@ class CaLmEncoder(nn.Module):
                 ]
                 if v is not None
             )
-        return BaseModelOutputWithPastAndCrossAttentions(
+        return BaseModelOutputWithPastAndCrossAttentions(  # last_hidden_state (b, l, d)
             last_hidden_state=hidden_states,
             past_key_values=next_decoder_cache,
             hidden_states=all_hidden_states,
@@ -559,7 +619,7 @@ class CaLmEncoder(nn.Module):
 
 
 class CaLmLayer(nn.Module):
-    def __init__(self, config: CaLmConfig):
+    def __init__(self, config: CaLmConfig) -> None:
         super().__init__()
         self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
@@ -581,10 +641,11 @@ class CaLmLayer(nn.Module):
         head_mask: torch.FloatTensor | None = None,
         encoder_hidden_states: torch.FloatTensor | None = None,
         encoder_attention_mask: torch.FloatTensor | None = None,
-        past_key_value: Tuple[torch.FloatTensor, torch.FloatTensor] | None = None,
+        past_key_value: tuple[torch.FloatTensor, torch.FloatTensor] | None = None,
         output_attentions: bool = False,
-    ) -> Tuple[Tensor, ...]:
+    ) -> tuple[Tensor, ...]:
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
+        # hidden_states: (b, l, d), attention_mask: (b, 1, l, l_k), head_mask: (1, h, 1, 1), encoder_hidden_states: (b, l_e, d), encoder_attention_mask: (b, 1, 1, l_e), past_key_value: (b, h, l_p, d_h) per cached tensor, up to 4
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
         self_attention_outputs = self.attention(
             hidden_states,
@@ -637,17 +698,18 @@ class CaLmLayer(nn.Module):
         if self.is_decoder:
             outputs = outputs + (present_key_value,)
 
-        return outputs
+        return outputs  # (b, l, d), then attentions (b, h, l, l_k) and, in a decoder, the cached keys and values
 
-    def feed_forward_chunk(self, attention_output):
+    def feed_forward_chunk(self, attention_output: Tensor) -> Tensor:
+        # attention_output: (b, l, d)
         attention_output_ln = self.layer_norm(attention_output)
         intermediate_output = self.intermediate(attention_output_ln)
         layer_output = self.output(intermediate_output, attention_output)
-        return layer_output
+        return layer_output  # (b, l, d)
 
 
 class CaLmAttention(nn.Module):
-    def __init__(self, config: CaLmConfig, position_embedding_type: str | None = None):
+    def __init__(self, config: CaLmConfig, position_embedding_type: str | None = None) -> None:
         super().__init__()
         self.self = CaLmSelfAttention(config, position_embedding_type=position_embedding_type)
         self.output = CaLmSelfOutput(config)
@@ -661,9 +723,10 @@ class CaLmAttention(nn.Module):
         head_mask: torch.FloatTensor | None = None,
         encoder_hidden_states: torch.FloatTensor | None = None,
         encoder_attention_mask: torch.FloatTensor | None = None,
-        past_key_value: Tuple[torch.FloatTensor, torch.FloatTensor] | None = None,
+        past_key_value: tuple[torch.FloatTensor, torch.FloatTensor] | None = None,
         output_attentions: bool = False,
-    ) -> Tuple[Tensor, ...]:
+    ) -> tuple[Tensor, ...]:
+        # hidden_states: (b, l, d), attention_mask: (b, 1, l, l_k), head_mask: (1, h, 1, 1), encoder_hidden_states: (b, l_e, d), encoder_attention_mask: (b, 1, 1, l_e), past_key_value: (b, h, l_p, d_h) per cached tensor, 2
         hidden_states_ln = self.layer_norm(hidden_states)
         self_outputs = self.self(
             hidden_states_ln,
@@ -676,11 +739,11 @@ class CaLmAttention(nn.Module):
         )
         attention_output = self.output(self_outputs[0], hidden_states)
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
-        return outputs
+        return outputs  # (b, l, d), then attentions (b, h, l, l_k) and the cache
 
 
 class CaLmSelfAttention(nn.Module):
-    def __init__(self, config: CaLmConfig, position_embedding_type: str | None = None):
+    def __init__(self, config: CaLmConfig, position_embedding_type: str | None = None) -> None:
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
@@ -708,9 +771,10 @@ class CaLmSelfAttention(nn.Module):
         self.is_decoder = config.is_decoder
 
     def transpose_for_scores(self, x: Tensor) -> Tensor:
+        # x: (b, l, d)
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(new_x_shape)
-        return x.transpose(1, 2)
+        return x.transpose(1, 2)  # (b, h, l, d_h)
 
     def forward(
         self,
@@ -719,9 +783,10 @@ class CaLmSelfAttention(nn.Module):
         head_mask: torch.FloatTensor | None = None,
         encoder_hidden_states: torch.FloatTensor | None = None,
         encoder_attention_mask: torch.FloatTensor | None = None,
-        past_key_value: Tuple[torch.FloatTensor, torch.FloatTensor] | None = None,
+        past_key_value: tuple[torch.FloatTensor, torch.FloatTensor] | None = None,
         output_attentions: bool = False,
-    ) -> Tuple[Tensor, ...]:
+    ) -> tuple[Tensor, ...]:
+        # hidden_states: (b, l, d), attention_mask: (b, 1, l, l_k), head_mask: (1, h, 1, 1), encoder_hidden_states: (b, l_e, d), encoder_attention_mask: (b, 1, 1, l_e), past_key_value: (b, h, l_p, d_h) per cached tensor, 2
         mixed_query_layer = self.query(hidden_states)
 
         # If this is instantiated as a cross-attention module, the keys
@@ -813,24 +878,25 @@ class CaLmSelfAttention(nn.Module):
 
         if self.is_decoder:
             outputs = outputs + (past_key_value,)
-        return outputs
+        return outputs  # context (b, l, d), then attention (b, h, l, l_k) and the cache
 
 
 class CaLmSelfOutput(nn.Module):
-    def __init__(self, config: CaLmConfig):
+    def __init__(self, config: CaLmConfig) -> None:
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout)
 
-    def forward(self, hidden_states, input_tensor):
+    def forward(self, hidden_states: Tensor, input_tensor: Tensor) -> Tensor:
+        # hidden_states: (b, l, d), input_tensor: (b, l, d)
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
         hidden_states = hidden_states + input_tensor
-        return hidden_states
+        return hidden_states  # (b, l, d)
 
 
 class CaLmIntermediate(nn.Module):
-    def __init__(self, config: CaLmConfig):
+    def __init__(self, config: CaLmConfig) -> None:
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
         if isinstance(config.hidden_act, str):
@@ -839,27 +905,29 @@ class CaLmIntermediate(nn.Module):
             self.activation = config.hidden_act
 
     def forward(self, hidden_states: Tensor) -> Tensor:
+        # hidden_states: (b, l, d)
         hidden_states = self.dense(hidden_states)
         hidden_states = self.activation(hidden_states)
-        return hidden_states
+        return hidden_states  # (b, l, d_i)
 
 
 class CaLmOutput(nn.Module):
-    def __init__(self, config: CaLmConfig):
+    def __init__(self, config: CaLmConfig) -> None:
         super().__init__()
         self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.dropout = nn.Dropout(config.hidden_dropout)
 
     def forward(self, hidden_states: Tensor, input_tensor: Tensor) -> Tensor:
+        # hidden_states: (b, l, d_i), input_tensor: (b, l, d)
         hidden_states = self.dense(hidden_states)
         hidden_states = self.dropout(hidden_states)
         hidden_states = hidden_states + input_tensor
-        return hidden_states
+        return hidden_states  # (b, l, d)
 
 
 # Copied from transformers.models.bert.modeling_bert.BertPooler
 class CaLmPooler(nn.Module):
-    def __init__(self, config: CaLmConfig):
+    def __init__(self, config: CaLmConfig) -> None:
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
         self.activation = nn.Tanh()
@@ -867,36 +935,48 @@ class CaLmPooler(nn.Module):
     def forward(self, hidden_states: Tensor) -> Tensor:
         # We "pool" the model by simply taking the hidden state corresponding
         # to the first token.
+        # hidden_states: (b, l, d)
         first_token_tensor = hidden_states[:, 0]
         pooled_output = self.dense(first_token_tensor)
         pooled_output = self.activation(pooled_output)
-        return pooled_output
+        return pooled_output  # (b, d)
 
 
 def create_position_ids_from_inputs_embeds(inputs_embeds: torch.FloatTensor, padding_idx: int = 0) -> torch.LongTensor:
+    # inputs_embeds: (b, l, d)
     input_shape = inputs_embeds.size()[:-1]
     sequence_length = input_shape[1]
 
     position_ids = torch.arange(
         padding_idx + 1, sequence_length + padding_idx + 1, dtype=torch.long, device=inputs_embeds.device
     )
-    return position_ids.unsqueeze(0).expand(input_shape)
+    return position_ids.unsqueeze(0).expand(input_shape)  # (b, l)
 
 
 def create_position_ids_from_input_ids(
     input_ids: torch.LongTensor, padding_idx: int = 0, past_key_values_length: int = 0
 ) -> torch.LongTensor:
     # The series of casts and type-conversions here are carefully balanced to both work with ONNX export and XLA.
+    # input_ids: (b, l)
     mask = input_ids.ne(padding_idx).int()
     incremental_indices = (
         (torch.cumsum(mask, dim=1, dtype=mask.dtype) + past_key_values_length) * mask + past_key_values_length
     ) * mask
-    return incremental_indices.long() + padding_idx
+    return incremental_indices.long() + padding_idx  # (b, l)
 
 
 presets = {
     'CaLM': 'multimolecule/calm',
 }
+
+# The commit of each preset whose weights and tokenizer reproduce the outputs its model card
+# publishes (testing_suite/test_calm_checkpoint.py). A custom model path loads as given.
+DEFAULT_REVISIONS = {
+    'CaLM': '63fb4125a6139353defa40cbdb0c2f5e76a8cc75',
+}
+
+# Every codon a coding DNA sequence can hold, which CaLM's vocabulary must name.
+DNA_CODONS = tuple(''.join(bases) for bases in product('ACGT', repeat=3))
 
 
 def _normalize_calm_preset(preset: str) -> str:
@@ -907,9 +987,23 @@ def _normalize_calm_preset(preset: str) -> str:
     raise ValueError(f"Model {preset} not supported")
 
 
-def _load_calm_backbone(model_path: str, add_pooling_layer: bool = False, dtype: torch.dtype = None) -> CaLmModel:
+def _calm_source(preset: str, model_path: str | None) -> tuple[str, str | None]:
+    """The path and revision to load: the preset at its pinned revision, or a custom path as given."""
+    normalized_preset = _normalize_calm_preset(preset)
+    if model_path is not None:
+        return model_path, None
+    return presets[normalized_preset], DEFAULT_REVISIONS[normalized_preset]
+
+
+def _load_calm_backbone(
+    model_path: str,
+    add_pooling_layer: bool = False,
+    dtype: torch.dtype | None = None,
+    revision: str | None = None,
+) -> CaLmModel:
     model, loading_info = CaLmModel.from_pretrained(
         model_path,
+        revision=revision,
         dtype=dtype,
         add_pooling_layer=add_pooling_layer,
         output_loading_info=True,
@@ -936,35 +1030,26 @@ def _load_calm_backbone(model_path: str, add_pooling_layer: bool = False, dtype:
     return model
 
 
-class CaLMTokenizerWrapper(BaseSequenceTokenizer):
-    def __init__(self, tokenizer: RnaTokenizer):
+class CaLMTokenizerWrapper(BatchSequenceTokenizer):
+    def __init__(self, tokenizer: DnaTokenizer) -> None:
         super().__init__(tokenizer)
-
-    def __call__(self, sequences: Union[str, List[str]], **kwargs) -> Dict[str, torch.Tensor]:
-        if isinstance(sequences, str):
-            sequences = [sequences]
-        kwargs.setdefault('return_tensors', 'pt')
-        kwargs.setdefault('padding', 'max_length')
-        kwargs.setdefault('truncation', True)
-        kwargs.setdefault('add_special_tokens', True)
-        tokenized = self.tokenizer(sequences, **kwargs)
-        return tokenized
 
 
 class CaLmForEmbedding(nn.Module):
-    def __init__(self, model_path: str, dtype: torch.dtype = None):
+    def __init__(self, model_path: str, dtype: torch.dtype | None = None, revision: str | None = None) -> None:
         super().__init__()
-        self.calm = _load_calm_backbone(model_path, add_pooling_layer=False, dtype=dtype)
+        self.calm = _load_calm_backbone(model_path, add_pooling_layer=False, dtype=dtype, revision=revision)
 
     def forward(
             self,
             input_ids: torch.Tensor,
-            attention_mask: Optional[torch.Tensor] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = False,
+            attention_mask: torch.Tensor | None = None,
+            output_attentions: bool | None = None,
+            output_hidden_states: bool | None = False,
             hidden_state_index: int = -1,
-            **kwargs,
+            **kwargs: Any,
     ) -> torch.Tensor:
+        # input_ids: (b, l), attention_mask: (b, l)
         output_hidden_states = output_hidden_states or hidden_state_index != -1
         out = self.calm(
             input_ids=input_ids,
@@ -978,34 +1063,58 @@ class CaLmForEmbedding(nn.Module):
             hidden_state_index,
         )
         if output_attentions:
-            return hidden_state, out.attentions
-        return hidden_state
+            return hidden_state, out.attentions  # (b, l, d), tuple of (b, h, l, l)
+        return hidden_state  # (b, l, d)
 
 
-def get_calm_tokenizer(preset: str, model_path: str = None):
-    normalized_preset = _normalize_calm_preset(preset)
-    return CaLMTokenizerWrapper(RnaTokenizer.from_pretrained(model_path or presets[normalized_preset]))
+def get_calm_tokenizer(preset: str, model_path: str | None = None) -> CaLMTokenizerWrapper:
+    """CaLM's codon tokenizer, which reads coding DNA, and U as T.
+
+    A vocabulary that lacks a DNA codon, such as one spelled in RNA, is refused: every codon it
+    lacks would read as `<unk>`.
+    """
+    path, revision = _calm_source(preset, model_path)
+    tokenizer = DnaTokenizer.from_pretrained(path, revision=revision)
+    vocabulary = tokenizer.get_vocab()
+    missing_codons = [codon for codon in DNA_CODONS if codon not in vocabulary]
+    if missing_codons:
+        raise ValueError(
+            f"The CaLM vocabulary at {path} lacks {len(missing_codons)} of the 64 DNA codons, "
+            f"such as {missing_codons[:3]}, so they would read as {tokenizer.unk_token}"
+        )
+    return CaLMTokenizerWrapper(tokenizer)
 
 
-def build_calm_model(preset: str, masked_lm: bool = False, dtype: torch.dtype = None, model_path: str = None, **kwargs):
-    normalized_preset = _normalize_calm_preset(preset)
-    path = model_path or presets[normalized_preset]
+def build_calm_model(
+    preset: str,
+    masked_lm: bool = False,
+    dtype: torch.dtype | None = None,
+    model_path: str | None = None,
+    **kwargs: Any,
+) -> tuple[nn.Module, CaLMTokenizerWrapper]:
+    path, revision = _calm_source(preset, model_path)
     if masked_lm:
         raise ValueError(f"Model {preset} does not support masked language modeling")
     else:
-        model = CaLmForEmbedding(path, dtype=dtype).eval()
-    tokenizer = get_calm_tokenizer(normalized_preset, model_path=model_path)
+        model = CaLmForEmbedding(path, dtype=dtype, revision=revision).eval()
+    tokenizer = get_calm_tokenizer(preset, model_path=model_path)
     return model, tokenizer
 
 
-def get_calm_for_training(preset: str, tokenwise: bool = False, num_labels: int = None, hybrid: bool = False, dtype: torch.dtype = None, model_path: str = None):
-    normalized_preset = _normalize_calm_preset(preset)
-    model_path = model_path or presets[normalized_preset]
+def get_calm_for_training(
+    preset: str,
+    tokenwise: bool = False,
+    num_labels: int | None = None,
+    hybrid: bool = False,
+    dtype: torch.dtype | None = None,
+    model_path: str | None = None,
+) -> tuple[CaLmModel, CaLMTokenizerWrapper]:
+    path, revision = _calm_source(preset, model_path)
     if hybrid:
-        model = _load_calm_backbone(model_path, add_pooling_layer=False, dtype=dtype).eval()
+        model = _load_calm_backbone(path, add_pooling_layer=False, dtype=dtype, revision=revision).eval()
     else:
         raise ValueError(f"Model {preset} does not support training")
-    tokenizer = get_calm_tokenizer(normalized_preset)
+    tokenizer = get_calm_tokenizer(preset)
     return model, tokenizer
 
 

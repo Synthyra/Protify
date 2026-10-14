@@ -9,13 +9,17 @@ import numpy as np
 import pytest
 import torch
 
+
 try:
     from src.protify.data.data_mixin import DataMixin
+    from src.protify.testing_suite.embedding_store_builder import build_store_for
 except ImportError:
     try:
         from protify.data.data_mixin import DataMixin
+        from protify.testing_suite.embedding_store_builder import build_store_for
     except ImportError:
         from ..data.data_mixin import DataMixin
+        from .embedding_store_builder import build_store_for
 
 
 POOLING_TYPES = ['max']
@@ -35,11 +39,11 @@ def _residue_matrix(seq: str, offset: float) -> torch.Tensor:
 
 @pytest.fixture
 def matrix_mixin(tmp_path):
-    """A DataMixin whose only embedding source is a two-protein matrix .pth cache."""
+    """A DataMixin whose only embedding source is a two-protein matrix feature store."""
     from protify.embedder import EmbeddingArguments
 
     embeddings = {SEQ_A: _residue_matrix(SEQ_A, 0.0), SEQ_B: _residue_matrix(SEQ_B, 100.0)}
-    # The real config object names the file, so the fixture cannot drift from the cache
+    # The real config object names the store, so the fixture cannot drift from the cache
     # identity the reader builds.
     embedding_args = EmbeddingArguments(
         embedding_save_dir=str(tmp_path),
@@ -47,7 +51,7 @@ def matrix_mixin(tmp_path):
         embedding_hidden_state_index=HIDDEN_STATE_INDEX,
         matrix_embed=True,
     )
-    torch.save(embeddings, tmp_path / embedding_args.cache_filename('test-model'))
+    build_store_for(embedding_args, 'test-model', embeddings)
 
     mixin = DataMixin()
     mixin._sql = False
