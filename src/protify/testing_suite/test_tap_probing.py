@@ -1117,6 +1117,20 @@ def test_figures_from_result_tables(tmp_path: Path) -> None:
     assert figures.sweep_curves({"protein": ranked}, out / "sweeps.png").exists()
 
 
+def test_best_states_fall_back_to_test_per_task() -> None:
+    # One task scored on validation, one from before `validate`: each picks its own best, never the first row.
+    frame = pd.DataFrame({
+        "task": ["a", "a", "a", "b", "b", "b"],
+        "probe_name": ["embedding:0", "resid_post:0", "resid_post:1"] * 2,
+        "full": [0.9, 0.5, 0.6, 0.1, 0.7, 0.4],
+        "validation_score": [0.2, 0.8, 0.3, np.nan, np.nan, np.nan],
+    })
+    chosen = figures._choose(frame, ["task"]).set_index("task")["probe_name"]
+    assert chosen.to_dict() == {"a": "resid_post:0", "b": "resid_post:0"}
+    assert figures._choose(frame[frame["task"] == "b"])["probe_name"] == "resid_post:0"
+    assert figures._choose(frame[frame["task"] == "a"])["probe_name"] == "resid_post:0"
+
+
 def write_trend_run(root: Path, seed: int, sites: tuple[str, ...], blocks: int, manifest: bool = True) -> None:
     """One synthetic replicate of a model with `blocks` blocks: the scores and validation scores of four concept tasks
     and the pair task, the pair task's ranking table, and, with `manifest`, a store manifest giving the blocks."""

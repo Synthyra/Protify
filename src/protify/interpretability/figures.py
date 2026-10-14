@@ -234,11 +234,16 @@ def full_scores(scores: pd.DataFrame, validation: pd.DataFrame | None = None) ->
 
 def _choose(frame: pd.DataFrame, keys: list[str] | None = None) -> pd.DataFrame | pd.Series:
     """The probe chosen on validation, of the whole frame (a row) or of each group of `keys` (a frame): the highest
-    validation score, or, in a table without validation scores, the highest full-test score."""
-    if "validation_score" in frame and frame["validation_score"].notna().any():
-        key = frame["validation_score"].fillna(-np.inf)
+    validation score, or, in a group without validation scores (a task scored before `validate`), the highest
+    full-test score."""
+    test = frame["full" if "full" in frame else "score"]
+    if "validation_score" not in frame:
+        key = test
     else:
-        key = frame["full" if "full" in frame else "score"]
+        validation = frame["validation_score"]
+        groups = [frame[column] for column in keys] if keys is not None else np.zeros(len(frame))
+        validated = validation.notna().groupby(groups).transform("any")
+        key = validation.where(validated, test).fillna(-np.inf)
     if keys is None:
         return frame.loc[key.idxmax()]
     return frame.loc[key.groupby([frame[column] for column in keys]).idxmax()]
