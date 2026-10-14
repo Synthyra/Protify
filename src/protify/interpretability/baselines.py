@@ -17,8 +17,10 @@ import torch
 
 from torch import Tensor, nn
 
-from ..base_models.control_bases import CONTROL_MODELS, control_view, control_width
+from ..base_models.control_bases import CONTROL_MODELS, ENGINE_KIND, control_width
+from foundry.embedding import SyntheticControlView, sequence_inventory
 from foundry.embedding.controls import TOKEN_STREAM
+from foundry.embedding.readers import ReadBudget
 
 
 BASELINE_SITES = ("embedding",)
@@ -49,8 +51,12 @@ class BaselineEmbedding(nn.Embedding):
     def forward(self, input_ids: Tensor) -> Tensor:
         # input_ids: (b, l) -> (b, l, w): the CLS row, the residue rows, the EOS row, then zeros at padding
         sequences = self.sequences(input_ids)
-        longest = max((len(sequence) for sequence in sequences), default=0)
-        rows = control_view(self.model_name, sequences, longest + 2).rows(TOKEN_STREAM, sequences)  # each (l_i + 2, w)
+        sizes = [len(sequence) + 2 for sequence in sequences]
+        # One read for the whole batch, which its caller has bounded in tokens already; the engine's default budget
+        # (64 sequences, 32,768 rows) is smaller than a batch.
+        budget = ReadBudget(max_rows=len(sequences), max_padded_residues=sum(sizes), max_bytes=sum(sizes) * self.embedding_dim * 4)
+        view = SyntheticControlView(ENGINE_KIND[self.model_name], sequence_inventory(list(dict.fromkeys(sequences))), max_residues=max(sizes) - 2, budget=budget)
+        rows = view.rows(TOKEN_STREAM, sequences)  # each (l_i + 2, w)
         out = torch.zeros(input_ids.shape + (self.embedding_dim,), dtype=torch.float32)  # (b, l, w)
         for index, block in enumerate(rows):
             out[index, : block.shape[0]] = block

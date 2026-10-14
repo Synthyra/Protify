@@ -783,7 +783,7 @@ def test_controls_without_the_untrained_model(tiny_model: ESMplusplusModel, toke
 
 @pytest.mark.parametrize("model_name", [ONE_HOT, RANDOM])
 def test_baselines_are_protifys_control_rows(model_name: str, tokenizer: object, tmp_path: Path) -> None:
-    sequences, _ = synthetic_proteins(12, seed=4)
+    sequences, _ = synthetic_proteins(70, seed=4)  # more sequences in one batch than the engine reads by default
     longest = max(len(sequence) for sequence in sequences) + 2
     baseline = BaselineModel(model_name, tokenizer).eval()
     dims = model_dims(baseline)
@@ -796,7 +796,7 @@ def test_baselines_are_protifys_control_rows(model_name: str, tokenizer: object,
         torch.testing.assert_close(X[index, : len(sequence) + 2], control_matrix(model_name, sequence, longest), rtol=0, atol=0)
         assert not X[index, len(sequence) + 2:].any()
     # pooled rows: the control's pooled mean and variance, to bfloat16 precision
-    embed_pooled(baseline, tokenizer, sequences, spec, {False: tmp_path / "store"}, model_name, "trained", max_tokens=200, device=CPU, progress=False)
+    embed_pooled(baseline, tokenizer, sequences, spec, {False: tmp_path / "store"}, model_name, "trained", max_tokens=4000, device=CPU, progress=False)
     store = PooledTapStore(tmp_path / "store")
     pooled = store.load("embedding", store.rows_for(sequences))[:, 0].float()  # (n, 2 w)
     torch.testing.assert_close(pooled, control_rows(model_name, sequences, ("mean", "var"), longest), rtol=1e-2, atol=1e-3)
