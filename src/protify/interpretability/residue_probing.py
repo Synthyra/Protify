@@ -521,8 +521,8 @@ def score_residue_task(
     scrambled_labels = [shuffled_labels(label, scramble_seed(sequence, settings.seed)) for label, sequence in zip(split.labels, split.sequences, strict=True)]
     variants = [("trained", False)]
     if settings.controls:
-        variants += [("trained", True), ("untrained", False), ("untrained", True)]
-    untrained = untrained_copy(model, settings.seed) if settings.controls else None
+        variants += [(plm, is_scrambled) for plm in settings.plm_states for is_scrambled in (False, True)][1:]
+    untrained = untrained_copy(model, settings.seed) if settings.controls and settings.untrained_controls else None
     # The mean control averages groups of MEAN_CONTROL_BATCH consecutive test proteins, so with controls a batch holds
     # whole groups up to the token budget; without them, batches simply fill the budget.
     batches = group_batches(split.sequences, MEAN_CONTROL_BATCH, settings.max_tokens) if settings.controls else token_batches(split.sequences, settings.max_tokens)

@@ -14,10 +14,13 @@ from pathlib import Path
 from safetensors.torch import load_file
 
 try:
+    from src.protify.base_models.control_bases import ONE_HOT, RANDOM, control_matrix, control_rows
     from src.protify.base_models.esmc import get_esmc_tokenizer
+    from src.protify.interpretability.baselines import BASELINE_SITES, BaselineModel
     from src.protify.interpretability.capture import capture_states, model_dims
     from src.protify.interpretability import figures
-    from src.protify.interpretability.cli import STORE_VARIANTS, main, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
+    from src.protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, main, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
+    from src.protify.interpretability.pairs import MeanRows, PairRows, load_pairs, mean_targets, ranking_metrics
     from src.protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from src.protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -32,10 +35,13 @@ try:
     from src.protify.interpretability.token_store import TokenTapStore, embed_tokens
     from src.protify.interpretability.training import CONTROLS, PLM_STATES, PROBE_STATES, TaskResults, TrainingSettings, make_bank
 except ImportError:
+    from protify.base_models.control_bases import ONE_HOT, RANDOM, control_matrix, control_rows
     from protify.base_models.esmc import get_esmc_tokenizer
+    from protify.interpretability.baselines import BASELINE_SITES, BaselineModel
     from protify.interpretability.capture import capture_states, model_dims
     from protify.interpretability import figures
-    from protify.interpretability.cli import STORE_VARIANTS, main, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
+    from protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, main, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
+    from protify.interpretability.pairs import MeanRows, PairRows, load_pairs, mean_targets, ranking_metrics
     from protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -729,6 +735,157 @@ def test_normalized_inputs_and_mean_pooling(tiny_model: ESMplusplusModel, tokeni
     assert weights["q.head.best.weight"].shape == (12, 16, 3)
     with pytest.raises(ValueError):
         TrainingSettings(pooling="max")
+
+
+def test_layer_chunks_train_the_probes_whole_sites_train(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path / "data")
+    names = ["localization", "go_cc"]
+    datasets = {name: load_concept(name, local_dir=tmp_path / "data") for name in names}
+    spec = TapSpec(sites=("embedding", "q", "mlp_act"))
+    root = tmp_path / "run"
+    write_stores(tiny_model, tokenizer, "tiny", datasets, root, spec, controls=True, seed=0, max_tokens=256, device=CPU)
+    settings = TrainingSettings(learning_rates=(3e-2, 3e-3), weight_decays=(0.0,), batch_size=16, max_epochs=20, patience=4, resamples=3)
+    train_tasks(names, root, "whole", spec, settings, CPU, read_task=datasets.__getitem__, read_model=lambda: pytest.fail("loaded a model"))
+    # a budget below one layer trains every layer as its own chunk
+    train_tasks(names, root, "chunked", spec, replace(settings, site_budget_gb=1e-9), CPU, read_task=datasets.__getitem__, read_model=lambda: pytest.fail("loaded a model"))
+    order = ["family", "probe_name", "plm", "probe", "control", "resample"]
+    for name in names:
+        whole, chunked = (pd.read_parquet(root / "results" / label / name / "scores.parquet").sort_values(order).reset_index(drop=True) for label in ("whole", "chunked"))
+        kept = whole["control"] != "random_gaussian"  # drawn afresh per chunk
+        pd.testing.assert_frame_equal(whole[kept].reset_index(drop=True), chunked[kept].reset_index(drop=True), atol=1e-6, rtol=0)
+        first, second = (load_file(str(root / "results" / label / name / "probes.safetensors")) for label in ("whole", "chunked"))
+        assert first.keys() == second.keys()
+        for key in first:  # the same probes, up to the order a batched product sums in
+            torch.testing.assert_close(first[key], second[key], rtol=1e-2, atol=1e-4)
+        validated = pd.read_parquet(root / "results" / "chunked" / name / "validation.parquet")
+        validate_tasks(root, "chunked", [name], CPU, read_task=datasets.__getitem__, read_model=lambda random_init, seed: pytest.fail("loaded a model"), overwrite=True)
+        pd.testing.assert_frame_equal(pd.read_parquet(root / "results" / "chunked" / name / "validation.parquet").sort_values(["family", "probe_name"]).reset_index(drop=True),
+                                      validated.sort_values(["family", "probe_name"]).reset_index(drop=True), atol=1e-4, rtol=1e-3)
+
+
+def test_controls_without_the_untrained_model(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path / "data")
+    names = ["localization", "ssp_q3"]
+    datasets = {name: load_concept(name, local_dir=tmp_path / "data") for name in names}
+    root = tmp_path / "run"
+    passes = store_passes({"localization": datasets["localization"]}, root, controls=True, seed=0, untrained=False)
+    assert {plm for plm, _, _, _ in passes} == {"trained"}
+    spec = TapSpec(sites=("embedding", "resid_post"), per_head=False)
+    write_stores(tiny_model, tokenizer, "tiny", {"localization": datasets["localization"]}, root, spec, controls=True, seed=0, max_tokens=256, device=CPU, untrained=False)
+    assert not (store_path(root, "untrained", "original") / "manifest.json").exists()
+    settings = TrainingSettings(learning_rates=(3e-2,), weight_decays=(0.0,), batch_size=16, max_tokens=300, max_epochs=8, patience=3, resamples=3,
+                                untrained_controls=False)
+    train_tasks(names, root, "linear", spec, settings, CPU, read_task=datasets.__getitem__, read_model=lambda: (tiny_model, tokenizer))
+    for name in names:
+        scores = pd.read_parquet(root / "results" / "linear" / name / "scores.parquet")
+        assert conditions_of(scores) == {("trained", probe, control) for probe in PROBE_STATES for control in CONTROLS}
+
+
+@pytest.mark.parametrize("model_name", [ONE_HOT, RANDOM])
+def test_baselines_are_protifys_control_rows(model_name: str, tokenizer: object, tmp_path: Path) -> None:
+    sequences, _ = synthetic_proteins(12, seed=4)
+    longest = max(len(sequence) for sequence in sequences) + 2
+    baseline = BaselineModel(model_name, tokenizer).eval()
+    dims = model_dims(baseline)
+    assert dims.blocks == 0 and dims.d == (28 if model_name == ONE_HOT else 960)
+    spec = TapSpec(sites=BASELINE_SITES, per_head=False)
+    # token rows: the control's own, CLS first and EOS last, then zeros at padding
+    encoded = tokenizer(sequences, padding=True, return_tensors="pt")
+    X = capture_states(baseline, encoded["input_ids"], encoded["attention_mask"], spec)[("embedding", 0)]  # (b, l, w)
+    for index, sequence in enumerate(sequences):
+        torch.testing.assert_close(X[index, : len(sequence) + 2], control_matrix(model_name, sequence, longest), rtol=0, atol=0)
+        assert not X[index, len(sequence) + 2:].any()
+    # pooled rows: the control's pooled mean and variance, to bfloat16 precision
+    embed_pooled(baseline, tokenizer, sequences, spec, {False: tmp_path / "store"}, model_name, "trained", max_tokens=200, device=CPU, progress=False)
+    store = PooledTapStore(tmp_path / "store")
+    pooled = store.load("embedding", store.rows_for(sequences))[:, 0].float()  # (n, 2 w)
+    torch.testing.assert_close(pooled, control_rows(model_name, sequences, ("mean", "var"), longest), rtol=1e-2, atol=1e-3)
+
+
+def test_one_hot_baseline_reads_residue_identity(tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path / "data")
+    data = load_concept("ssp_q3", local_dir=tmp_path / "data")
+    baseline = BaselineModel(ONE_HOT, tokenizer).eval()
+    spec = TapSpec(sites=BASELINE_SITES, per_head=False)
+    settings = TrainingSettings(learning_rates=(3e-2,), weight_decays=(0.0,), max_tokens=300, max_epochs=12, patience=4, resamples=3, controls=False)
+    train_tasks(["ssp_q3"], tmp_path / "run", "linear", spec, settings, CPU, read_task=lambda name: data, read_model=lambda: (baseline, tokenizer))
+    scores = pd.read_parquet(tmp_path / "run" / "results" / "linear" / "ssp_q3" / "scores.parquet")
+    assert set(scores["probe_name"]) == {"embedding:0"}
+    assert headline_scores(scores)["embedding:0"] > 0.95  # each class is a set of residues
+
+
+def test_pair_rows_are_symmetric_and_ranked_as_sklearn_ranks() -> None:
+    from sklearn.metrics import average_precision_score, roc_auc_score
+
+    generator = torch.Generator().manual_seed(3)
+    proteins = torch.randn(10, 3, 4, generator=generator)  # (u, P, w)
+    first, second = torch.randint(0, 10, (25,), generator=generator), torch.randint(0, 10, (25,), generator=generator)
+    forward, backward = PairRows(proteins, first, second), PairRows(proteins, second, first)
+    assert forward.shape == (25, 3, 8)
+    torch.testing.assert_close(forward[0:25], backward[0:25])
+    torch.testing.assert_close(forward[torch.tensor([4, 2])], torch.cat([forward[4:5], forward[2:3]]))
+    torch.testing.assert_close(forward[3:4][0], torch.cat([proteins[first[3]] + proteins[second[3]], proteins[first[3]] * proteins[second[3]]], dim=-1))
+    # the mean control averages each group of 8 consecutive pairs, whatever slice is read
+    means = MeanRows(forward)
+    torch.testing.assert_close(means[5:19], torch.cat([forward[0:8].mean(0, keepdim=True).expand(3, 3, 8), forward[8:16].mean(0, keepdim=True).expand(8, 3, 8),
+                                                     forward[16:24].mean(0, keepdim=True).expand(3, 3, 8)]))
+    labels = torch.tensor([1.0] * 6 + [0.0] * 2 + [0.0] * 8 + [1.0, 1.0, 0.0]).unsqueeze(1)
+    assert mean_targets(labels)[:, 0].tolist() == [1.0] * 8 + [0.0] * 8 + [1.0] * 3
+    scores = torch.randn(200, 5, generator=generator, dtype=torch.float64)
+    truth = (torch.rand(200, generator=generator) < 0.4).long()
+    roc_auc, average_precision = ranking_metrics(scores, truth)
+    for column in range(5):
+        assert roc_auc[column].item() == pytest.approx(roc_auc_score(truth.numpy(), scores[:, column].numpy()), abs=1e-12)
+        assert average_precision[column].item() == pytest.approx(average_precision_score(truth.numpy(), scores[:, column].numpy()), abs=1e-12)
+
+
+def synthetic_pairs(root: Path) -> None:
+    """Pairs of the synthetic proteins, interacting when both partners favor the same residue, with no protein in two
+    splits and half the pairs of each split interacting."""
+    sequences, classes = synthetic_proteins(150, seed=9)
+    rng = np.random.default_rng(1)
+    root.mkdir(parents=True, exist_ok=True)
+    for split, (low, high, count) in {"train": (0, 90, 1000), "validation": (90, 120, 120), "test": (120, 150, 120)}.items():
+        rows = []
+        while len(rows) < count:
+            a, b = rng.integers(low, high, size=2)
+            same = classes[a] == classes[b]
+            if a != b and same == (len(rows) % 2 == 0):
+                rows.append((sequences[a], sequences[b], int(same)))
+        pd.DataFrame(rows, columns=["SeqA", "SeqB", "labels"]).to_parquet(root / f"{split}.parquet", index=False)
+
+
+def test_pair_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_pairs(tmp_path / "pairs")
+    data = load_pairs(local_dir=tmp_path / "pairs")
+    assert data.task.level == "pair" and data.task.kind == "binary"
+    assert not set(data.splits["train"].sequences) & set(data.splits["test"].sequences)
+    spec = TapSpec(sites=("embedding", "q", "resid_post"))
+    root = tmp_path / "run"
+    write_stores(tiny_model, tokenizer, "tiny", {"ppi": data}, root, spec, controls=True, seed=0, max_tokens=256, device=CPU, prefix=PAIR_PREFIX)
+    for key in STORE_VARIANTS:
+        assert (store_path(root, *key, PAIR_PREFIX) / "manifest.json").exists()
+    assert not (root / "stores" / "trained_original").exists()  # the pair task keeps to its own stores
+    settings = TrainingSettings(learning_rates=(3e-2, 3e-3), weight_decays=(0.0,), batch_size=32, max_epochs=30, patience=5, resamples=3)
+    train_tasks(["ppi"], root, "linear", spec, settings, CPU, read_task=lambda name: data, read_model=lambda: pytest.fail("loaded a model"))
+    folder = root / "results" / "linear" / "ppi"
+    scores = pd.read_parquet(folder / "scores.parquet")
+    full = scores[scores["family"] == "full"]
+    assert conditions_of(full) == {(plm, probe, control) for plm in PLM_STATES for probe in PROBE_STATES for control in CONTROLS}
+    assert set(scores[scores["family"] == "head"]["probe_name"]) == {f"q:{layer}:h{head}" for layer in range(3) for head in range(4)}
+    assert headline_scores(full)["embedding:0"] > 0.5  # the product of the partners' rows reads a shared favored residue
+    ranking = pd.read_parquet(folder / "ranking.parquet")
+    assert len(ranking) == len(scores[(scores["resample"] == 0) & (scores["plm"] == "trained") & (scores["probe"] == "trained") & (scores["control"] == "original")])
+    assert ranking.set_index("probe_name").loc["embedding:0", "roc_auc"] > 0.8 and ranking["average_precision"].between(0, 1).all()
+    weights = load_file(str(folder / "probes.safetensors"))
+    assert weights["embedding.full.best.weight"].shape == (1, 256, 1)  # [a + b | a * b] of 128 pooled columns
+    assert weights["q.head.best.weight"].shape == (12, 64, 1)
+    record = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+    assert record["rows"] == {"train": 1000, "validation": 120, "test": 120} and record["task"]["level"] == "pair"
+    assert record["proteins"]["test"] == len(data.splits["test"].sequences)
+    validation = pd.read_parquet(folder / "validation.parquet")
+    validate_tasks(root, "linear", ["ppi"], CPU, read_task=lambda name: data, read_model=lambda random_init, seed: pytest.fail("loaded a model"), overwrite=True)
+    pd.testing.assert_frame_equal(pd.read_parquet(folder / "validation.parquet"), validation, atol=1e-4, rtol=1e-3)
 
 
 # -- interventions and latent views --------------------------------------------------------------------------------

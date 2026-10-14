@@ -40,10 +40,17 @@ class TrainingSettings:
     probe: ProbeSettings = field(default_factory=ProbeSettings)
     normalize: bool = False  # every token state L2-normalized along its width before pooling or probing
     pooling: str = "mean_var"  # what a protein probe reads of a pooled state: "mean_var", or "mean" alone
+    untrained_controls: bool = True  # with controls, also score the untrained model's states
+    site_budget_gb: float = 8.0  # pooled rows of one site held on the device at once; larger sites train in layer chunks
 
     def __post_init__(self) -> None:
         if self.pooling not in POOLINGS:
             raise ValueError(f"Unknown pooling {self.pooling!r}; choose one of {POOLINGS}.")
+
+    @property
+    def plm_states(self) -> tuple[str, ...]:
+        """The models whose states the controls score: the trained one, and the untrained one unless left out."""
+        return PLM_STATES if self.untrained_controls else PLM_STATES[:1]
 
     def grid(self) -> list[tuple[float, float]]:
         """Every (learning rate, weight decay) pair; each probe keeps the pair that validates best."""
@@ -66,12 +73,20 @@ def make_bank(
     settings: TrainingSettings,
     seed: int,
     device: torch.device | str,
+    first: int = 0,
+    total: int | None = None,
 ) -> ProbeBank:
-    """A bank holding every probe once per grid setting, with the same initial weights in every setting."""
+    """A bank holding every probe once per grid setting, with the same initial weights in every setting.
+
+    `names` may be a chunk of a larger family: probes `first`.. of `total`, which keep the initial weights the whole
+    family would give them."""
     rates, decays = grid_vectors(settings, len(names))
     count = len(settings.grid())
     labelled = [f"{name}|lr={rate:g}|wd={decay:g}" for rate, decay in settings.grid() for name in names]
-    bank = ProbeBank(labelled, width, outputs, loss, settings.probe, rates, decays, seed, device)
+    # A whole family's bank draws count * total groups and gives probe p row p; a chunk draws the same and starts at
+    # row `first`, so its first len(names) rows, which every setting repeats below, are the whole family's.
+    bank = ProbeBank(labelled, width, outputs, loss, settings.probe, rates, decays, seed, device,
+                     first=first, total=None if total is None else count * total)
     # One initialization per probe shared across settings, so settings differ only in how they train.
     for name, value in bank.params.items():
         shared = value[: len(names)].repeat((count,) + (1,) * (value.dim() - 1))
@@ -115,6 +130,7 @@ class TaskResults:
     training: list[pd.DataFrame] = field(default_factory=list)
     sweep: list[pd.DataFrame] = field(default_factory=list)
     validation: list[pd.DataFrame] = field(default_factory=list)
+    ranking: list[pd.DataFrame] = field(default_factory=list)  # ROC AUC and average precision, binary pair tasks
 
     def add_scores(
         self,
@@ -207,6 +223,17 @@ class TaskResults:
             "validation_loss": losses.detach().cpu().numpy(),
         }))
 
+    def add_ranking(self, task: str, family: str, names: list[str], split: str, roc_auc: Tensor, average_precision: Tensor) -> None:
+        """One row per probe: ROC AUC and average precision of its kept weights on one split."""
+        self.ranking.append(pd.DataFrame({
+            "task": task,
+            "family": family,
+            "probe_name": [name.split("|")[0] for name in names],
+            "split": split,
+            "roc_auc": roc_auc.detach().cpu().numpy(),
+            "average_precision": average_precision.detach().cpu().numpy(),
+        }))
+
     def frames(self) -> dict[str, pd.DataFrame]:
         tables = {
             name: pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
@@ -214,6 +241,8 @@ class TaskResults:
         }
         if self.validation:
             tables["validation"] = pd.concat(self.validation, ignore_index=True)
+        if self.ranking:
+            tables["ranking"] = pd.concat(self.ranking, ignore_index=True)
         return tables
 
     def sweep_frame(self) -> pd.DataFrame:

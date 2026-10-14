@@ -6,9 +6,12 @@ stream, the attention input, the queries, keys and values before and after the r
 and output, and the inputs, gates and activations of the MLP. The implementation is in
 [`interpretability/`](../src/protify/interpretability/) and runs as `python -m protify.interpretability`.
 
-The default model is ESMC-300 (30 blocks, width 960, 15 heads of 64, SwiGLU width 2560). The concept tasks come from
-the `Synthyra/protein_concept_probing` dataset (22 configurations: ProtParam values, InterPro entries, GO terms,
-localization, and per-residue secondary structure, topology, peptides, sites and modifications).
+The default model is ESMC-300 (30 blocks, width 960, 15 heads of 64, SwiGLU width 2560). `--model ESMC-600` (36
+blocks, width 1152, 18 heads, SwiGLU width 3072) and `--model ESMC-6B` (80 blocks, width 2560, 40 heads, SwiGLU width
+6912) run the same way, since the hooks read every width from the model, and so do Protify's two baseline encodings
+(below). The concept tasks come from the `Synthyra/protein_concept_probing` dataset (22 configurations: ProtParam
+values, InterPro entries, GO terms, localization, and per-residue secondary structure, topology, peptides, sites and
+modifications); a protein-protein interaction task (below) is probed apart from them.
 
 ## Sites
 
@@ -71,6 +74,12 @@ hand-written gradients, per-group AdamW, standardized inputs and early stopping 
 weights kept. Linear probes that read the same input share one bf16 matrix multiplication: the standardization is
 folded into the weights and every grid setting becomes more output columns, so a sweep of K settings costs about one
 pass over the data.
+
+**Large models.** A protein or pair probe holds a site's pooled rows on the device; when they would pass
+`--site-budget-gb` (8 by default), the site trains in chunks of layers. Each chunk keeps the initial weights its probes
+have in the whole site, and probes of different layers train independently, so chunks change memory and nothing else.
+`--no-untrained` on `embed` and `train` leaves the untrained model out of the controls, which spares a large model's
+untrained stores and forward passes.
 
 `tokens` writes token-wise states of chosen sites for a list of sequences, for analyses that need them.
 
@@ -146,6 +155,38 @@ python -m protify.interpretability embed --root RANDOM --random-init
 python -m protify.interpretability train --root RANDOM --random-init --no-controls --tasks protein --batch-size 256 --lr 3e-2 --wd 0
 ```
 
+## Baseline encodings
+
+`--model OneHot-Protein` and `--model Random` probe Protify's two baseline encodings with the same stores, probes and
+scores. A baseline's one state is its token rows (`embedding`): a one-hot row over 26 residue symbols, CLS and EOS (28
+columns), whose pooled mean is the composition and the length; or a standard normal row of width 960 drawn from the
+sequence's SHA-256, whose pooled statistics carry the length alone. The rows come from the embedding engine behind
+Protify's control bases, so they are those bases' rows. A baseline has no weights, so it runs without `--random-init`
+and without the untrained-model controls:
+
+```bash
+python -m protify.interpretability embed --root ONEHOT --model OneHot-Protein --tasks protein,ppi
+python -m protify.interpretability train --root ONEHOT --model OneHot-Protein --no-controls --tasks protein --batch-size 256 --lr 3e-2 --wd 0
+```
+
+## Protein-protein interaction
+
+`--tasks ppi` adds a protein-protein interaction task, apart from the 22 concepts: the Bernett gold-standard pairs
+(`--pair-repo`, by default `Synthyra/bernett_gold_ppi`; human pairs, half interacting, no protein in two splits, and
+each protein's count of negative pairs close to its count of positive ones). Proteins are cut to their first 2,046
+residues, ESMC's context less CLS and EOS. `embed --tasks ppi` writes their stores (`stores/ppi_*`, controls included),
+and a pair probe reads one row per pair from the two partners' pooled states, each standardized with the training
+proteins' moments: [z_a + z_b | z_a * z_b], which a swap of the partners leaves unchanged. The sum lets a linear probe
+score each partner on its own, and the product lets it weigh the columns both partners share. Rows are built batch by
+batch, so no pair-by-layer tensor is ever held. Everything else follows the protein tasks, with each pair keeping its
+label under scrambled partners, and `ranking.parquet` adds each probe's ROC AUC and average precision on the test pairs.
+
+```bash
+python -m protify.interpretability embed --root RUN --tasks ppi --controls
+python -m protify.interpretability sweep --root RUN --label ppi_b1024 --tasks ppi --batch-size 1024 --lr 1e-4 1e-3 1e-2 --wd 0 0.1
+python -m protify.interpretability train --root RUN --label linear --tasks ppi --batch-size 1024 --lr 1e-3 --wd 0
+```
+
 ## Seed replicates
 
 A replicate repeats the analysis under another `--seed` in its own root: the probes' initialization and batch order,
@@ -194,6 +235,7 @@ randomly initialized model (`--random-roots`), and writes 300 dpi PNGs and summa
 | `controls.png` | all twenty conditions (model, probe and input) along the residual stream |
 | `site_maps.png` | every site by block, relative to each task's highest score |
 | `site_gaps.png` | each site's best score minus the best residual-stream score, and the block each best probe reads |
+| `site_summary.png` | the same gap, one dot per task for each site, sites ordered by their median |
 | `site_families.png` | attention and MLP sites along the blocks against the block output |
 | `rotation.png` | rotated minus unrotated queries and keys, full width and per head |
 | `heads.png` | every head of the head-split sites by block |

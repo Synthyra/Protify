@@ -89,9 +89,10 @@ class PooledTapStore:
             self._arrays[site] = np.memmap(self.root / f"{site}.bin", dtype=np.uint16, mode="r", shape=shape)
         return self._arrays[site]
 
-    def load(self, site: str, rows: np.ndarray, device: torch.device | str = "cpu") -> Tensor:
-        """The pooled rows of one site as bfloat16."""
-        block = np.ascontiguousarray(self.array(site)[np.sort(rows)])  # (n, L_s, 2 * w) as uint16 bits
+    def load(self, site: str, rows: np.ndarray, device: torch.device | str = "cpu", slots: slice | None = None) -> Tensor:
+        """The pooled rows of one site as bfloat16: every layer, or the layer slots `slots` of the store's layers."""
+        array, ordered = self.array(site), np.sort(rows)
+        block = np.ascontiguousarray(array[ordered] if slots is None else array[ordered, slots])  # (n, L_s, 2 * w) as uint16 bits
         order = np.argsort(np.argsort(rows))  # back to the requested order
         values = torch.from_numpy(block).view(torch.bfloat16)  # (n, L_s, 2 * w)
         return values[torch.from_numpy(order)].to(device)  # (n, L_s, 2 * w)

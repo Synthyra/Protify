@@ -23,6 +23,12 @@ runs trained before `train` wrote it.
 `figures` draws every figure and summary table the runs' tables support, and `compare` sets variants of the analysis
 (normalized inputs, mean-only pooling) against a reference. `--normalize` on `embed` and `train` L2-normalizes every
 token state before pooling or probing; `--pooling mean` makes protein probes read pooled means alone.
+
+`--model` takes any ESMC (ESMC-300, ESMC-600, ESMC-6B) or one of Protify's baseline encodings, `OneHot-Protein` and
+`Random`, whose token rows are their one state. `--tasks ppi` adds the protein-protein interaction task (the Bernett
+gold-standard pairs, `--pair-repo`), whose proteins get stores of their own (`stores/ppi_*`) and whose probes read a
+symmetric row of the two partners' pooled states (`pairs`). `--no-untrained` leaves the untrained model out of the
+controls, and `--site-budget-gb` bounds the pooled rows a protein or pair probe holds on the device at once.
 """
 
 from __future__ import annotations
@@ -38,10 +44,12 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from safetensors.torch import load_file, save_file
 
+from .baselines import BASELINE_SITES, BaselineModel, is_baseline
 from .concepts import ALL_TASKS, DEFAULT_REPO, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, load_concept, scramble, scramble_seed
 from .capture import model_dims
 from .interventions import paired_tests, run_phospho_interventions
 from .latent import label_sets, project_layers
+from .pairs import PAIR_REPO, PAIR_TASK, PairData, load_pairs, sweep_pair_task, train_pair_task, validate_pair_task
 from .pooled_store import PooledTapStore, embed_pooled
 from .probe_bank import ProbeBank, ProbeSettings
 from .protein_probing import ControlStores, sweep_protein_task, train_protein_task, validate_protein_task
@@ -61,9 +69,13 @@ STORE_VARIANTS = (
     ("untrained", "l2_normalized"),
     ("untrained", "scrambled"),
 )
+# The pair task's proteins have stores of their own, named with this prefix.
+PAIR_PREFIX = f"{PAIR_TASK}_"
 
 
 def parse_tasks(value: str) -> tuple[str, ...]:
+    """Task names from a CLI value: 'all' (the 22 concepts), 'protein', 'residue', or comma-separated names, among
+    which the protein-protein interaction task 'ppi', which no group includes."""
     if value == "all":
         return ALL_TASKS
     if value == "protein":
@@ -71,9 +83,9 @@ def parse_tasks(value: str) -> tuple[str, ...]:
     if value == "residue":
         return RESIDUE_TASKS
     names = tuple(name.strip() for name in value.split(",") if name.strip())
-    unknown = sorted(set(names) - set(ALL_TASKS))
+    unknown = sorted(set(names) - set(ALL_TASKS) - {PAIR_TASK})
     if unknown:
-        raise SystemExit(f"Unknown tasks {unknown}; known tasks are {list(ALL_TASKS)}.")
+        raise SystemExit(f"Unknown tasks {unknown}; known tasks are {list(ALL_TASKS) + [PAIR_TASK]}.")
     return names
 
 
@@ -89,7 +101,15 @@ def load_model(
     seed: int = 0,
 ) -> tuple[torch.nn.Module, object]:
     """The model and its tokenizer; with `random_init`, every module reset to PyTorch's default initialization, as the
-    untrained-model control is (`untrained_copy` with the same seed gives the same weights)."""
+    untrained-model control is (`untrained_copy` with the same seed gives the same weights). A baseline encoding
+    (`OneHot-Protein`, `Random`) reads ESMC's tokens."""
+    if is_baseline(model_name):
+        from ..base_models.esmc import get_esmc_tokenizer
+
+        if random_init:
+            raise SystemExit(f"{model_name} has no weights to initialize at random.")
+        tokenizer = get_esmc_tokenizer("ESMC-300")
+        return BaselineModel(model_name, tokenizer).to(device).eval(), tokenizer
     from ..base_models.get_base_models import get_base_model
 
     model, tokenizer = get_base_model(model_name, dtype=dtype)
@@ -103,15 +123,26 @@ def model_label(args: argparse.Namespace) -> str:
     return f"{args.model} random init (seed {args.seed})" if args.random_init else args.model
 
 
-def load_tasks(tasks: Sequence[str], args: argparse.Namespace) -> dict[str, ConceptData]:
-    return {
-        name: load_concept(name, repo=args.repo, revision=args.revision, local_dir=args.local_data)
-        for name in tasks
-    }
+def tap_spec(args: argparse.Namespace, per_head: bool = True) -> TapSpec:
+    """The states a command reads: the sites and blocks asked for, or a baseline's one state."""
+    if is_baseline(args.model):
+        return TapSpec(sites=BASELINE_SITES, per_head=False)
+    return TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=per_head and not args.no_heads)
 
 
-def store_path(root: Path, plm: str, view: str) -> Path:
-    return root / "stores" / f"{plm}_{view}"
+def load_task(name: str, args: argparse.Namespace) -> ConceptData | PairData:
+    """One concept task, or the protein-protein interaction pairs."""
+    if name == PAIR_TASK:
+        return load_pairs(repo=args.pair_repo, local_dir=args.pair_local_data)
+    return load_concept(name, repo=args.repo, revision=args.revision, local_dir=args.local_data)
+
+
+def load_tasks(tasks: Sequence[str], args: argparse.Namespace) -> dict[str, ConceptData | PairData]:
+    return {name: load_task(name, args) for name in tasks}
+
+
+def store_path(root: Path, plm: str, view: str, prefix: str = "") -> Path:
+    return root / "stores" / f"{prefix}{plm}_{view}"
 
 
 def stored_layouts(store: PooledTapStore, spec: TapSpec) -> dict[str, SiteLayout]:
@@ -121,41 +152,57 @@ def stored_layouts(store: PooledTapStore, spec: TapSpec) -> dict[str, SiteLayout
     return {name: replace(layout, layers=tuple(store.layers(name))) for name, layout in layouts.items()}
 
 
-def control_stores(root: Path) -> ControlStores:
-    missing = [str(store_path(root, *key)) for key in STORE_VARIANTS if not (store_path(root, *key) / "manifest.json").exists()]
+def control_stores(root: Path, prefix: str = "", untrained: bool = True) -> ControlStores:
+    """The stores the controls read; without `untrained`, the trained model's alone."""
+    keys = [key for key in STORE_VARIANTS if untrained or key[0] == "trained"]
+    missing = [str(store_path(root, *key, prefix)) for key in keys if not (store_path(root, *key, prefix) / "manifest.json").exists()]
     if missing:
         raise SystemExit(f"Control stores are missing ({', '.join(missing)}); run `embed --controls` or train with --no-controls.")
-    return ControlStores({key: PooledTapStore(store_path(root, *key)) for key in STORE_VARIANTS})
+    return ControlStores({key: PooledTapStore(store_path(root, *key, prefix)) for key in keys})
 
 
 StorePass = tuple[str, list[str], dict[bool, Path], Callable[[str], str] | None]
 
 
-def store_passes(datasets: dict[str, ConceptData], root: Path, controls: bool, seed: int, normalize: bool = False) -> list[StorePass]:
+def store_passes(
+    datasets: dict[str, ConceptData | PairData],
+    root: Path,
+    controls: bool,
+    seed: int,
+    normalize: bool = False,
+    untrained: bool = True,
+    prefix: str = "",
+) -> list[StorePass]:
     """(model state, sequences, store roots, input transform) of each forward pass the stores need.
 
     With `normalize`, every store pools L2-normalized token states, so the `original` and `scrambled` stores are the
-    normalized variant's inputs and the `l2_normalized` control equals `original`."""
+    normalized variant's inputs and the `l2_normalized` control equals `original`. Without `untrained`, the control
+    stores are the trained model's alone. `prefix` names a task family's own stores, such as the pair task's."""
     every = sorted({sequence for data in datasets.values() for split in data.splits.values() for sequence in split.sequences})
     tested = sorted({sequence for data in datasets.values() for sequence in data.splits["test"].sequences})
 
     def scrambled(sequence: str) -> str:
         return scramble(sequence, scramble_seed(sequence, seed))
 
-    passes: list[StorePass] = [("trained", every, {normalize: store_path(root, "trained", "original")}, None)]
+    def path(plm: str, view: str) -> Path:
+        return store_path(root, plm, view, prefix)
+
+    passes: list[StorePass] = [("trained", every, {normalize: path("trained", "original")}, None)]
     if controls:
         passes += [
-            ("trained", tested, {True: store_path(root, "trained", "l2_normalized")}, None),
-            ("trained", tested, {normalize: store_path(root, "trained", "scrambled")}, scrambled),
+            ("trained", tested, {True: path("trained", "l2_normalized")}, None),
+            ("trained", tested, {normalize: path("trained", "scrambled")}, scrambled),
         ]
+        if not untrained:
+            return passes
         if normalize:  # both untrained stores are normalized, so they take two passes
             passes += [
-                ("untrained", tested, {True: store_path(root, "untrained", "original")}, None),
-                ("untrained", tested, {True: store_path(root, "untrained", "l2_normalized")}, None),
+                ("untrained", tested, {True: path("untrained", "original")}, None),
+                ("untrained", tested, {True: path("untrained", "l2_normalized")}, None),
             ]
         else:
-            passes.append(("untrained", tested, {False: store_path(root, "untrained", "original"), True: store_path(root, "untrained", "l2_normalized")}, None))
-        passes.append(("untrained", tested, {normalize: store_path(root, "untrained", "scrambled")}, scrambled))
+            passes.append(("untrained", tested, {False: path("untrained", "original"), True: path("untrained", "l2_normalized")}, None))
+        passes.append(("untrained", tested, {normalize: path("untrained", "scrambled")}, scrambled))
     return passes
 
 
@@ -163,7 +210,7 @@ def write_stores(
     model: torch.nn.Module,
     tokenizer: object,
     model_name: str,
-    datasets: dict[str, ConceptData],
+    datasets: dict[str, ConceptData | PairData],
     root: Path,
     spec: TapSpec,
     controls: bool,
@@ -172,12 +219,15 @@ def write_stores(
     device: torch.device,
     pilot: object | None = None,
     normalize: bool = False,
+    untrained: bool = True,
+    prefix: str = "",
 ) -> None:
-    """The pooled stores of the protein tasks: every sequence under the trained model, and the control stores.
+    """The pooled stores of the protein tasks (or, with a `prefix`, of the pair task's proteins): every sequence under
+    the trained model, and the control stores.
 
     With a `foundry.pilot.Pilot`, only the first pass runs, under the pilot's watch, and its store is left incomplete.
     """
-    passes = store_passes(datasets, root, controls, seed, normalize)
+    passes = store_passes(datasets, root, controls, seed, normalize, untrained, prefix)
     if pilot is not None:
         pilot.total_steps = sum(len(token_batches(sorted(set(sequences), key=len, reverse=True), max_tokens)) for _, sequences, _, _ in passes)
         _, sequences, roots, _ = passes[0]
@@ -212,11 +262,17 @@ def command_embed(args: argparse.Namespace) -> None:
     if args.pilot:
         pilot = make_pilot(Path(args.root), "embed", "tokens", lambda batch: len(batch.sequences) * batch.padded_length)
     device = torch.device(args.device)
-    spec = TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=not args.no_heads)
-    tasks = [name for name in parse_tasks(args.tasks) if name in PROTEIN_TASKS]
-    datasets = load_tasks(tasks, args)
+    spec = tap_spec(args)
+    tasks = parse_tasks(args.tasks)
     model, tokenizer = load_model(args.model, device, random_init=args.random_init, seed=args.seed)
-    write_stores(model, tokenizer, model_label(args), datasets, Path(args.root), spec, args.controls, args.seed, args.max_tokens, device, pilot, args.normalize)
+    untrained = not args.no_untrained
+    protein = [name for name in tasks if name in PROTEIN_TASKS]
+    if protein:
+        write_stores(model, tokenizer, model_label(args), load_tasks(protein, args), Path(args.root), spec, args.controls, args.seed,
+                     args.max_tokens, device, pilot, args.normalize, untrained)
+    if PAIR_TASK in tasks and pilot is None:
+        write_stores(model, tokenizer, model_label(args), load_tasks([PAIR_TASK], args), Path(args.root), spec, args.controls, args.seed,
+                     args.max_tokens, device, None, args.normalize, untrained, PAIR_PREFIX)
 
 
 def training_settings(args: argparse.Namespace) -> TrainingSettings:
@@ -234,6 +290,8 @@ def training_settings(args: argparse.Namespace) -> TrainingSettings:
         probe=probe,
         normalize=args.normalize,
         pooling=args.pooling,
+        untrained_controls=not args.no_untrained,
+        site_budget_gb=args.site_budget_gb,
     )
 
 
@@ -284,17 +342,19 @@ def train_tasks(
         data = read_task(name)
         weights: dict[str, dict[str, torch.Tensor]] = {}
         started = time.time()
-        if data.task.level == "protein":
-            store = PooledTapStore(store_path(root, "trained", "original"))
+        if data.task.level in ("protein", "pair"):
+            prefix = PAIR_PREFIX if data.task.level == "pair" else ""
+            store = PooledTapStore(store_path(root, "trained", "original", prefix))
             if store.manifest.normalized != settings.normalize:
                 state = "normalized" if store.manifest.normalized else "raw"
                 raise SystemExit(f"{store.root} pools {state} token states; embed and train must agree on --normalize.")
             layouts = stored_layouts(store, spec)
+            sweeper, trainer = (sweep_pair_task, train_pair_task) if data.task.level == "pair" else (sweep_protein_task, train_protein_task)
             if sweep:
-                results = sweep_protein_task(data, store, layouts, settings, device)
+                results = sweeper(data, store, layouts, settings, device)
             else:
-                controls = control_stores(root) if settings.controls else None
-                results = train_protein_task(data, store, layouts, settings, device, controls, save_weights=weights)
+                controls = control_stores(root, prefix, settings.untrained_controls) if settings.controls else None
+                results = trainer(data, store, layouts, settings, device, controls, save_weights=weights)
         else:
             if model is None:
                 model, tokenizer = read_model()
@@ -309,7 +369,9 @@ def train_tasks(
             "spec": asdict(spec),
             "settings": asdict(settings),
             "seconds": elapsed,
-            "rows": {split: len(part.sequences) for split, part in data.splits.items()},
+            # proteins, or pairs for the pair task (whose proteins are counted apart)
+            "rows": {split: len(part.labels) for split, part in data.splits.items()},
+            **({"proteins": {split: len(part.sequences) for split, part in data.splits.items()}} if data.task.level == "pair" else {}),
             **(meta or {}),
         }
         if sweep:
@@ -342,7 +404,7 @@ def restore_selected(
 ) -> dict[str, dict[str, ProbeBank]]:
     """Every site's trained banks from a results folder's `probes.safetensors`, named as the trainers name them."""
     task = data.task
-    loss = task.loss if task.level == "protein" else "multiclass"  # a residue bank scores one class per residue
+    loss = task.loss if task.level != "residue" else "multiclass"  # a residue bank scores one class per residue
     selected: dict[str, dict[str, ProbeBank]] = {}
     for site, layout in layouts.items():
         selected[site] = {}
@@ -381,12 +443,13 @@ def validate_tasks(
         settings, spec, data = recorded_settings(record), recorded_spec(record), read_task(name)
         weights = load_file(str(folder / "probes.safetensors"))
         started = time.time()
-        if data.task.level == "protein":
-            store = PooledTapStore(store_path(root, "trained", "original"))
+        if data.task.level in ("protein", "pair"):
+            store = PooledTapStore(store_path(root, "trained", "original", PAIR_PREFIX if data.task.level == "pair" else ""))
             if store.manifest.normalized != settings.normalize:
                 raise SystemExit(f"{store.root} does not pool the token states {folder} was trained on (normalize={settings.normalize}).")
             layouts = stored_layouts(store, spec)
-            results = validate_protein_task(data, store, layouts, restore_selected(weights, layouts, data, settings, device), settings, device)
+            validator = validate_pair_task if data.task.level == "pair" else validate_protein_task
+            results = validator(data, store, layouts, restore_selected(weights, layouts, data, settings, device), settings, device)
         else:
             key = (bool(record.get("random_init", False)), settings.seed)
             if loaded is None or loaded[0] != key:
@@ -419,19 +482,18 @@ def command_train(args: argparse.Namespace) -> None:
         pilot = make_pilot(Path(args.root), args.command, "tokens", lambda batch: len(batch.sequences) * batch.padded_length)
     device = torch.device(args.device)
     torch.backends.cuda.matmul.allow_tf32 = True
-    spec = TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=not args.no_heads)
     train_tasks(
         parse_tasks(args.tasks),
         Path(args.root),
         args.label,
-        spec,
+        tap_spec(args),
         training_settings(args),
         device,
-        read_task=lambda name: load_concept(name, repo=args.repo, revision=args.revision, local_dir=args.local_data),
+        read_task=lambda name: load_task(name, args),
         read_model=lambda: load_model(args.model, device, random_init=args.random_init, seed=args.seed),
         overwrite=args.overwrite,
         meta={"model": model_label(args), "random_init": args.random_init, "normalize": args.normalize, "pooling": args.pooling,
-              "repo": args.repo, "revision": args.revision, "local_data": args.local_data},
+              "repo": args.repo, "revision": args.revision, "local_data": args.local_data, "pair_repo": args.pair_repo},
         pilot=pilot,
         sweep=args.command == "sweep",
     )
@@ -445,7 +507,7 @@ def command_validate(args: argparse.Namespace) -> None:
         args.label,
         parse_tasks(args.tasks),
         device,
-        read_task=lambda name: load_concept(name, repo=args.repo, revision=args.revision, local_dir=args.local_data),
+        read_task=lambda name: load_task(name, args),
         read_model=lambda random_init, seed: load_model(args.model, device, random_init=random_init, seed=seed),
         overwrite=args.overwrite,
     )
@@ -483,7 +545,7 @@ def command_phospho(args: argparse.Namespace) -> None:
     # one-residue difference by about a hundredfold, at twice the speed.
     torch.backends.cuda.matmul.allow_tf32 = args.tf32
     torch.backends.cudnn.allow_tf32 = args.tf32
-    spec = TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=False)
+    spec = tap_spec(args, per_head=False)
     data = load_concept("phosphorylation", repo=args.repo, revision=args.revision, local_dir=args.local_data)
     model, tokenizer = load_model(args.model, device, torch.float32, random_init=args.random_init, seed=args.seed)
     untrained = untrained_copy(model, args.seed)
@@ -558,7 +620,7 @@ def command_compare(args: argparse.Namespace) -> None:
 
 def command_tokens(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
-    spec = TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=False)
+    spec = tap_spec(args, per_head=False)
     sequences = [line.strip() for line in Path(args.sequences).read_text(encoding="utf-8").splitlines() if line.strip()]
     model, tokenizer = load_model(args.model, device, random_init=args.random_init, seed=args.seed)
     embed_tokens(model, tokenizer, sequences, spec, args.out, model_label(args), max_tokens=args.max_tokens, device=device)
@@ -581,27 +643,32 @@ def build_parser() -> argparse.ArgumentParser:
 
     def normalizing(sub: argparse.ArgumentParser) -> None:
         sub.add_argument("--normalize", action="store_true", help="L2-normalize every token state along its width before pooling (embed) or probing (train)")
+        sub.add_argument("--no-untrained", action="store_true", help="leave out the untrained model's control stores (embed) and conditions (train)")
 
-    embed = commands.add_parser("embed", help="write the pooled tap stores of the protein tasks")
+    def data_sources(sub: argparse.ArgumentParser) -> None:
+        sub.add_argument("--repo", default=DEFAULT_REPO)
+        sub.add_argument("--revision", default=None)
+        sub.add_argument("--local-data", default=None)
+        sub.add_argument("--pair-repo", default=PAIR_REPO, help="the pairs of the protein-protein interaction task 'ppi'")
+        sub.add_argument("--pair-local-data", default=None, help="a folder holding the pair task's train, validation and test parquet files")
+
+    embed = commands.add_parser("embed", help="write the pooled tap stores of the protein tasks, and of the pair task's proteins with --tasks ppi")
     common(embed)
     normalizing(embed)
+    data_sources(embed)
     embed.add_argument("--root", required=True)
     embed.add_argument("--tasks", default="protein")
     embed.add_argument("--controls", action="store_true", help="also write the control stores of the test proteins")
-    embed.add_argument("--repo", default=DEFAULT_REPO)
-    embed.add_argument("--revision", default=None)
-    embed.add_argument("--local-data", default=None)
     embed.set_defaults(handler=command_embed)
 
     def training(sub: argparse.ArgumentParser) -> None:
         common(sub)
         normalizing(sub)
+        data_sources(sub)
         sub.add_argument("--root", required=True)
         sub.add_argument("--label", default="linear", help="results subfolder, so settings can be compared")
         sub.add_argument("--tasks", default="all")
-        sub.add_argument("--repo", default=DEFAULT_REPO)
-        sub.add_argument("--revision", default=None)
-        sub.add_argument("--local-data", default=None)
+        sub.add_argument("--site-budget-gb", type=float, default=8.0, help="pooled rows of one site held on the device at once; wider sites train in layer chunks")
         sub.add_argument("--lr", type=float, nargs="+", default=[1e-3])
         sub.add_argument("--wd", type=float, nargs="+", default=[1e-4])
         sub.add_argument("--batch-size", type=int, default=64, help="proteins per step, protein tasks")
@@ -626,9 +693,7 @@ def build_parser() -> argparse.ArgumentParser:
     validated.add_argument("--tasks", default="all")
     validated.add_argument("--model", default="ESMC-300", help="the model residue tasks stream from; each run.json gives its seed and random init")
     validated.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    validated.add_argument("--repo", default=DEFAULT_REPO)
-    validated.add_argument("--revision", default=None)
-    validated.add_argument("--local-data", default=None)
+    data_sources(validated)
     validated.add_argument("--overwrite", action="store_true")
     validated.set_defaults(handler=command_validate)
 

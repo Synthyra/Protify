@@ -38,6 +38,9 @@ def esmc_backbone(model: nn.Module) -> nn.Module:
 
 def model_dims(model: nn.Module) -> ModelDims:
     backbone = esmc_backbone(model)
+    if not len(backbone.transformer.blocks):  # a baseline encoding: its token rows are its only state
+        width = backbone.embed.embedding_dim
+        return ModelDims(d=width, f=width, heads=1, blocks=0)
     first = backbone.transformer.blocks[0]
     return ModelDims(
         d=first.attn.out_proj.in_features,

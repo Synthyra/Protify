@@ -65,11 +65,17 @@ class ProbeBank:
         weight_decays: Tensor,
         seed: int,
         device: torch.device | str,
+        first: int = 0,
+        total: int | None = None,
     ) -> None:
+        """`first` and `total` place these probes in a larger family: the initial weights are groups first.. of the
+        `total` the seed draws, so a family trained in chunks starts from the weights it would start from whole."""
         if loss not in LOSSES:
             raise ValueError(f"Loss must be one of {LOSSES}, not {loss!r}.")
         groups = len(names)
+        total = groups if total is None else total
         assert learning_rates.shape == (groups,) and weight_decays.shape == (groups,)
+        assert 0 <= first and first + groups <= total
         self.names = list(names)
         self.width = width
         self.outputs = outputs
@@ -78,19 +84,19 @@ class ProbeBank:
         self.device = torch.device(device)
         generator = torch.Generator(device="cpu").manual_seed(seed)
         if settings.kind == "linear":
-            shapes = {"weight": (groups, width, outputs), "bias": (groups, outputs)}
+            shapes = {"weight": (total, width, outputs), "bias": (total, outputs)}
             fan_ins = {"weight": width, "bias": width}
         else:
             hidden = settings.hidden
             shapes = {
-                "weight1": (groups, width, hidden), "bias1": (groups, hidden),
-                "weight2": (groups, hidden, outputs), "bias2": (groups, outputs),
+                "weight1": (total, width, hidden), "bias1": (total, hidden),
+                "weight2": (total, hidden, outputs), "bias2": (total, outputs),
             }
             fan_ins = {"weight1": width, "bias1": width, "weight2": hidden, "bias2": hidden}
-        self.params = {
-            name: _uniform_(torch.empty(shape), fan_ins[name], generator).to(self.device)
-            for name, shape in shapes.items()
-        }
+        self.params = {}
+        for name, shape in shapes.items():
+            drawn = _uniform_(torch.empty(shape), fan_ins[name], generator)  # (total, ...), in the order a whole family draws
+            self.params[name] = (drawn if total == groups else drawn[first: first + groups].clone()).to(self.device)
         self.initial = {name: value.clone() for name, value in self.params.items()}
         self.best = {name: value.clone() for name, value in self.params.items()}
         self.grads = {name: torch.zeros_like(value) for name, value in self.params.items()}
@@ -324,6 +330,10 @@ class ProbeBank:
         losses = self.best_loss.view(settings_count, probes)  # (K, P)
         chosen = losses.argmin(dim=0)  # (P,)
         index = chosen * probes + torch.arange(probes, device=self.device)  # (P,)
+        return self.subset(index), chosen
+
+    def subset(self, index: Tensor) -> "ProbeBank":
+        """A bank of the groups in `index`, in that order, with their own copies of every per-group tensor."""
         reduced = object.__new__(ProbeBank)
         reduced.__dict__.update(self.__dict__)
         reduced.names = [self.names[position] for position in index.tolist()]
@@ -331,7 +341,7 @@ class ProbeBank:
             setattr(reduced, attribute, {name: value[index] for name, value in getattr(self, attribute).items()})
         for attribute in ("learning_rates", "weight_decays", "mean", "inverse_std", "best_loss", "best_step", "misses", "stopped"):
             setattr(reduced, attribute, getattr(self, attribute)[index])
-        return reduced, chosen
+        return reduced
 
     def state(self, which: str = "best") -> dict[str, Tensor]:
         """Weights and standardization of every group, on the CPU, for saving."""
