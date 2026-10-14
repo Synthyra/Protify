@@ -9,15 +9,9 @@ when one sits where the store should be.
 import pytest
 import torch
 
-
-try:
-    from src.protify.data.data_mixin import DataMixin
-    from src.protify.embedder import EmbeddingArguments, get_embedding_filename
-    from src.protify.testing_suite.embedding_store_builder import build_store_for
-except ImportError:
-    from protify.data.data_mixin import DataMixin
-    from protify.embedder import EmbeddingArguments, get_embedding_filename
-    from protify.testing_suite.embedding_store_builder import build_store_for
+from protify.data.data_mixin import DataMixin
+from protify.embedder import EmbeddingArguments, get_embedding_filename
+from protify.testing_suite.embedding_store_builder import build_store_for
 
 
 MODEL = "test-model"

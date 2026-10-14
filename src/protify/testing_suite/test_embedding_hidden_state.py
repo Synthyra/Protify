@@ -1,28 +1,18 @@
-import os
 import sys
 import pytest
 import torch
 
 from types import SimpleNamespace
 
-
-PROTIFY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC_ROOT = os.path.dirname(PROTIFY_ROOT)
-REPO_ROOT = os.path.dirname(SRC_ROOT)
-for path in (PROTIFY_ROOT, SRC_ROOT, REPO_ROOT):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
-
-from src.protify.base_models.hidden_state_selection import select_hidden_state
-from src.protify.embedder import (
+from protify.base_models.hidden_state_selection import select_hidden_state
+from protify.embedder import (
     PUBLISHED_EMBEDDING_MAX_LENGTH,
     Embedder,
     EmbeddingArguments,
     get_embedding_filename,
     legacy_embedding_filename,
 )
-from src.protify.hyperopt_utils import HyperoptModule
+from protify.hyperopt_utils import HyperoptModule
 
 
 def test_embedding_filename_includes_default_length_cache_identity():
@@ -88,7 +78,7 @@ def test_download_falls_back_to_the_published_name_only_at_the_published_length(
         requested.append(filename)
         raise FileNotFoundError(filename)
 
-    monkeypatch.setattr("src.protify.embedder.hf_hub_download", record_and_fail)
+    monkeypatch.setattr("protify.embedder.hf_hub_download", record_and_fail)
     embedder._download_embeddings("ESM2-8")
 
     assert requested == [
@@ -144,7 +134,7 @@ def test_select_hidden_state_requires_hidden_states_for_non_default():
 
 
 def test_parse_arguments_yaml_hidden_state_cli_override(tmp_path, monkeypatch):
-    from src.protify.main import parse_arguments
+    from protify.main import parse_arguments
 
     yaml_path = tmp_path / "config.yaml"
     yaml_path.write_text(

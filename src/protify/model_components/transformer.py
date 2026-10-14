@@ -1,7 +1,7 @@
-"""The transformer stack from the InterpNet model family, and Protify's masked language model on it.
+"""The probes' transformer stack, from `foundry.layers.probe_transformer`, and Protify's masked language model on it.
 
 `Transformer`, `TransformerBlock`, `TransformerOutput`, and the head-size resolution are
-`interpnet.transformer`'s. `TransformerConfig`, `TransformerPreTrainedModel`, and
+`foundry.layers.probe_transformer`'s. `TransformerConfig`, `TransformerPreTrainedModel`, and
 `TransformerForMaskedLM` are Protify's.
 """
 
@@ -11,13 +11,13 @@ from typing import Any, ClassVar
 from torch import nn
 from transformers import PreTrainedModel, PretrainedConfig
 
-from interpnet.attention import RotaryEmbedding
-from interpnet.transformer import (
+from foundry.layers.probe_attention import RotaryEmbedding
+from foundry.layers.probe_transformer import (
+    HEAD_SIZE_UNSET,
     Transformer,
     TransformerBlock,
     TransformerOutput,
-    _UNSET,
-    _resolve_head_size,
+    resolve_head_size,
 )
 
 
@@ -37,7 +37,7 @@ class TransformerConfig(PretrainedConfig):
     def __init__(
         self,
         hidden_size: int = 512,
-        head_size: Any = _UNSET,
+        head_size: Any = HEAD_SIZE_UNSET,
         n_layers: int = 12,
         vocab_size: int = 32000,
         expansion_ratio: float = 8 / 3,
@@ -50,7 +50,7 @@ class TransformerConfig(PretrainedConfig):
         **kwargs: Any,
     ) -> None:
         legacy_n_heads = kwargs.pop("n_heads", None)
-        head_size = _resolve_head_size(hidden_size, head_size, legacy_n_heads, default_head_size=64)
+        head_size = resolve_head_size(hidden_size, head_size, legacy_n_heads, default_head_size=64)
         super().__init__(**kwargs)
         self.hidden_size = hidden_size  # d
         self.head_size = head_size  # d_h

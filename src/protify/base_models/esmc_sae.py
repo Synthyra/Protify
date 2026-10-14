@@ -14,11 +14,13 @@ separate SAE variants without any further plumbing. A bare `ESMC-300-SAE` resolv
 depth layer each backbone publishes, at the default sparsity and codebook width.
 """
 
+import json
 import re
 import torch
 import torch.nn as nn
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .fastplms_loading import ensure_fastplms_submodule_on_path, load_fastplms_model
@@ -59,6 +61,14 @@ ESMC_SAE_COVERAGE: dict[str, EsmcSaeCoverage] = {
     'ESMC-600': EsmcSaeCoverage('ESMC-600M', 'Synthyra/ESMplusplus_large', 1152, 36, 27, (16384,)),
     'ESMC-6B': EsmcSaeCoverage('ESMC-6B', 'Synthyra/ESMplusplus_6B', 2560, 80, 60, (16384, 131072)),
 }
+
+# The commit each Biohub repository is loaded at, so a model name always means the same weights.
+# A cache key names the model, not the commit, so an unpinned load let a republished checkpoint
+# write different numbers under an existing key. Every repository the registry can resolve is
+# pinned; `verified` records the day the commits were read from the Hub.
+SAE_REVISIONS: dict[str, str] = json.loads(
+    (Path(__file__).with_name('esmc_sae_revisions.json')).read_text(encoding='utf-8')
+)['revisions']
 
 SAE_K_VALUES = (16, 32, 64, 128, 256, 512)
 SAE_CODEBOOK_DIMS = (8192, 16384, 32768, 65536, 131072)
@@ -122,6 +132,11 @@ class EsmcSaeSelection:
             return f'{stem}-layer{self.layer}-k{self.k}-codebook{self.codebook_dim}'
 
         return f'{stem}-k{self.k}-codebook{self.codebook_dim}'
+
+    @property
+    def revision(self) -> str:
+        """The pinned commit of this checkpoint's repository (`SAE_REVISIONS`)."""
+        return SAE_REVISIONS[self.repository]
 
 
 def resolve_sae_selection(backbone: str, layer: int, k: int, codebook_dim: int) -> EsmcSaeSelection:
@@ -251,7 +266,7 @@ class EsmcSaeForEmbedding(nn.Module):
         validate_sae_pooling_types(tuple(pooling_types), selection.codebook_dim)
 
         self.esm = load_fastplms_model(ESMplusplusModel, model_path, dtype=dtype)
-        self.esm.load_sae_models(selection.repository, [selection.layer])
+        self.esm.load_sae_models(selection.repository, [selection.layer], revision=selection.revision)
         self.selection = selection
         self.pooling_types = tuple(pooling_types)
         self.sae_key = f'layer{selection.layer}'
@@ -351,7 +366,7 @@ class EsmcSaeResidueEncoder(nn.Module):
 
         # Pass the backbone's dtype so the codebook consumes its hidden states directly.
         self.sae: ESMplusplusSAELayer = load_esmc_sae_layers(
-            selection.repository, [selection.layer], device=device, dtype=dtype
+            selection.repository, [selection.layer], revision=selection.revision, device=device, dtype=dtype
         )[selection.layer]
         self.selection = selection
         self.pooling_types = tuple(pooling_types)

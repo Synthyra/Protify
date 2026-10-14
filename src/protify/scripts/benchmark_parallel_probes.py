@@ -6,27 +6,15 @@ import torch
 from collections.abc import Sequence
 from torch.utils.data import DataLoader, TensorDataset
 
-
-try:
-    from probes.mlp_probe import MLPProbe, MLPProbeConfig
-    from probes.parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
-    from probes.parallel_probe_batches import ParallelRunDataset
-    from probes.parallel_probe_plan import (
-        ParallelProbeExecutionPlan,
-        build_seed_run_specs,
-        estimate_parallel_probe_plan,
-        plan_parallel_probe_runs,
-    )
-except ImportError:
-    from protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
-    from protify.probes.parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
-    from protify.probes.parallel_probe_batches import ParallelRunDataset
-    from protify.probes.parallel_probe_plan import (
-        ParallelProbeExecutionPlan,
-        build_seed_run_specs,
-        estimate_parallel_probe_plan,
-        plan_parallel_probe_runs,
-    )
+from ..probes.mlp_probe import MLPProbe, MLPProbeConfig
+from ..probes.parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
+from ..probes.parallel_probe_batches import ParallelRunDataset
+from ..probes.parallel_probe_plan import (
+    ParallelProbeExecutionPlan,
+    build_seed_run_specs,
+    estimate_parallel_probe_plan,
+    plan_parallel_probe_runs,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,7 +28,7 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help=(
             "Synthetic label count used only to generate random benchmark labels. "
-            "Real python -m main probe runs infer num_labels from the dataset."
+            "Real python -m protify.main probe runs infer num_labels from the dataset."
         ),
     )
     parser.add_argument("--num_runs", type=int, default=8)

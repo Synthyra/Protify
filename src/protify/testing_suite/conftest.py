@@ -47,7 +47,7 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "slow: slow tests (>10s)")
     config.addinivalue_line(
         "markers",
-        "checkpoint: loads a published checkpoint from the local Hugging Face cache, offline, and skips what is not cached",
+        "checkpoint: loads a published checkpoint from the local Hugging Face cache, offline, and fails on what is not cached",
     )
 
 

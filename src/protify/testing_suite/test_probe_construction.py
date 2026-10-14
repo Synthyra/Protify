@@ -3,29 +3,12 @@
 import pytest
 import torch
 
-
-try:
-    from src.protify.probes.get_probe import ProbeArguments, get_probe, rebuild_probe_from_saved_config
-    from src.protify.probes.mlp_probe import MLPProbe
-    from src.protify.probes.transformer_probe import (
-        TransformerForSequenceClassification, TransformerForTokenClassification,
-    )
-    from src.protify.probes.lyra_probe import LyraForSequenceClassification, LyraForTokenClassification
-except ImportError:
-    try:
-        from protify.probes.get_probe import ProbeArguments, get_probe, rebuild_probe_from_saved_config
-        from protify.probes.mlp_probe import MLPProbe
-        from protify.probes.transformer_probe import (
-            TransformerForSequenceClassification, TransformerForTokenClassification,
-        )
-        from protify.probes.lyra_probe import LyraForSequenceClassification, LyraForTokenClassification
-    except ImportError:
-        from ..probes.get_probe import ProbeArguments, get_probe, rebuild_probe_from_saved_config
-        from ..probes.mlp_probe import MLPProbe
-        from ..probes.transformer_probe import (
-            TransformerForSequenceClassification, TransformerForTokenClassification,
-        )
-        from ..probes.lyra_probe import LyraForSequenceClassification, LyraForTokenClassification
+from protify.probes.get_probe import ProbeArguments, get_probe, rebuild_probe_from_saved_config
+from protify.probes.lyra_probe import LyraForSequenceClassification, LyraForTokenClassification
+from protify.probes.mlp_probe import MLPProbe
+from protify.probes.transformer_probe import (
+    TransformerForSequenceClassification, TransformerForTokenClassification,
+)
 
 
 def _make_args(**kwargs) -> ProbeArguments:
@@ -161,13 +144,7 @@ def test_rebuild_probe_from_saved_config_linear() -> None:
 
 def test_transformer_probe_config_legacy_n_heads_kwarg() -> None:
     """Back-compat: checkpoints serialized with `n_heads` must still load."""
-    try:
-        from src.protify.probes.transformer_probe import TransformerProbeConfig
-    except ImportError:
-        try:
-            from protify.probes.transformer_probe import TransformerProbeConfig
-        except ImportError:
-            from ..probes.transformer_probe import TransformerProbeConfig
+    from protify.probes.transformer_probe import TransformerProbeConfig
     cfg = TransformerProbeConfig(hidden_size=512, n_heads=4)
     assert cfg.head_size == 128
     assert cfg.n_heads == 4
@@ -175,26 +152,14 @@ def test_transformer_probe_config_legacy_n_heads_kwarg() -> None:
 
 def test_transformer_probe_config_head_size_and_legacy_agree() -> None:
     """Both head_size and legacy n_heads provided, consistent values."""
-    try:
-        from src.protify.probes.transformer_probe import TransformerProbeConfig
-    except ImportError:
-        try:
-            from protify.probes.transformer_probe import TransformerProbeConfig
-        except ImportError:
-            from ..probes.transformer_probe import TransformerProbeConfig
+    from protify.probes.transformer_probe import TransformerProbeConfig
     cfg = TransformerProbeConfig(hidden_size=512, head_size=128, n_heads=4)
     assert cfg.head_size == 128
     assert cfg.n_heads == 4
 
 
 def test_transformer_probe_config_head_size_and_legacy_conflict() -> None:
-    try:
-        from src.protify.probes.transformer_probe import TransformerProbeConfig
-    except ImportError:
-        try:
-            from protify.probes.transformer_probe import TransformerProbeConfig
-        except ImportError:
-            from ..probes.transformer_probe import TransformerProbeConfig
+    from protify.probes.transformer_probe import TransformerProbeConfig
     with pytest.raises(AssertionError):
         TransformerProbeConfig(hidden_size=512, head_size=64, n_heads=4)
 

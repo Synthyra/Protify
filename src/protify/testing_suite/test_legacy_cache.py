@@ -20,26 +20,14 @@ from fastplms.features import (
     FeatureStore,
     describe_file,
 )
-
-
-try:
-    from src.protify import feature_cache, legacy_cache
-    from src.protify.embedder import get_embedding_filename
-    from src.protify.testing_suite.legacy_cache_writer import (
-        LEGACY_BFLOAT16_CODE,
-        dense_blob,
-        write_sqlite_cache,
-        write_torch_cache,
-    )
-except ImportError:
-    from protify import feature_cache, legacy_cache
-    from protify.embedder import get_embedding_filename
-    from protify.testing_suite.legacy_cache_writer import (
-        LEGACY_BFLOAT16_CODE,
-        dense_blob,
-        write_sqlite_cache,
-        write_torch_cache,
-    )
+from protify import feature_cache, legacy_cache
+from protify.embedder import get_embedding_filename
+from protify.testing_suite.legacy_cache_writer import (
+    LEGACY_BFLOAT16_CODE,
+    dense_blob,
+    write_sqlite_cache,
+    write_torch_cache,
+)
 
 
 SEQUENCES = ["MKTAYIAKQR", "MKTAYIAKQRQISFVKSHFSRQ", "GGGGSGGGGS", "ACDEFGHIKL", "WWWWWWWWWWWWWW"]

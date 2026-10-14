@@ -1,15 +1,8 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-
-try:
-    from ..model_components.mlp import intermediate_correction_fn
-except ImportError:
-    try:
-        from protify.model_components.mlp import intermediate_correction_fn
-    except ImportError:
-        from model_components.mlp import intermediate_correction_fn
 from .get_probe import normalize_probe_type
+from ..model_components.mlp import intermediate_correction_fn
 
 
 ParallelProbeCompatibilityKey = tuple[object, ...]

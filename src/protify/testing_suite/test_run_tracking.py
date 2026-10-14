@@ -11,11 +11,7 @@ import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
-
-try:
-    from src.protify import hyperopt_utils, run_tracking
-except ImportError:
-    from protify import hyperopt_utils, run_tracking
+from protify import hyperopt_utils, run_tracking
 
 
 class FakeRun:

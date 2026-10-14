@@ -44,20 +44,12 @@ try:
 except ImportError:  # pragma: no cover - Protify pins a version that provides it.
     HDBSCAN = None
 
-try:
-    from data.dataset_classes import EmbeddingStandardizer
-    from feature_cache import row_lookup
-    from legacy_cache import sqlite_rows
-    from pooler import Pooler
-    from seed_utils import set_global_seed
-    from legacy_cache import torch_load
-except ImportError:
-    from ..data.dataset_classes import EmbeddingStandardizer
-    from ..feature_cache import row_lookup
-    from ..legacy_cache import sqlite_rows
-    from ..pooler import Pooler
-    from ..seed_utils import set_global_seed
-    from ..legacy_cache import torch_load
+from ..data.dataset_classes import EmbeddingStandardizer
+from ..feature_cache import row_lookup
+from ..legacy_cache import sqlite_rows
+from ..pooler import Pooler
+from ..seed_utils import set_global_seed
+from ..legacy_cache import torch_load
 
 
 plt.ioff()

@@ -6,10 +6,7 @@ masks, and special tokens below were recorded from that copy, so the retired fil
 Shapes: `b` sequences, `l` tokens in the longest row.
 """
 
-try:
-    from src.protify.base_models.esmc import get_esmc_tokenizer
-except ImportError:
-    from protify.base_models.esmc import get_esmc_tokenizer
+from protify.base_models.esmc import get_esmc_tokenizer
 
 
 CLS = 0

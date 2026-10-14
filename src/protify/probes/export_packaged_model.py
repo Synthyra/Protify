@@ -1,29 +1,27 @@
-import re
-import shutil
-import tempfile
+"""Push a trained probe, with its backbone recipe, as a Hugging Face repository that `AutoModel` loads.
 
-import foundry.embedding
-import foundry.layers
-import interpnet
+The repository holds the weights, the tokenizer, a model card, and `packaged_probe_model.py`, the
+module `trust_remote_code` loads. That module imports `protify` by absolute name, so a consumer
+needs Protify installed; Transformers names the missing package when it is not. The repository
+carries no copy of Protify's source: a copy would sit beside the installed package unused, and
+could disagree with it. `PackagedProbeConfig.protify_version` records the version that trained it.
+"""
+
+import re
+import tempfile
 
 from pathlib import Path
 from typing import Any
 from huggingface_hub import HfApi
 from torch import nn
 
-
-try:
-    from base_models.supported_models import all_presets_with_paths
-    from data.pair_features import DEFAULT_PAIR_FEATURE_MODE
-    from probes.hybrid_probe import HybridProbe
-    from probes.packaged_probe_model import PackagedProbeConfig, PackagedProbeModel
-    from console_output import print_message
-except ImportError:
-    from ..base_models.supported_models import all_presets_with_paths
-    from ..data.pair_features import DEFAULT_PAIR_FEATURE_MODE
-    from .hybrid_probe import HybridProbe
-    from .packaged_probe_model import PackagedProbeConfig, PackagedProbeModel
-    from ..console_output import print_message
+from .hybrid_probe import HybridProbe
+from .packaged_probe_model import PackagedProbeConfig, PackagedProbeModel
+from ..base_models.supported_models import all_presets_with_paths
+from ..console_output import print_message
+from ..data.dataset_classes import EmbeddingStandardizer
+from ..data.pair_features import DEFAULT_PAIR_FEATURE_MODE
+from ..version import PROTIFY_VERSION
 
 
 def _infer_probe_type(probe_model: nn.Module) -> str:
@@ -45,14 +43,7 @@ def _sae_export_fields(source_model_name: str) -> dict[str, Any]:
     FastPLMs submodule at import time, and exporting a dense-embedding probe must not
     require it.
     """
-    try:
-        from base_models.esmc_sae import ESMC_SAE_COVERAGE, is_sae_model_name, parse_sae_model_name
-    except ImportError:
-        from ..base_models.esmc_sae import (
-            ESMC_SAE_COVERAGE,
-            is_sae_model_name,
-            parse_sae_model_name,
-        )
+    from ..base_models.esmc_sae import ESMC_SAE_COVERAGE, is_sae_model_name, parse_sae_model_name
 
     if not is_sae_model_name(source_model_name):
         return {}
@@ -63,6 +54,7 @@ def _sae_export_fields(source_model_name: str) -> dict[str, Any]:
         # base_model_name has to name the backbone rather than the SAE variant.
         "base_model_name": ESMC_SAE_COVERAGE[selection.backbone].model_path,
         "sae_repository": selection.repository,
+        "sae_revision": selection.revision,
         "sae_layer": selection.layer,
         "sae_codebook_dim": selection.codebook_dim,
         "sae_k": selection.k,
@@ -79,10 +71,7 @@ def _load_sae_backbone(source_model_name: str) -> Any:
     runtime sidesteps that: the architecture is the same, so the checkpoint this writes
     loads into the artifact the consumer builds in a clean process.
     """
-    try:
-        from base_models.esmc_sae import build_esmc_sae_model
-    except ImportError:
-        from ..base_models.esmc_sae import build_esmc_sae_model
+    from ..base_models.esmc_sae import build_esmc_sae_model
 
     # build_esmc_sae_model returns the pooling wrapper. The packaged model does its own
     # pooling, so it wants the ESM++ model underneath, with the codebook already attached.
@@ -124,8 +113,8 @@ def _standalone_packaged_module_source(source: str) -> str:
 
     Transformers loads a trust_remote_code module as a top-level module in its dynamic
     module cache, where a relative import has no parent package to resolve against and
-    surfaces as a missing sibling file rather than as an import error. The protify package
-    copied alongside it supplies the absolute paths.
+    surfaces as a missing sibling file rather than as an import error. The installed protify
+    package supplies the absolute paths.
 
     Parent imports are rewritten first, so the sibling pattern cannot match the leading
     dot of a `..` import that is already handled.
@@ -138,55 +127,13 @@ def _standalone_packaged_module_source(source: str) -> str:
     )
 
 
-def _copy_runtime_code(export_dir: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[3]
-    src_package_dir = repo_root / "src" / "protify"
-    dst_package_dir = export_dir / "protify"
-    excluded_directories = {
-        ".cache",
-        "__pycache__",
-        "benchmarks",
-        "fastplms",
-        "logs",
-        "scripts",
-        "testing_suite",
-    }
-
-    for src_file in src_package_dir.rglob("*.py"):
-        relative_path = src_file.relative_to(src_package_dir)
-        if any(part in excluded_directories for part in relative_path.parts[:-1]):
-            continue
-        if not src_file.is_file():
-            continue
-        dst_file = dst_package_dir / relative_path
-        dst_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_file, dst_file)
-
-    # SAE pooling is foundry.embedding's arithmetic, and interpnet's feed-forward block is
-    # foundry.layers'. Both ship beside protify, so an exported probe pools and runs exactly as
-    # training did without the source tree. Only these two ship, so `foundry/__init__.py` is
-    # written rather than copied.
-    for foundry_module in (foundry.embedding, foundry.layers):
-        module_dir = Path(foundry_module.__file__).parent
-        dst_module_dir = export_dir / "foundry" / module_dir.name
-        dst_module_dir.mkdir(parents=True, exist_ok=True)
-        for src_file in module_dir.glob("*.py"):
-            shutil.copy2(src_file, dst_module_dir / src_file.name)
-    (export_dir / "foundry" / "__init__.py").write_text('"""foundry"""\n', encoding="utf-8")
-
-    # model_components imports its attention, rotary tables, and transformer stack from the
-    # interpnet family, so the family's modules ship beside protify as well.
-    interpnet_dir = Path(interpnet.__file__).parent
-    dst_interpnet_dir = export_dir / "interpnet"
-    dst_interpnet_dir.mkdir(parents=True, exist_ok=True)
-    for src_file in interpnet_dir.glob("*.py"):
-        shutil.copy2(src_file, dst_interpnet_dir / src_file.name)
-
+def _write_packaged_module(export_dir: Path) -> None:
+    """Write the module `trust_remote_code` loads, its imports made absolute on the installed `protify`."""
     packaged_model_file = Path(__file__).with_name("packaged_probe_model.py")
     standalone_source = _standalone_packaged_module_source(
         packaged_model_file.read_text(encoding="utf-8")
     )
-    (export_dir / "packaged_probe_model.py").write_text(standalone_source, encoding="utf-8")
+    (export_dir / "packaged_probe_model.py").write_text(standalone_source, encoding="utf-8", newline="\n")
 
 
 def _build_packaged_model(
@@ -198,6 +145,7 @@ def _build_packaged_model(
     ppi: bool,
     pair_feature_mode: str,
     feature_selection: Any = None,
+    embedding_standardizer: EmbeddingStandardizer | None = None,
 ) -> PackagedProbeModel:
     if isinstance(trained_model, HybridProbe):
         base_model = trained_model.model
@@ -234,12 +182,21 @@ def _build_packaged_model(
             None if feature_selection is None else [int(i) for i in feature_selection.indices]
         ),
         "feature_input_size": None if feature_selection is None else feature_selection.input_size,
+        # The probe trained on standardized inputs, so the packaged model standardizes with the
+        # training split's statistics, held as buffers in the checkpoint.
+        "standardized_width": None if embedding_standardizer is None else int(embedding_standardizer.mean.shape[0]),
+        "protify_version": PROTIFY_VERSION,
     }
     # The SAE fields redirect base_model_name from the SAE variant to the ESM++ backbone
     # the codebook reads from, so they replace that entry rather than sitting beside it.
     config_fields.update(sae_fields)
     packaged_config = PackagedProbeConfig(**config_fields)
-    packaged_model = PackagedProbeModel(config=packaged_config, base_model=base_model, probe=probe_model)
+    packaged_model = PackagedProbeModel(
+        config=packaged_config,
+        base_model=base_model,
+        probe=probe_model,
+        standardizer=None if embedding_standardizer is None else (embedding_standardizer.mean, embedding_standardizer.scale),
+    )
     return packaged_model.cpu()
 
 
@@ -254,9 +211,10 @@ def export_packaged_model_to_hub(
     ppi: bool = False,
     pair_feature_mode: str = DEFAULT_PAIR_FEATURE_MODE,
     private: bool = True,
-    hf_token: str | None = None,
     feature_selection: Any = None,
+    embedding_standardizer: EmbeddingStandardizer | None = None,
 ) -> tuple[bool, str]:
+    """Build the packaged model and upload it; Hugging Face reads `HF_TOKEN` or the stored login."""
     if not _is_supported_base_model(source_model_name):
         return False, f"Packaged export is not supported for base model: {source_model_name}"
 
@@ -269,6 +227,7 @@ def export_packaged_model_to_hub(
         ppi=ppi,
         pair_feature_mode=pair_feature_mode,
         feature_selection=feature_selection,
+        embedding_standardizer=embedding_standardizer,
     )
 
     with tempfile.TemporaryDirectory(prefix="protify_packaged_model_") as temp_dir:
@@ -284,14 +243,11 @@ def export_packaged_model_to_hub(
         packaged_model.config.architectures = ["PackagedProbeModel"]
         packaged_model.save_pretrained(str(export_dir), safe_serialization=True)
         tokenizer.save_pretrained(str(export_dir))
-        _copy_runtime_code(export_dir)
+        _write_packaged_module(export_dir)
         readme_path = export_dir / "README.md"
         readme_path.write_text(model_card, encoding="utf-8")
 
-        if hf_token is None:
-            api = HfApi()
-        else:
-            api = HfApi(token=hf_token)
+        api = HfApi()
         api.create_repo(repo_id=repo_id, repo_type="model", private=private, exist_ok=True)
         api.upload_folder(
             repo_id=repo_id,

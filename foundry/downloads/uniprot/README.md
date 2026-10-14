@@ -24,6 +24,12 @@ differed only in imports and synth's public name for `request_with_retry`, and f
 names from here. Atlas's `utils/uniprot_proteome.py`, a different proteome fetcher with one
 consumer, stays in Atlas.
 
+FASTA downloads use the shared HTTPS downloader. They resume partial transfers within
+one source's retries, validate the staged FASTA, then replace the destination. Failed
+downloads leave an existing destination untouched. Each fallback source has a separate
+staging directory; partial bytes are removed when its retries finish, so later sources
+and later calls start independently.
+
 ## Known issues
 
 These are behaviors every copy had, kept as they were.

@@ -3,28 +3,8 @@ import pandas as pd
 
 from typing import Any
 from sklearn.model_selection import RandomizedSearchCV
-
-
-try:
-    from metrics import (
-        get_regression_scorer, get_classification_scorer,
-        classification_scorer, regression_scorer,
-        compute_single_label_classification_metrics,
-        compute_regression_metrics,
-    )
-    from console_output import print_message
-    from seed_utils import get_global_seed
-except ImportError:
-    from ..metrics import (
-        get_regression_scorer, get_classification_scorer,
-        classification_scorer, regression_scorer,
-        compute_single_label_classification_metrics,
-        compute_regression_metrics,
-    )
-    from ..console_output import print_message
-    from ..seed_utils import get_global_seed
-
 from transformers import EvalPrediction
+
 from .lazy_predict import (
     LazyRegressor,
     LazyClassifier,
@@ -33,6 +13,14 @@ from .lazy_predict import (
     ALL_MODEL_DICT
 )
 from .scikit_hypers import HYPERPARAMETER_DISTRIBUTIONS
+from ..console_output import print_message
+from ..metrics import (
+    get_regression_scorer, get_classification_scorer,
+    classification_scorer, regression_scorer,
+    compute_single_label_classification_metrics,
+    compute_regression_metrics,
+)
+from ..seed_utils import get_global_seed
 
 
 class ScikitArguments:

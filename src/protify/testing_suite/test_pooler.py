@@ -1,14 +1,7 @@
 import pytest
 import torch
 
-
-try:
-    from src.protify.pooler import Pooler
-except ImportError:
-    try:
-        from protify.pooler import Pooler
-    except ImportError:
-        from ..pooler import Pooler
+from protify.pooler import Pooler
 
 
 batch_size = 2  # b

@@ -345,10 +345,7 @@ class LegacyConversion:
 
 
 def _feature_cache() -> Any:
-    try:
-        import feature_cache
-    except ImportError:
-        from . import feature_cache
+    from . import feature_cache
     return feature_cache
 
 
@@ -411,7 +408,8 @@ def convert_legacy_cache(
     else:
         target = cache.narrowest_holding(source, requested)
         spec = cache.embedding_feature({**descriptor, "dtype": target}, layout=layout, width=width)
-    store = FeatureStore.open(cache.feature_directory(root, spec.descriptor).parent, spec)
+    # Commits stay cheap as the store grows; convert_rows reads every row back, which verifies its part.
+    store = FeatureStore.open(cache.feature_directory(root, spec.descriptor).parent, spec, deep_verify=False)
 
     only = None
     if skip_existing:

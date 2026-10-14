@@ -7,27 +7,15 @@ import torch
 from dataclasses import replace
 from scipy import sparse
 
-
-try:
-    from src.protify.probes.feature_path_selector import (
-        FeaturePathConfig,
-        FeatureSelection,
-        _candidate_widths,
-        _feature_support,
-        _nearest_power_of_two,
-        fit_feature_path_selection,
-        path_importance,
-    )
-except ImportError:
-    from protify.probes.feature_path_selector import (
-        FeaturePathConfig,
-        FeatureSelection,
-        _candidate_widths,
-        _feature_support,
-        _nearest_power_of_two,
-        fit_feature_path_selection,
-        path_importance,
-    )
+from protify.probes.feature_path_selector import (
+    FeaturePathConfig,
+    FeatureSelection,
+    _candidate_widths,
+    _feature_support,
+    _nearest_power_of_two,
+    fit_feature_path_selection,
+    path_importance,
+)
 
 
 # Small enough to run on CPU in a few seconds, wide enough that a selection is a real

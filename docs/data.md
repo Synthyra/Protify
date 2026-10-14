@@ -57,8 +57,8 @@ Only one of the translation flags may be True. Setting `data_names[0]` to `stand
 To list datasets and get info from the CLI:
 
 ```bash
-py -m src.protify.data.dataset_utils --list
-py -m src.protify.data.dataset_utils --info EC
+python -m protify.data.dataset_utils --list
+python -m protify.data.dataset_utils --info EC
 ```
 
 See [Resource listing](resource_listing.md) for programmatic access and combined model/dataset listing.
@@ -96,7 +96,7 @@ Tabular files are read with pandas (`read_csv` or `read_excel` by extension) and
 
 A dataset without a validation or test split first has one carved from train with the global seed (42 when none is set), so for that dataset the kept rows also follow the global seed.
 
-Each capped split prints one line, `<dataset> <split>: capped <before> rows to <after> (split_row_cap_seed <seed>)`. `main.py`, [precompute_sae_and_dense.py](models_and_embeddings.md#filling-many-caches-from-one-pass), and `python -m protify.uncertainty` (through `protify_args`) all read data through `DataMixin`, so the same caps give each of them the same rows, and a precompute run with the training runs' caps fills exactly the sequences they read.
+Each capped split prints one line, `<dataset> <split>: capped <before> rows to <after> (split_row_cap_seed <seed>)`. `main.py` and any other code that reads data through `DataMixin` get the same rows from the same caps, so a run that fills caches with the training runs' caps fills exactly the sequences they read.
 
 ---
 
@@ -144,7 +144,7 @@ data_names: [standard_benchmark]
 ### Local directory
 
 ```bash
-py -m src.protify.main --data_dirs path/to/my_data --delimiter "," --model_names ESM2-8 --data_names []
+python -m protify.main --data_dirs path/to/my_data --delimiter "," --model_names ESM2-8 --data_names []
 ```
 
 Ensure `path/to/my_data` contains `train.csv` and at least one valid/test split such as `validation.csv` or `testing.tsv`.

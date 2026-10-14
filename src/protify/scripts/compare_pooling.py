@@ -8,11 +8,11 @@ so compare it on single-type tokens only. Dashes concatenate:
     max        -> --embedding_pooling_types max
     cls        -> --embedding_pooling_types cls
 
-One docker invocation of `py -m main` per pooling configuration; main.py grids
+One docker invocation of `python -m protify.main` per pooling configuration; main.py grids
 models x datasets internally. Results TSVs and logs are collected, aggregated
 into a long-form DataFrame, and rendered as bar/heatmap/rank plots.
 
-Any flags not recognized by this script are forwarded verbatim to `py -m main`,
+Any flags not recognized by this script are forwarded verbatim to `python -m protify.main`,
 so you can set --probe_type, --hybrid_probe, --lr, --trainer, --token_probe, etc.
 
 Example (run from repo root):
@@ -48,7 +48,7 @@ LOGS_DIR = PROTIFY_DIR / 'logs'
 PLOTS_DIR = REPO_ROOT / 'plots'
 
 sys.path.insert(0, str(PROTIFY_DIR))
-from visualization.plot_labels import MODEL_NAMES, DATASET_NAMES, CLS_PREFS, REG_PREFS
+from ..visualization.plot_labels import MODEL_NAMES, DATASET_NAMES, CLS_PREFS, REG_PREFS
 
 
 def _timestamp() -> str:
@@ -67,7 +67,7 @@ def detect_docker() -> list[str]:
 
 def build_docker_prefix(image: str) -> list[str]:
     cmd = detect_docker() + ['run', '--rm', '--gpus', 'all']
-    cmd += ['-v', f'{REPO_ROOT}:/workspace', '-w', '/workspace/src/protify', image, 'python', '-m', 'main']
+    cmd += ['-v', f'{REPO_ROOT}:/workspace', '-w', '/workspace/src/protify', image, 'python', '-m', 'protify.main']
     return cmd
 
 
@@ -258,7 +258,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='Unrecognized flags are forwarded verbatim to `py -m main` '
+        epilog='Unrecognized flags are forwarded verbatim to `python -m protify.main` '
                '(e.g. --probe_type transformer --hybrid_probe --lr 1e-4 --trainer hf).',
     )
     parser.add_argument('--model_names', nargs='+', required=True)
@@ -280,7 +280,7 @@ def main() -> None:
         manifest = json.loads(Path(args.manifest).read_text())
     else:
         if passthrough:
-            print(f'[info] forwarding to py -m main: {passthrough}')
+            print(f'[info] forwarding to python -m protify.main: {passthrough}')
         prefix = build_docker_prefix(args.image)
         manifest = []
         for spec in args.pooling_types:

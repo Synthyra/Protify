@@ -12,13 +12,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from torch import Tensor
 
-
-try:
-    from feature_cache import row_lookup
-    from legacy_cache import cached_rows as legacy_rows
-except ImportError:
-    from ..feature_cache import row_lookup
-    from ..legacy_cache import cached_rows as legacy_rows
+from ..feature_cache import row_lookup
+from ..legacy_cache import cached_rows as legacy_rows
 
 
 @contextmanager

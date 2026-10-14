@@ -14,11 +14,8 @@ from pathlib import Path
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
 
-
-try:
-    from visualization.plot_labels import CLS_PREFS, DATASET_NAMES, MODEL_NAMES, REG_PREFS
-except ImportError:
-    from .plot_labels import CLS_PREFS, DATASET_NAMES, MODEL_NAMES, REG_PREFS
+from .plot_labels import CLS_PREFS, DATASET_NAMES, MODEL_NAMES, REG_PREFS
+from ..metrics import UNDEFINED_METRIC
 
 
 def is_regression(metrics: dict[str, float]) -> bool:
@@ -51,19 +48,24 @@ def pick_metric(metrics: dict[str, float], prefs: list[tuple[str, str]]) -> tupl
 def parse_metric_value(value: object) -> tuple[float, float]:
     """
     Parse a metric value that may be in 'mean±std' format or a plain number.
-    Returns (mean, std) where std is 0.0 if not present.
+    Returns (mean, std) where std is 0.0 if not present. A metric the rows could not define is
+    NaN, so it leaves a gap in a plot instead of entering its averages as -100.
     """
     if isinstance(value, str) and '±' in value:
         parts = value.split('±')
         try:
             mean_val = float(parts[0])
             std_val = float(parts[1]) if len(parts) > 1 else 0.0
-            return mean_val, std_val
         except ValueError:
             return math.nan, 0.0
     elif isinstance(value, (int, float)):
-        return float(value), 0.0
-    return math.nan, 0.0
+        mean_val, std_val = float(value), 0.0
+    else:
+        return math.nan, 0.0
+
+    if mean_val == UNDEFINED_METRIC:
+        return math.nan, 0.0
+    return mean_val, std_val
 
 
 def get_metric_value(metrics: dict[str, float], key_suffix: str) -> float:

@@ -1,18 +1,9 @@
-import json
 import pytest
 
 from types import SimpleNamespace
 
-from protify.probes.training_recipe import resolved_training_recipe, validate_training_receipt
-
-
-try:
-    from src.protify.probes.trainers import TrainerArguments
-except ImportError:
-    try:
-        from protify.probes.trainers import TrainerArguments
-    except ImportError:
-        from ..probes.trainers import TrainerArguments
+from protify.probes.fit_hooks import FitHooks
+from protify.probes.trainers import TrainerArguments
 
 
 def test_trainer_arguments_phase_lrs_scheduler_and_optimizer(tmp_path) -> None:
@@ -53,7 +44,7 @@ def test_trainer_arguments_phase_lrs_fall_back_to_shared_lr(tmp_path) -> None:
     assert args(probe=False).learning_rate == pytest.approx(7e-5)
 
 
-def test_probe_recipe_controls_are_effective_and_do_not_change_base_phase(tmp_path):
+def test_probe_controls_are_effective_and_do_not_change_base_phase(tmp_path):
     arguments = TrainerArguments(
         model_save_dir=str(tmp_path), torch_compile=False, probe_max_steps=9,
         probe_warmup_steps=2, probe_max_grad_norm=0.25, probe_eval_strategy="steps", probe_eval_steps=3,
@@ -64,19 +55,6 @@ def test_probe_recipe_controls_are_effective_and_do_not_change_base_phase(tmp_pa
     assert (base.max_steps, base.warmup_steps, base.max_grad_norm) == (-1, 1000, 1.0)
     assert (probe.adam_beta2, probe.eval_accumulation_steps) == (0.98, 7)
     assert arguments.early_stopping()["early_stopping_threshold"] == 0.02
-    probe.hub_token = "must-not-appear"
-    recipe = resolved_training_recipe(probe, SimpleNamespace(task_type="regression", dropout=0.1), arguments.early_stopping(), None)
-    assert "must-not-appear" not in json.dumps(recipe)
-    assert recipe["training_arguments"]["max_grad_norm"] == 0.25
-    assert recipe["early_stopping"]["early_stopping_threshold"] == 0.02
-    receipt = {"seed": 42, "recipe": recipe, "outcome": {
-        "global_step": 9, "epoch": 3.0, "planned_optimizer_steps": 9, "best_step": 6,
-        "best_checkpoint": "checkpoint-6", "best_metric": 0.2, "restored_best_weights": True,
-    }}
-    validate_training_receipt(recipe, receipt, 42)
-    receipt["outcome"]["best_step"] = 10
-    with pytest.raises(ValueError, match="steps are inconsistent"):
-        validate_training_receipt(recipe, receipt, 42)
 
 
 @pytest.mark.parametrize("setting,value", [
@@ -91,10 +69,14 @@ def test_invalid_recipe_controls_fail_before_training(tmp_path, setting, value):
         arguments()
 
 
-def test_auto_validation_cadence_uses_cluster_draws_and_observed_loss(tmp_path):
+def test_auto_validation_cadence_uses_the_hooks_draws_and_observed_loss(tmp_path):
+    class ManyDraws(FitHooks):
+        def draws_per_epoch(self, train_dataset):
+            return 300000
+
     class Rows:
         label_masks = [True] * 10
-        sampling_plan = SimpleNamespace(draws_per_epoch=300000)
+        fit_hooks = ManyDraws()
 
         def __len__(self):
             return 10
@@ -105,7 +87,7 @@ def test_auto_validation_cadence_uses_cluster_draws_and_observed_loss(tmp_path):
     assert effective.eval_steps == effective.save_steps == 781
     assert effective.metric_for_best_model == "eval_observed_loss"
     assert effective.label_names == ["labels", "label_mask"]
-    Rows.sampling_plan = None
+    Rows.fit_hooks = None  # the default hooks read the split once per epoch
     assert arguments.for_datasets(SimpleNamespace(num_labels=1), Rows(), Rows(), Rows()).eval_strategy.value == "epoch"
 
 

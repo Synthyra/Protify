@@ -8,25 +8,14 @@ rather than the fit; `test_feature_path_selector.py` covers the fit.
 import numpy as np
 import torch
 
-
-try:
-    from src.protify.data.dataset_classes import (
-        EmbeddingStandardizer,
-        EmbedsLabelsDataset,
-        PairEmbedsLabelsDataset,
-        apply_embedding_transforms,
-    )
-    from src.protify.probes.feature_path_selector import FeatureSelection
-    from src.protify.testing_suite.embedding_store_builder import build_store_for
-except ImportError:
-    from protify.data.dataset_classes import (
-        EmbeddingStandardizer,
-        EmbedsLabelsDataset,
-        PairEmbedsLabelsDataset,
-        apply_embedding_transforms,
-    )
-    from protify.probes.feature_path_selector import FeatureSelection
-    from protify.testing_suite.embedding_store_builder import build_store_for
+from protify.data.dataset_classes import (
+    EmbeddingStandardizer,
+    EmbedsLabelsDataset,
+    PairEmbedsLabelsDataset,
+    apply_embedding_transforms,
+)
+from protify.probes.feature_path_selector import FeatureSelection
+from protify.testing_suite.embedding_store_builder import build_store_for
 
 
 SEQ_A = "AAAA"
@@ -141,12 +130,8 @@ def test_a_pair_dataset_applies_the_selection_without_a_standardizer():
 
 def test_the_scikit_builder_narrows_rows_as_it_reads_them(tmp_path):
     """The estimator path must never materialize the full width, only the selected one."""
-    try:
-        from src.protify.data.data_mixin import DataMixin
-        from src.protify.embedder import EmbeddingArguments
-    except ImportError:
-        from protify.data.data_mixin import DataMixin
-        from protify.embedder import EmbeddingArguments
+    from protify.data.data_mixin import DataMixin
+    from protify.embedder import EmbeddingArguments
 
     embeddings = {SEQ_A: torch.tensor([1.0, 2.0, 3.0, 4.0]), SEQ_B: torch.tensor([5.0, 6.0, 7.0, 8.0])}
     embedding_args = EmbeddingArguments(
@@ -172,12 +157,8 @@ def test_the_scikit_builder_narrows_rows_as_it_reads_them(tmp_path):
 
 
 def test_the_scikit_builder_is_unchanged_without_a_selection(tmp_path):
-    try:
-        from src.protify.data.data_mixin import DataMixin
-        from src.protify.embedder import EmbeddingArguments
-    except ImportError:
-        from protify.data.data_mixin import DataMixin
-        from protify.embedder import EmbeddingArguments
+    from protify.data.data_mixin import DataMixin
+    from protify.embedder import EmbeddingArguments
 
     embeddings = {SEQ_A: torch.tensor([1.0, 2.0, 3.0, 4.0])}
     embedding_args = EmbeddingArguments(

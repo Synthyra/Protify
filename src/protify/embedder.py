@@ -1,7 +1,8 @@
-try:
-    from . import entrypoint_setup  # noqa: unused-import imported for its environment setup
-except ImportError:
-    import entrypoint_setup  # noqa: unused-import imported for its environment setup
+from . import entrypoint_setup
+
+
+# Hugging Face reads its settings when it loads, so they are set before anything below imports it.
+entrypoint_setup.configure_process()
 
 import os
 import math
@@ -18,28 +19,16 @@ from typing import Any
 from collections.abc import Callable, Iterator, Sequence
 from huggingface_hub import hf_hub_download
 
-try:
-    from seed_utils import seed_worker, dataloader_generator, get_global_seed
-    from data.dataset_classes import SimpleProteinDataset
-    from base_models.get_base_models import get_base_model
-    from pooler import Pooler
-    from console_output import print_message
-    from feature_cache import (
-        CacheWriter, carbon_cache_identity, embedding_descriptor, embedding_layout, has_feature,
-        is_generated_model, legacy_conversion_refusal, locate_feature, missing_sequences, read_embeddings,
-    )
-    from legacy_cache import convert_legacy_cache
-except ImportError:
-    from .seed_utils import seed_worker, dataloader_generator, get_global_seed
-    from .data.dataset_classes import SimpleProteinDataset
-    from .base_models.get_base_models import get_base_model
-    from .pooler import Pooler
-    from .console_output import print_message
-    from .feature_cache import (
-        CacheWriter, carbon_cache_identity, embedding_descriptor, embedding_layout, has_feature,
-        is_generated_model, legacy_conversion_refusal, locate_feature, missing_sequences, read_embeddings,
-    )
-    from .legacy_cache import convert_legacy_cache
+from .seed_utils import seed_worker, dataloader_generator, get_global_seed
+from .data.dataset_classes import SimpleProteinDataset
+from .base_models.get_base_models import get_base_model
+from .pooler import Pooler
+from .console_output import print_message
+from .feature_cache import (
+    CacheWriter, carbon_cache_identity, embedding_descriptor, embedding_layout, has_feature,
+    is_generated_model, legacy_conversion_refusal, locate_feature, missing_sequences, read_embeddings,
+)
+from .legacy_cache import convert_legacy_cache
 
 
 # Truncation limit every embedding in the download repository was produced under, and the
@@ -820,10 +809,10 @@ if __name__ == '__main__':
     import argparse
     import tempfile
     from huggingface_hub import upload_file
-    from data.supported_datasets import vector_benchmark
-    from data.data_mixin import DataArguments, DataMixin
-    from base_models.get_base_models import BaseModelArguments, get_base_model
-    from seed_utils import set_global_seed
+    from .data.supported_datasets import vector_benchmark
+    from .data.data_mixin import DataArguments, DataMixin
+    from .base_models.get_base_models import BaseModelArguments, get_base_model
+    from .seed_utils import set_global_seed
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--batch_size', type=int, default=16)

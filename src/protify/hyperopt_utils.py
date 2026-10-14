@@ -10,27 +10,20 @@ import yaml
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-
-try:
-    from console_output import print_message
-    from embedder import Embedder
-    from feature_cache import has_feature
-    from base_models.get_base_models import get_tokenizer
-except ImportError:
-    from protify.console_output import print_message
-    from protify.embedder import Embedder
-    from protify.feature_cache import has_feature
-    from protify.base_models.get_base_models import get_tokenizer
+from .base_models.get_base_models import get_tokenizer
+from .console_output import print_message
+from .embedder import Embedder
+from .feature_cache import has_feature
 # Imported through the package path, not bare. A bare `probes.*` import would load a
 # second copy of every probe module under a different identity, and isinstance checks
 # against the package-path classes would then silently fail.
-from protify.probes.estimator_probe import is_estimator_probe
-from protify.probes.get_probe import normalize_probe_type
-from protify.run_tracking import curves_closed, job_summary, open_job, training_job
+from .probes.estimator_probe import is_estimator_probe
+from .probes.get_probe import normalize_probe_type
+from .run_tracking import curves_closed, job_summary, open_job, training_job
 
 
 if TYPE_CHECKING:
-    from protify.main import MainProcess  # main imports this module, so only the type checker reads main
+    from .main import MainProcess  # main imports this module, so only the type checker reads main
 
 
 # How a sweep's `method` searches, as Optuna samplers; a grid needs every parameter to list its values.

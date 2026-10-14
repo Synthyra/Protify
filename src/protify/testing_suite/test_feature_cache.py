@@ -14,58 +14,53 @@ import torch
 from pathlib import Path
 
 from fastplms.features import CSR, DENSE, RAGGED, FeatureStore
-
-
-try:
-    from src.protify import feature_cache
-    from src.protify.testing_suite.embedding_store_builder import build_store, cache_descriptor, write_store
-    from src.protify.testing_suite.legacy_cache_writer import write_sqlite_cache
-except ImportError:
-    from protify import feature_cache
-    from protify.testing_suite.embedding_store_builder import build_store, cache_descriptor, write_store
-    from protify.testing_suite.legacy_cache_writer import write_sqlite_cache
+from protify import feature_cache
+from protify.testing_suite.embedding_store_builder import build_store, cache_descriptor, write_store
+from protify.testing_suite.legacy_cache_writer import write_sqlite_cache
 
 
 SEQUENCES = ["MKTAYIAKQR", "MKTAYIAKQRQISFVKSHFSRQ", "GGGGSGGGGS", "ACDEFGHIKL", "WWWWWWWWWWWWWW"]
 SPARSE_SAE = "ESMC-300-SAE-l23-k16-c8192"  # k / codebook_dim = 0.002, stored as coordinates
 
 
-def test_explicit_family_roots_route_reads_and_writes_without_changing_keys(monkeypatch, tmp_path):
+def test_routed_roots_take_reads_and_writes_without_changing_keys(monkeypatch, tmp_path):
     logical = tmp_path / "logical"
-    families = {name: str(tmp_path / name) for name in ("esmc_300", "esmc_600", "esmc_6b", "controls")}
-    routing = {"logical_root": str(logical), "families": families}
+    routes = {prefix: str(tmp_path / prefix) for prefix in ("ESMC-600", "ESMC-600-SAE", "ESMC-6B", "Random-Transformer")}
     descriptor = cache_descriptor("ESMC-600", pooling=("mean",), dtype="float32")
     key = feature_cache.feature_key(descriptor)
-    monkeypatch.setenv("PROTIFY_FEATURE_ROOTS", json.dumps(routing))
+    monkeypatch.setenv(feature_cache.FEATURE_ROUTES_VARIABLE, json.dumps({"logical_root": str(logical), "routes": routes}))
     rows = vectors(count=2, width=3)  # sequence -> (width,) float32
     with feature_cache.CacheWriter(logical, descriptor, layout=DENSE) as writer:
         writer.add(list(rows), list(rows.values()))
-    target = Path(families["esmc_600"]) / key
+    target = Path(routes["ESMC-600"]) / key
     assert target.is_dir() and not logical.exists()
     assert feature_cache.locate_feature(logical, descriptor) == target
     recovered = feature_cache.read_embeddings(target, rows)
     assert all(raw(recovered[sequence]) == raw(row) for sequence, row in rows.items())
     assert feature_cache.feature_key(descriptor) == key
-    for model, family in (("ESMC-300", "esmc_300"), ("ESMC-600-SAE-l27-k64-c16384", "esmc_600"),
-                          ("ESMC-6B", "esmc_6b"), ("Random-Transformer", "controls")):
+    # A prefix routes the names that extend it after a '-', and the longest matching prefix wins.
+    for model, prefix in (("ESMC-600-SAE-l27-k64-c16384", "ESMC-600-SAE"), ("ESMC-6B", "ESMC-6B"),
+                          ("ESMC-6B-SAE-l60-k16-c131072", "ESMC-6B"), ("Random-Transformer", "Random-Transformer")):
         request = cache_descriptor(model, pooling=("mean",))
-        assert feature_cache.feature_directory(logical, request).parent == Path(families[family])
-    # The two generated controls have no store, so no family root: their virtual directory stays under the logical root.
+        assert feature_cache.feature_directory(logical, request).parent == Path(routes[prefix])
+    # The two generated controls have no store, so no route: their virtual directory stays under the logical root.
     for model in ("Random", "OneHot-Protein"):
         generated = feature_cache.feature_directory(logical, cache_descriptor(model, pooling=("mean",)))
         assert generated.parent == logical and feature_cache.parse_generated(generated) is not None
     other = tmp_path / "other"
     assert feature_cache.feature_directory(other, descriptor) == other / key
-    with pytest.raises(ValueError, match="No family embedding storage"):
-        feature_cache.feature_directory(logical, cache_descriptor("ESM2-8"))
+    # A name a prefix only starts, without the '-', is not routed by it.
+    for unrouted in ("ESM2-8", "ESMC-6000", "ESMC-300"):
+        with pytest.raises(ValueError, match="names no route"):
+            feature_cache.feature_directory(logical, cache_descriptor(unrouted))
 
 
-def test_downloaded_legacy_conversion_also_writes_the_explicit_family_root(monkeypatch, tmp_path):
+def test_downloaded_legacy_conversion_also_writes_the_routed_root(monkeypatch, tmp_path):
     from protify.legacy_cache import convert_legacy_cache
 
     logical, target = tmp_path / "logical", tmp_path / "family"
-    monkeypatch.setenv("PROTIFY_FEATURE_ROOTS", json.dumps({
-        "logical_root": str(logical), "families": {"esmc_600": str(target)},
+    monkeypatch.setenv(feature_cache.FEATURE_ROUTES_VARIABLE, json.dumps({
+        "logical_root": str(logical), "routes": {"ESMC-600": str(target)},
     }))
     descriptor = cache_descriptor("ESMC-600", pooling=("mean",), dtype="float32")
     rows = vectors(count=2, width=3)  # sequence -> (width,) float32
@@ -215,6 +210,24 @@ def test_a_writer_commits_one_segment_per_full_window(tmp_path):
     assert len(store.segments()) == 3
     assert store.missing(list(rows)) == ()
     assert feature_cache.missing_sequences(writer.directory, [*rows, "AAAA"]) == ("AAAA",)
+
+
+def test_a_writer_commits_without_rehashing_the_store(tmp_path, monkeypatch):
+    """Deep verification re-reads every committed part on each commit; a writer's cost must not grow with its store."""
+    opened = []
+    real_open = FeatureStore.open.__func__
+
+    def recording_open(cls, root, spec, **options):
+        opened.append(options)
+        return real_open(cls, root, spec, **options)
+
+    monkeypatch.setattr(FeatureStore, "open", classmethod(recording_open))
+    rows = vectors()
+    with feature_cache.CacheWriter(tmp_path, cache_descriptor(), layout=DENSE, window_rows=2) as writer:
+        writer.add(list(rows), list(rows.values()))
+
+    assert opened and all(options.get("deep_verify") is False for options in opened)
+    assert torch.equal(feature_cache.read_embeddings(writer.directory, [SEQUENCES[0]])[SEQUENCES[0]], rows[SEQUENCES[0]].float())
 
 
 def test_a_run_that_raises_keeps_its_committed_windows_and_drops_the_open_one(tmp_path):

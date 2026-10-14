@@ -25,11 +25,7 @@ from collections.abc import Iterable
 from itertools import chain, islice
 from scipy import sparse
 
-
-try:
-    from console_output import print_message
-except ImportError:
-    from ..console_output import print_message
+from ..console_output import print_message
 
 
 FeatureMatrix = np.ndarray | sparse.csr_matrix

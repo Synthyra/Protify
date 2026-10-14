@@ -21,7 +21,7 @@ def train(config: Config, *, run: Run) -> dict[str, float]:
     return {"test/auroc": auroc}
 ```
 
-What it does for you: loads the secrets file when the W&B key is missing, seeds from `config.seed`,
+What it does for you: loads `WANDB_API_KEY` alone from the secrets file when it is missing, seeds from `config.seed`,
 pilots the first loop (`WS_PILOT=1` stops it after the timed window and makes no W&B run), and
 writes `cost/seconds`, `cost/peak_gpu_gib` and the pilot's `cost/step_seconds`,
 `cost/input_wait_share` and `cost/projected_hours` into the summary, outside the key budget.

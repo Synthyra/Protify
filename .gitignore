@@ -31,6 +31,7 @@ src/protify/results/*
 !yamls/vector_benchmark.yaml
 !src/protify/yamls/production_sae.yaml
 !src/protify/base_models/e1_tokenizer.json
+!src/protify/base_models/esmc_sae_revisions.json
 /prepared
 /raw
 /scripts

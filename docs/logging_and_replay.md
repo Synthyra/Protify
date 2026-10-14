@@ -78,7 +78,7 @@ When `args.replay_path` is set:
 ### Replay a prior session
 
 ```bash
-py -m src.protify.main --replay_path logs/2025-01-15-12-00_ABCD.txt
+python -m protify.main --replay_path logs/2025-01-15-12-00_ABCD.txt
 ```
 
 ### Where files go

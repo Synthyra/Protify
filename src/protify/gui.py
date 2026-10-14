@@ -1,11 +1,11 @@
-try:
-    from . import entrypoint_setup  # noqa: unused-import  its import sets the process environment
-except ImportError:
-    import entrypoint_setup  # noqa: unused-import  its import sets the process environment
+from . import entrypoint_setup
+
+
+# Hugging Face reads its settings when it loads, so they are set before anything below imports it.
+entrypoint_setup.configure_process()
 
 import os
 import tkinter as tk
-import argparse
 import base64
 import json
 import queue
@@ -13,30 +13,35 @@ import torch
 import traceback
 import webbrowser
 from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from tkinter import ttk, messagebox, filedialog
 from concurrent.futures import ThreadPoolExecutor
 
-from base_models.get_base_models import (
+from .base_models.get_base_models import (
     BaseModelArguments,
     resolve_data_max_length,
     standard_models,
 )
-from base_models.supported_models import gui_models
-from data.supported_datasets import supported_datasets, standard_data_benchmark, internal_datasets
-from embedder import EmbeddingArguments
-from probes.estimator_probe import is_estimator_probe
-from probes.get_probe import ProbeArguments
-from probes.trainers import TrainerArguments
-from main import MainProcess
-from data.data_mixin import DataArguments
-from cloud_backend import CloudBackend, get_or_create_cloud_backend
-from console_output import print_message, print_done, print_title
-from benchmarks.proteingym.dms_ids import expand_dms_ids_all
-from visualization.plot_result import create_plots
-from benchmarks.proteingym.compare_scoring_methods import compare_scoring_methods
-from hyperopt_utils import HyperoptModule
+from .base_models.supported_models import gui_models
+from .data.supported_datasets import supported_datasets, standard_data_benchmark, internal_datasets
+from .embedder import EmbeddingArguments
+from .probes.estimator_probe import is_estimator_probe
+from .probes.get_probe import ProbeArguments
+from .probes.trainers import TrainerArguments
+from .main import DEFAULT_SWEEP_METRIC_CLS, DEFAULT_SWEEP_METRIC_REG, MainProcess, build_parser
+from .data.data_mixin import DataArguments
+from .cloud_backend import CloudBackend, get_or_create_cloud_backend
+from .console_output import print_message, print_done, print_title
+from .benchmarks.proteingym.dms_ids import expand_dms_ids_all
+from .visualization.plot_result import create_plots
+from .benchmarks.proteingym.compare_scoring_methods import compare_scoring_methods
+from .hyperopt_utils import HyperoptModule
+
+
+# The logos ship inside the package, so the GUI finds them from any working directory.
+PACKAGE_DIRECTORY = Path(__file__).resolve().parent
 
 
 class BackgroundTask:
@@ -65,12 +70,14 @@ class BackgroundTask:
 
 class GUI(MainProcess):
     def __init__(self, master: tk.Tk) -> None:
-        super().__init__(argparse.Namespace(), GUI=True)  # Initialize MainProcess with empty namespace
+        # Every setting starts at its command-line default, so a run the GUI starts reads every
+        # argument the pipeline does, including those the GUI has no widget for.
+        super().__init__(build_parser().parse_args([]), GUI=True)
         self.master = master
         self.master.title("Settings GUI")
         self.master.geometry("600x800")
 
-        icon = tk.PhotoImage(file="protify_logo.png")
+        icon = tk.PhotoImage(file=str(PACKAGE_DIRECTORY / "protify_logo.png"))
         # Set the window icon
         self.master.iconphoto(True, icon)
 
@@ -260,7 +267,7 @@ class GUI(MainProcess):
         
         # Add logo and website link at the bottom of the info tab
         try:
-            original_logo = tk.PhotoImage(file="synthyra_logo.png")
+            original_logo = tk.PhotoImage(file=str(PACKAGE_DIRECTORY / "synthyra_logo.png"))
             # Make logo even smaller (subsample by factor of 3)
             logo = original_logo.subsample(3, 3)
             
@@ -830,12 +837,12 @@ class GUI(MainProcess):
         combo_sweep_method.grid(row=5, column=1, padx=10, pady=5, sticky="w")
 
         ttk.Label(self.wandb_tab, text="Sweep Metric (Classification):").grid(row=6, column=0, padx=10, pady=5, sticky="w")
-        self.settings_vars["sweep_metric_cls"] = tk.StringVar(value="eval_loss")
+        self.settings_vars["sweep_metric_cls"] = tk.StringVar(value=DEFAULT_SWEEP_METRIC_CLS)
         entry_sweep_metric_cls = ttk.Entry(self.wandb_tab, textvariable=self.settings_vars["sweep_metric_cls"], width=30)
         entry_sweep_metric_cls.grid(row=6, column=1, padx=10, pady=5, sticky="w")
 
         ttk.Label(self.wandb_tab, text="Sweep Metric (Regression):").grid(row=7, column=0, padx=10, pady=5, sticky="w")
-        self.settings_vars["sweep_metric_reg"] = tk.StringVar(value="eval_loss")
+        self.settings_vars["sweep_metric_reg"] = tk.StringVar(value=DEFAULT_SWEEP_METRIC_REG)
         entry_sweep_metric_reg = ttk.Entry(self.wandb_tab, textvariable=self.settings_vars["sweep_metric_reg"], width=30)
         entry_sweep_metric_reg.grid(row=7, column=1, padx=10, pady=5, sticky="w")
 
@@ -1140,8 +1147,8 @@ class GUI(MainProcess):
         self.full_args.sweep_config_path = self.settings_vars["sweep_config_path"].get().strip() or "yamls/sweep.yaml"
         self.full_args.sweep_count = self.settings_vars["sweep_count"].get()
         self.full_args.sweep_method = self.settings_vars["sweep_method"].get()
-        self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or "eval_loss"
-        self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or "eval_loss"
+        self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or DEFAULT_SWEEP_METRIC_CLS
+        self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or DEFAULT_SWEEP_METRIC_REG
         self.full_args.sweep_goal = self.settings_vars["sweep_goal"].get()
 
         args_dict = {k: v for k, v in self.full_args.__dict__.items() if k != 'all_seqs' and 'token' not in k.lower() and 'api' not in k.lower()}
@@ -1308,8 +1315,8 @@ class GUI(MainProcess):
             "sweep_config_path": self.settings_vars["sweep_config_path"].get().strip() or "yamls/sweep.yaml",
             "sweep_count": self.settings_vars["sweep_count"].get(),
             "sweep_method": self.settings_vars["sweep_method"].get(),
-            "sweep_metric_cls": self.settings_vars["sweep_metric_cls"].get().strip() or "eval_loss",
-            "sweep_metric_reg": self.settings_vars["sweep_metric_reg"].get().strip() or "eval_loss",
+            "sweep_metric_cls": self.settings_vars["sweep_metric_cls"].get().strip() or DEFAULT_SWEEP_METRIC_CLS,
+            "sweep_metric_reg": self.settings_vars["sweep_metric_reg"].get().strip() or DEFAULT_SWEEP_METRIC_REG,
             "sweep_goal": self.settings_vars["sweep_goal"].get(),
             "use_scikit": self.settings_vars["use_scikit"].get(),
             "scikit_n_iter": self.settings_vars["scikit_n_iter"].get(),
@@ -1499,7 +1506,7 @@ class GUI(MainProcess):
 
             # huggingface_hub and wandb read these variables whenever they need a credential.
             # Setting them for this process, rather than calling `login`, keeps a token typed
-            # into the GUI off disk; `hf auth login` and `wandb login` persist one on purpose.
+            # into the GUI off disk; `hf auth login` or a `.secrets.env` keeps one on purpose.
             if hf_token:
                 os.environ['HF_TOKEN'] = hf_token
                 print_message('Hugging Face token set for this session')
@@ -1524,8 +1531,8 @@ class GUI(MainProcess):
             self.full_args.sweep_config_path = self.settings_vars["sweep_config_path"].get().strip() or "yamls/sweep.yaml"
             self.full_args.sweep_count = self.settings_vars["sweep_count"].get()
             self.full_args.sweep_method = self.settings_vars["sweep_method"].get()
-            self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or "eval_loss"
-            self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or "eval_loss"
+            self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or DEFAULT_SWEEP_METRIC_CLS
+            self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or DEFAULT_SWEEP_METRIC_REG
             self.full_args.sweep_goal = self.settings_vars["sweep_goal"].get()
             self.full_args.score_only = self.settings_vars["score_only"].get()
             self.full_args.aa_to_dna = self.settings_vars["aa_to_dna"].get()
@@ -1645,8 +1652,8 @@ class GUI(MainProcess):
         self.full_args.sweep_config_path = self.settings_vars["sweep_config_path"].get().strip() or "yamls/sweep.yaml"
         self.full_args.sweep_count = self.settings_vars["sweep_count"].get()
         self.full_args.sweep_method = self.settings_vars["sweep_method"].get()
-        self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or "eval_loss"
-        self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or "eval_loss"
+        self.full_args.sweep_metric_cls = self.settings_vars["sweep_metric_cls"].get().strip() or DEFAULT_SWEEP_METRIC_CLS
+        self.full_args.sweep_metric_reg = self.settings_vars["sweep_metric_reg"].get().strip() or DEFAULT_SWEEP_METRIC_REG
         self.full_args.sweep_goal = self.settings_vars["sweep_goal"].get()
         self.full_args.use_xformers = self.settings_vars["use_xformers"].get()
         if self.full_args.use_xformers:
@@ -1966,7 +1973,7 @@ class GUI(MainProcess):
         print_message("Starting replay from log file...")
         
         def background_replay() -> None:
-            from logger import LogReplayer
+            from .logger import LogReplayer
             replayer = LogReplayer(replay_path)
             replay_args = replayer.parse_log()
             replay_args.replay_path = replay_path

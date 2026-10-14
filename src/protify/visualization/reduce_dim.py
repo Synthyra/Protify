@@ -11,19 +11,11 @@ from matplotlib.colors import LinearSegmentedColormap
 from sklearn.decomposition import PCA as SklearnPCA
 from sklearn.manifold import TSNE as SklearnTSNE
 
-
-try:
-    from console_output import print_message
-    from seed_utils import get_global_seed, set_global_seed, set_determinism
-    from data.data_mixin import DataMixin, DataArguments
-    from embedder import Embedder, EmbeddingArguments
-    from feature_cache import open_reader, require_feature
-except ImportError:
-    from ..console_output import print_message
-    from ..seed_utils import get_global_seed, set_global_seed, set_determinism
-    from ..data.data_mixin import DataMixin, DataArguments
-    from ..embedder import Embedder, EmbeddingArguments
-    from ..feature_cache import open_reader, require_feature
+from ..console_output import print_message
+from ..data.data_mixin import DataMixin, DataArguments
+from ..embedder import Embedder, EmbeddingArguments
+from ..feature_cache import open_reader, require_feature
+from ..seed_utils import get_global_seed, set_global_seed, set_determinism
 
 
 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"

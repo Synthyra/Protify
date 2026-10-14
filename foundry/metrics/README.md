@@ -34,6 +34,8 @@ In `foundry.metrics.binary`, exported by the package, NumPy only.
 |---|---|
 | `compute_metrics_from_counts(tp, fp, fn, tn)` | Precision, recall, accuracy, F1, and MCC of the positive class from a confusion matrix's counts, each 0.0 where its denominator is 0 |
 | `calculate_topk_metrics(labels, probs, k_values=(10, 100, 1000))` | For each `k`, the positive share of the `k` highest scores (`topk_pred_pos_acc_{k}`) and the negative share of the `k` lowest (`topk_pred_neg_acc_{k}`), rows with a non-finite label or score left out and `k` capped at the rows left |
+| `balanced_subsamples(labels, *, seed=0, subsamples=10)` | Index sets of class-balanced views, the majority class downsampled to the minority's size with Atlas's seeds `seed + 11 * (i + 1)`; a balanced input is its own single view |
+| `balanced_mcc(labels, scores, *, seed=0, subsamples=10)` | Balanced MCC: the MCC at the threshold that maximizes its mean over those views (score at or above predicts positive, ties to the lowest threshold), its standard deviation across views, and the threshold; counted from sorted scores, so millions of pairs are cheap. Atlas's threshold calibration and Atlas v3's pair metrics use it |
 
 Promoted from Atlas's `utils/metrics.py`, whose trainer reduces MCC from counts gathered across
 processes, and synth's `synth/utilities/metrics.py`, which held both token for token. Both import

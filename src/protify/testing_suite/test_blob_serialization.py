@@ -12,15 +12,9 @@ import numpy as np
 import pytest
 import torch
 
-
-try:
-    from src.protify import legacy_cache
-    from src.protify.legacy_cache import _COMPACT_VERSION, blob_dtype, embedding_blob_to_tensor
-    from src.protify.testing_suite.legacy_cache_writer import LEGACY_BFLOAT16_CODE, dense_blob
-except ImportError:
-    from protify import legacy_cache
-    from protify.legacy_cache import _COMPACT_VERSION, blob_dtype, embedding_blob_to_tensor
-    from protify.testing_suite.legacy_cache_writer import LEGACY_BFLOAT16_CODE, dense_blob
+from protify import legacy_cache
+from protify.legacy_cache import _COMPACT_VERSION, blob_dtype, embedding_blob_to_tensor
+from protify.testing_suite.legacy_cache_writer import LEGACY_BFLOAT16_CODE, dense_blob
 
 
 def test_roundtrip_float32() -> None:

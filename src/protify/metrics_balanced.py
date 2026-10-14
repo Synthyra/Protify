@@ -20,6 +20,8 @@ from scipy.ndimage import convolve1d, gaussian_filter1d
 from scipy.stats import pearsonr, spearmanr
 from sklearn import metrics
 
+from .metrics import UNDEFINED_METRIC
+
 
 SUPPORTED_METHODS = (
     'none',
@@ -286,15 +288,15 @@ def compute_balanced_regression_metrics(
         resampled_true = y_true[resample_indices]  # (n,)
         resampled_pred = y_pred[resample_indices]  # (n,)
         if np.std(resampled_true) == 0.0 or np.std(resampled_pred) == 0.0:
-            rhos.append(-100.0)
-            rs.append(-100.0)
+            # A constant resample has no correlation to average. Counting it as the sentinel
+            # once pulled the reported mean toward -100.
             continue
         with warnings.catch_warnings():
             warnings.simplefilter('ignore')
             rhos.append(float(spearmanr(resampled_true, resampled_pred)[0]))
             rs.append(float(pearsonr(resampled_true, resampled_pred)[0]))
 
-    rhos_arr = np.array(rhos)  # (r,); r = n_resamples
+    rhos_arr = np.array(rhos)  # (r,); r = resamples with a defined correlation
     rs_arr = np.array(rs)  # (r,)
 
     rmse = float(metrics.mean_squared_error(y_true, y_pred, sample_weight=weights)) ** 0.5
@@ -302,44 +304,39 @@ def compute_balanced_regression_metrics(
 
     y_true_b = np.digitize(y_true, bin_borders)  # (n,)
     y_pred_b = np.digitize(y_pred, bin_borders)  # (n,)
-
-    try:
-        mcc = float(metrics.matthews_corrcoef(y_true_b, y_pred_b, sample_weight=weights))
-    except Exception:  # noqa: broad-except -100.0 marks a metric that cannot be computed; sklearn raises several types for it
-        mcc = -100.0
+    mcc = float(metrics.matthews_corrcoef(y_true_b, y_pred_b, sample_weight=weights))
 
     f1_per_bin: list[float] = []
     auc_per_bin: list[float] = []
     for val in sorted(set(y_true_b.tolist())):
         yt_sel = (y_true_b == val).astype(int)  # (n,)
         yp_sel = (y_pred_b == val).astype(int)  # (n,)
-        try:
-            f1_per_bin.append(float(metrics.f1_score(yt_sel, yp_sel, sample_weight=weights)))
-        except Exception:  # noqa: broad-except -100.0 marks a metric that cannot be computed; sklearn raises several types for it
-            f1_per_bin.append(-100.0)
+        f1_per_bin.append(float(metrics.f1_score(yt_sel, yp_sel, sample_weight=weights, zero_division=0)))
         if len(np.unique(yt_sel)) < 2:
-            auc_per_bin.append(-100.0)
+            auc_per_bin.append(UNDEFINED_METRIC)
         else:
-            try:
-                auc_per_bin.append(float(metrics.roc_auc_score(yt_sel, yp_sel, sample_weight=weights)))
-            except Exception:  # noqa: broad-except -100.0 marks a metric that cannot be computed; sklearn raises several types for it
-                auc_per_bin.append(-100.0)
+            auc_per_bin.append(float(metrics.roc_auc_score(yt_sel, yp_sel, sample_weight=weights)))
 
-    valid_aucs = [a for a in auc_per_bin if a != -100.0]
-    valid_f1s = [f for f in f1_per_bin if f != -100.0]
+    valid_aucs = [a for a in auc_per_bin if a != UNDEFINED_METRIC]
+
+    def mean_or_undefined(values: np.ndarray | list[float]) -> float:
+        return round(float(np.mean(values)), 5) if len(values) else UNDEFINED_METRIC
+
+    def std_or_undefined(values: np.ndarray) -> float:
+        return round(float(np.std(values)), 5) if len(values) else UNDEFINED_METRIC
 
     return {
-        'weighted_pearson_rho': round(float(np.mean(rs_arr)), 5),
-        'weighted_pearson_rho_std': round(float(np.std(rs_arr)), 5),
-        'weighted_spearman_rho': round(float(np.mean(rhos_arr)), 5),
-        'weighted_spearman_rho_std': round(float(np.std(rhos_arr)), 5),
+        'weighted_pearson_rho': mean_or_undefined(rs_arr),
+        'weighted_pearson_rho_std': std_or_undefined(rs_arr),
+        'weighted_spearman_rho': mean_or_undefined(rhos_arr),
+        'weighted_spearman_rho_std': std_or_undefined(rhos_arr),
         'weighted_rmse': round(rmse, 5),
         'weighted_r_squared': round(r2, 5),
         'binned_mcc': round(mcc, 5),
         'binned_f1_per_bin': [round(f, 5) for f in f1_per_bin],
-        'binned_f1_mean': round(float(np.mean(valid_f1s)), 5) if valid_f1s else -100.0,
+        'binned_f1_mean': mean_or_undefined(f1_per_bin),
         'binned_roc_auc_per_bin': [round(a, 5) for a in auc_per_bin],
-        'binned_roc_auc_mean': round(float(np.mean(valid_aucs)), 5) if valid_aucs else -100.0,
+        'binned_roc_auc_mean': mean_or_undefined(valid_aucs),
         'bin_borders': list(bin_borders),
         'n_bins': len(bin_borders) + 1,
         'n_resamples': int(n_resamples),

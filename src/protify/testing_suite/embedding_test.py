@@ -13,19 +13,11 @@ import random
 import numpy as np
 import torch
 
-
-try:
-    from data.data_mixin import DataMixin, DataArguments
-    from embedder import Embedder, EmbeddingArguments
-    from base_models.get_base_models import standard_models
-    from seed_utils import set_global_seed, get_global_seed
-    from console_output import print_message
-except ImportError:
-    from ..data.data_mixin import DataMixin, DataArguments
-    from ..embedder import Embedder, EmbeddingArguments
-    from ..base_models.get_base_models import standard_models
-    from ..seed_utils import set_global_seed, get_global_seed
-    from ..console_output import print_message
+from protify.base_models.get_base_models import standard_models
+from protify.console_output import print_message
+from protify.data.data_mixin import DataMixin, DataArguments
+from protify.embedder import Embedder, EmbeddingArguments
+from protify.seed_utils import set_global_seed, get_global_seed
 
 
 # Default test datasets
@@ -206,7 +198,7 @@ def embed_and_diagnose(
     
     # Load model once and reuse for all pooling types
     print_message(f"Loading model: {model_name}")
-    from base_models.get_base_models import get_base_model
+    from protify.base_models.get_base_models import get_base_model
     model, tokenizer = get_base_model(model_name)
     
     for pool_type, pool_list in pooling_list.items():

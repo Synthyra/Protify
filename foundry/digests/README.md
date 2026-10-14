@@ -32,7 +32,7 @@ each now imports under its own name:
 - folding_service: `esmfold2_workstation_cli._sha256_file`. The runner stages itself on a
   workstation, so it ships this module there with the rest of the foundry it imports.
 - The workspace's tools: `migrate.hash_file` and `research_build.file_digest`.
-- synth: the script `scripts.core.build_cross_organism_demo._sha256_path`.
+- synth: the script `scripts.workflows.build_cross_organism_demo._sha256_path`.
 
 Ten more moved later the same day, once no session held their projects:
 

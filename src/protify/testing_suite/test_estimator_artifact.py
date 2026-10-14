@@ -10,29 +10,19 @@ full-width vector rather than some intermediate one.
 import json
 import numpy as np
 import pytest
+import torch
 
+from scipy import sparse
 
-try:
-    from src.protify.probes.estimator_artifact import (
-        EstimatorProbeRecipe,
-        build_feature_rows,
-        predict_features,
-        load_estimator_probe,
-        save_estimator_probe,
-    )
-    from src.protify.probes.feature_path_selector import FeatureSelection
-except ImportError:
-    from protify.probes.estimator_artifact import (
-        EstimatorProbeRecipe,
-        build_feature_rows,
-        predict_features,
-        load_estimator_probe,
-        save_estimator_probe,
-    )
-    from protify.probes.feature_path_selector import FeatureSelection
-
-
-pytest.importorskip("joblib")
+from protify.probes import estimator_artifact as artifact_module
+from protify.probes.estimator_artifact import (
+    EstimatorProbeRecipe,
+    build_feature_rows,
+    predict_features,
+    load_estimator_probe,
+    save_estimator_probe,
+)
+from protify.probes.feature_path_selector import FeatureSelection
 
 
 FULL_WIDTH = 10
@@ -89,6 +79,37 @@ def test_the_recipe_is_readable_without_importing_a_model(tmp_path):
     assert stored["model_name"] == "ESMC-6B-SAE-l60-k16-c131072"
     assert stored["pooling_types"] == ["max"]
     assert stored["pair_feature_mode"] == "concat"
+
+
+def test_a_recipe_saved_before_the_layout_was_recorded_reads_as_dense(tmp_path):
+    save_estimator_probe(tmp_path / "probe", _ConstantEstimator("a"), _recipe(sparse_layout=True), None)
+    stored = json.loads((tmp_path / "probe" / "probe.json").read_text(encoding="utf-8"))
+    assert stored["sparse_layout"] is True
+    del stored["sparse_layout"]
+    (tmp_path / "probe" / "probe.json").write_text(json.dumps(stored), encoding="utf-8")
+    assert load_estimator_probe(tmp_path / "probe")[1].sparse_layout is False
+
+
+@pytest.mark.parametrize("sparse_layout", [False, True])
+def test_scoring_hands_the_estimator_the_layout_it_was_fit_on(monkeypatch, sparse_layout):
+    """XGBoost reads an unstored CSR entry as missing and a stored zero as zero, so the layout changes the scores."""
+    seen = []
+
+    class _LayoutRecorder:
+        classes_ = np.array([0, 1])
+
+        def predict_proba(self, X):
+            seen.append(X)
+            return np.tile([0.5, 0.5], (X.shape[0], 1))
+
+    pooled = {"MKV": torch.tensor([0.0, 2.0, 0.0]), "GAS": torch.tensor([1.0, 0.0, 0.0])}
+    monkeypatch.setattr(artifact_module, "embed_proteins", lambda sequences, recipe, batch_size=8: pooled)
+    artifact_module.score_proteins(_LayoutRecorder(), _recipe(sparse_layout=sparse_layout), None, ["MKV", "GAS"])
+
+    assert sparse.issparse(seen[0]) is sparse_layout
+    if sparse_layout:
+        assert seen[0].nnz == 2  # the zeros are unstored, as training's CSR left them
+    np.testing.assert_array_equal(seen[0].toarray() if sparse_layout else seen[0], [[0.0, 2.0, 0.0], [1.0, 0.0, 0.0]])
 
 
 def test_a_pair_probe_joins_at_inference_the_way_it_was_trained():

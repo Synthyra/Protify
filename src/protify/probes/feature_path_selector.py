@@ -31,15 +31,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from scipy import sparse
 
-
-try:
-    from ..console_output import print_message
-except ImportError:
-    try:
-        from protify.console_output import print_message
-    except ImportError:
-        from console_output import print_message
 from .losses import compute_probe_loss, get_loss_fct
+from ..console_output import print_message
 
 
 # A feature matrix arrives either dense or as scipy CSR. Pooled SAE features measure

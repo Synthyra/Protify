@@ -2,50 +2,19 @@
 
 import torch
 
-
-try:
-    from src.protify.data.sequence_alphabets import (
-        AA_SET,
-        DNA_SET,
-        RNA_SET,
-        CODON_SET,
-        NONCANONICAL_AMINO_ACIDS,
-        AMINO_ACID_TO_HUMAN_CODON,
-        AA_TO_CODON_TOKEN,
-        CODON_TO_AA,
-        DNA_CODON_TO_AA,
-        RNA_CODON_TO_AA,
-    )
-    from src.protify.data.data_collators import pad_and_concatenate_dimer
-except ImportError:
-    try:
-        from protify.data.sequence_alphabets import (
-            AA_SET,
-            DNA_SET,
-            RNA_SET,
-            CODON_SET,
-            NONCANONICAL_AMINO_ACIDS,
-            AMINO_ACID_TO_HUMAN_CODON,
-            AA_TO_CODON_TOKEN,
-            CODON_TO_AA,
-            DNA_CODON_TO_AA,
-            RNA_CODON_TO_AA,
-        )
-        from protify.data.data_collators import pad_and_concatenate_dimer
-    except ImportError:
-        from ..data.sequence_alphabets import (
-            AA_SET,
-            DNA_SET,
-            RNA_SET,
-            CODON_SET,
-            NONCANONICAL_AMINO_ACIDS,
-            AMINO_ACID_TO_HUMAN_CODON,
-            AA_TO_CODON_TOKEN,
-            CODON_TO_AA,
-            DNA_CODON_TO_AA,
-            RNA_CODON_TO_AA,
-        )
-        from ..data.data_collators import pad_and_concatenate_dimer
+from protify.data.data_collators import pad_and_concatenate_dimer
+from protify.data.sequence_alphabets import (
+    AA_SET,
+    DNA_SET,
+    RNA_SET,
+    CODON_SET,
+    NONCANONICAL_AMINO_ACIDS,
+    AMINO_ACID_TO_HUMAN_CODON,
+    AA_TO_CODON_TOKEN,
+    CODON_TO_AA,
+    DNA_CODON_TO_AA,
+    RNA_CODON_TO_AA,
+)
 
 
 CANONICAL_20 = set("ACDEFGHIKLMNPQRSTVWY")

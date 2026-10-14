@@ -4,62 +4,24 @@ import torch
 
 from transformers import EvalPrediction
 
-
-try:
-    from src.protify.metrics import (
-        softmax,
-        regression_scorer,
-        classification_scorer,
-        calculate_max_metrics,
-        max_metrics,
-        compute_single_label_classification_metrics,
-        compute_tokenwise_classification_metrics,
-        compute_multi_label_classification_metrics,
-        compute_regression_metrics,
-        compute_tokenwise_regression_metrics,
-        get_compute_metrics,
-        calculate_robust_roc_auc_multiclass,
-        calculate_robust_pr_auc_multiclass,
-        calculate_robust_roc_auc_multilabel,
-        calculate_robust_pr_auc_multilabel,
-    )
-except ImportError:
-    try:
-        from protify.metrics import (
-            softmax,
-            regression_scorer,
-            classification_scorer,
-            calculate_max_metrics,
-            max_metrics,
-            compute_single_label_classification_metrics,
-            compute_tokenwise_classification_metrics,
-            compute_multi_label_classification_metrics,
-            compute_regression_metrics,
-            compute_tokenwise_regression_metrics,
-            get_compute_metrics,
-            calculate_robust_roc_auc_multiclass,
-            calculate_robust_pr_auc_multiclass,
-            calculate_robust_roc_auc_multilabel,
-            calculate_robust_pr_auc_multilabel,
-        )
-    except ImportError:
-        from ..metrics import (
-            softmax,
-            regression_scorer,
-            classification_scorer,
-            calculate_max_metrics,
-            max_metrics,
-            compute_single_label_classification_metrics,
-            compute_tokenwise_classification_metrics,
-            compute_multi_label_classification_metrics,
-            compute_regression_metrics,
-            compute_tokenwise_regression_metrics,
-            get_compute_metrics,
-            calculate_robust_roc_auc_multiclass,
-            calculate_robust_pr_auc_multiclass,
-            calculate_robust_roc_auc_multilabel,
-            calculate_robust_pr_auc_multilabel,
-        )
+from protify.metrics import (
+    softmax,
+    regression_scorer,
+    classification_scorer,
+    calculate_max_metrics,
+    max_metrics,
+    compute_single_label_classification_metrics,
+    compute_tokenwise_classification_metrics,
+    compute_multi_label_classification_metrics,
+    compute_regression_metrics,
+    compute_tokenwise_regression_metrics,
+    get_compute_metrics,
+    calculate_robust_roc_auc_multiclass,
+    calculate_robust_pr_auc_multiclass,
+    calculate_robust_roc_auc_multilabel,
+    calculate_robust_pr_auc_multilabel,
+    UNDEFINED_METRIC,
+)
 
 
 class TestSoftmax:
@@ -298,6 +260,15 @@ class TestTokenwiseRegression:
         assert metrics['r_squared'] == -100.0
         assert metrics['spearman_rho'] == -100.0
 
+    def test_a_single_position_has_undefined_correlations_and_defined_errors(self):
+        predictions = np.array([[1.0, 5.0]])  # (b=1, l=2)
+        labels = np.array([[2.0, -100.0]])  # (b, l)
+        evaluation = EvalPrediction(predictions=predictions, label_ids=labels)
+        metrics = compute_tokenwise_regression_metrics(evaluation)
+        assert metrics['spearman_rho'] == UNDEFINED_METRIC
+        assert metrics['pear_pval'] == UNDEFINED_METRIC
+        assert metrics['mae'] == pytest.approx(1.0)
+
     def test_squeeze_trailing_dim(self):
         predictions = np.array([[[1.0], [2.0], [3.0]]])  # (b=1, l=3, 1)
         labels = np.array([[1.0, 2.0, 3.0]])  # (b, l)
@@ -357,6 +328,15 @@ class TestRobustAUC:
         )
         score = calculate_robust_roc_auc_multiclass(y_true, probabilities)
         assert score == -100.0
+
+    def test_a_label_without_a_score_column_raises_rather_than_reading_as_undefined(self):
+        """A broad except once turned this bug into the sentinel, so a run reported no AUC and went on."""
+        y_true = np.array([0, 1, 3])  # (n=3,); class 3 has no column
+        probabilities = np.full((3, 3), 1 / 3)  # (n, c=3)
+        with pytest.raises(IndexError):
+            calculate_robust_roc_auc_multiclass(y_true, probabilities)
+        with pytest.raises(IndexError):
+            calculate_robust_pr_auc_multiclass(y_true, probabilities)
 
     def test_pr_auc_multiclass_binary(self):
         y_true = np.array([0, 0, 1, 1])  # (n=4,)

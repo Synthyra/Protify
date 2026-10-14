@@ -67,6 +67,8 @@ WINDOW_ROWS = 2048
 WINDOW_BYTES = 256 * 1024**2
 # Reading a store into memory takes this many sequences per index query.
 READ_CHUNK = 1024
+# The environment variable that routes one logical root's stores to other directories (`feature_root`).
+FEATURE_ROUTES_VARIABLE = "PROTIFY_FEATURE_ROOTS"
 
 # Stored dtypes, narrowest first, and the dtypes whose values each holds exactly.
 DTYPES = ("float16", "bfloat16", "float32", "float64")
@@ -117,19 +119,13 @@ def narrowest_holding(*names: str) -> str:
 
 def _controls() -> Any:
     """The control-base module, imported as `sae_selection` imports its neighbor."""
-    try:
-        from base_models import control_bases
-    except ImportError:
-        from .base_models import control_bases
+    from .base_models import control_bases
     return control_bases
 
 
 def sae_selection(model_name: str) -> Any:
     """The SAE checkpoint a model name encodes, or None for every other model."""
-    try:
-        from base_models.esmc_sae import is_sae_model_name, parse_sae_model_name
-    except ImportError:
-        from .base_models.esmc_sae import is_sae_model_name, parse_sae_model_name
+    from .base_models.esmc_sae import is_sae_model_name, parse_sae_model_name
     return parse_sae_model_name(model_name) if is_sae_model_name(model_name) else None
 
 
@@ -141,10 +137,7 @@ def carbon_cache_identity(dispatch_name: str, model_path: str | None = None) -> 
     """
     if "carbon" not in dispatch_name.lower():
         return None
-    try:
-        from base_models.carbon import CARBON_PREPROCESSING_SCHEMA, resolve_carbon_source
-    except ImportError:
-        from .base_models.carbon import CARBON_PREPROCESSING_SCHEMA, resolve_carbon_source
+    from .base_models.carbon import CARBON_PREPROCESSING_SCHEMA, resolve_carbon_source
 
     source, revision = resolve_carbon_source(dispatch_name, model_path=model_path)
     if revision is None:
@@ -253,29 +246,28 @@ def feature_key(descriptor: Mapping[str, Any]) -> str:
 
 
 def feature_root(root: str | Path, descriptor: Mapping[str, Any]) -> Path:
-    """An explicitly routed Modal root, or the caller's unchanged local directory.
+    """The directory a descriptor's store lives under: `root`, unless FEATURE_ROUTES_VARIABLE routes its model.
 
-    The launcher names a logical root and exact model-family roots. Routing changes storage only;
-    descriptor keys, pooling, checkpoint provenance and historical plan fingerprints stay intact.
+    The variable holds JSON, `{"logical_root": <root>, "routes": {<model prefix>: <directory>}}`,
+    which a launcher sets to spread one root over several volumes. A prefix routes the model of
+    that name and every name that extends it after a `-`, so `ESMC-600` also routes
+    `ESMC-600-SAE-l27-k64-c16384`, and the longest matching prefix wins. Under the logical root, a
+    model no route names raises rather than landing somewhere the launcher does not commit.
+    Routing changes storage only; descriptor keys and everything else that names a store stay intact.
     """
-    routing = os.environ.get("PROTIFY_FEATURE_ROOTS")
+    routing = os.environ.get(FEATURE_ROUTES_VARIABLE)
     if not routing:
         return Path(root)
+
     configuration = json.loads(routing)
     if Path(root) != Path(configuration["logical_root"]):
         return Path(root)
+
     model = descriptor["model"]
-    if model == "Random-Transformer":
-        family = "controls"
-    elif model == "ESMC-300" or model.startswith("ESMC-300-SAE-"):
-        family = "esmc_300"
-    elif model == "ESMC-600" or model.startswith("ESMC-600-SAE-"):
-        family = "esmc_600"
-    elif model == "ESMC-6B" or model.startswith("ESMC-6B-SAE-"):
-        family = "esmc_6b"
-    else:
-        raise ValueError(f"No family embedding storage declared for {model!r}.")
-    return Path(configuration["families"][family])
+    prefixes = [prefix for prefix in configuration["routes"] if model == prefix or model.startswith(f"{prefix}-")]
+    if not prefixes:
+        raise ValueError(f"{FEATURE_ROUTES_VARIABLE} routes {root} but names no route for {model!r}.")
+    return Path(configuration["routes"][max(prefixes, key=len)])
 
 
 GENERATED_PREFIX = "generated"
@@ -634,7 +626,9 @@ class CacheWriter:
                 )
         else:
             spec = embedding_feature(self.descriptor, layout=self.layout, width=int(first_row.shape[-1]))
-        self._store = FeatureStore.open(located.parent, spec)
+        # Deep verification re-hashes every committed part on each commit, so a run's writes would grow
+        # with the store; without it a reader still verifies each part the first time it touches it.
+        self._store = FeatureStore.open(located.parent, spec, deep_verify=False)
         return self._store
 
     def _encode(self, row: Tensor, spec: StoredFeature) -> Tensor | SparseRow:

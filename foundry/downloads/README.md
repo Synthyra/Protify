@@ -32,11 +32,13 @@ Publishing to the Hub is not here: that is [`foundry.datasets`](../datasets/READ
 
 - TODO(downloads_adoption): other code fetches files its own way, and each copy that also resumes,
   checks a digest, or renames into place when whole should call `https.download_file` or
-  `hub.HubFile` instead. Candidates found on 2026-09-26: `uniprot`'s own `_download_fasta`
-  (streams with `requests`, which its tests stand in for), Atlas's `utils/uniprot_proteome.py`,
+  `hub.HubFile` instead. Remaining candidates found on 2026-09-26: Atlas's `utils/uniprot_proteome.py`,
   tmap's `utils/proteins.py`, protein_screening's `acquisition.py` and `reference_acquisition.py`,
   and dataset_builders' `ec_data/uniprot_cluster_splits.py`, `go_data/go_multilabel_dataset.py`, and `taxon_data`. Those in
   trees marked `converted: false` wait for their conversion pass.
+
+UniProt's FASTA downloader adopted `https.download_file` on 2026-10-14, with separate
+staging per source and FASTA validation before replacement.
 
 Tests: `tests/tier1_unit/test_downloads_https.py`, `test_hub_files.py`, `test_uniprot.py`, and
 `test_string_db.py`. None reaches the network.

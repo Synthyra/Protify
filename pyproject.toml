@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "Protify"
-version = "0.0.6"
+version = "0.1.0"
 description = "Low code molecular property prediction"
 authors = ["Synthyra <info@synthyra.com>"]
 keywords = ["plm, protein, transformer"]
@@ -12,13 +12,12 @@ include = [
     "README.md",
 ]
 
-# `ws publish` vendors foundry and interpnet at the repository root, and protify imports both,
-# so the wheel ships them as top-level packages (Logan, 2026-09-24). Another wheel that
-# vendors them installs over the same names. The workspace has neither directory here.
+# `ws publish` vendors foundry at the repository root, and protify imports it, so the wheel
+# ships it as a top-level package (Logan, 2026-09-24). Another wheel that vendors it installs
+# over the same name. The workspace has no such directory here.
 packages = [
     { include = "protify", from = "src" },
     { include = "foundry" },
-    { include = "interpnet" },
 ]
 
 [tool.poetry.dependencies]

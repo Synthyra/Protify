@@ -1,11 +1,11 @@
-"""Attention backend selection, masking, and unpadding, from the InterpNet model family.
+"""Attention backend selection, masking, and unpadding, from `foundry.layers.attention_backends`.
 
-The code is `interpnet.attention_utils`'s. The kernels backend keeps the FlashAttention kernel it
-loads in that module's `FLASH_KERNEL`, `FLASH_KERNEL_VARIANT`, and `FLASH_KERNEL_DTYPES`. Read or
-reset them there, because a name imported here would keep its value from import time.
+The kernels backend keeps the FlashAttention kernel it loads in that module's `FLASH_KERNEL`,
+`FLASH_KERNEL_VARIANT`, and `FLASH_KERNEL_DTYPES`. Read or reset them there, because a name
+imported here would keep its value from import time.
 """
 
-from interpnet.attention_utils import (
+from foundry.layers.attention_backends import (
     FLASH_KERNEL_PREFERENCE,
     VALID_ATTENTION_BACKENDS,
     AttentionBackend,

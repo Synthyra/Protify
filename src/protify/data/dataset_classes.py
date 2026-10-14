@@ -12,15 +12,10 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import Dataset as TorchDataset
 from tqdm.auto import tqdm
 
+from .pair_features import DEFAULT_PAIR_FEATURE_MODE, pair_vector_halves
+from ..console_output import print_message
+from ..feature_cache import open_reader
 
-try:
-    from console_output import print_message
-    from feature_cache import open_reader
-    from data.pair_features import DEFAULT_PAIR_FEATURE_MODE, pair_vector_halves
-except ImportError:
-    from ..console_output import print_message
-    from ..feature_cache import open_reader
-    from .pair_features import DEFAULT_PAIR_FEATURE_MODE, pair_vector_halves
 
 if TYPE_CHECKING:
     # Type-only. Importing the probes package here at runtime would pull in its whole

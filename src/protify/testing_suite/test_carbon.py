@@ -6,29 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from datasets import Dataset
 
-
-try:
-    from src.protify.base_models import carbon
-    from src.protify.base_models import get_base_models as base_model_dispatch
-    from src.protify.base_models.get_base_models import get_raw_sequence_length_limit, resolve_data_max_length
-    from src.protify.data.data_mixin import DataArguments, DataMixin
-    from src.protify.embedder import get_embedding_filename
-    from src.protify.base_models.supported_models import gui_models
-except ImportError:
-    try:
-        from protify.base_models import carbon
-        from protify.base_models import get_base_models as base_model_dispatch
-        from protify.base_models.get_base_models import get_raw_sequence_length_limit, resolve_data_max_length
-        from protify.data.data_mixin import DataArguments, DataMixin
-        from protify.embedder import get_embedding_filename
-        from protify.base_models.supported_models import gui_models
-    except ImportError:
-        from ..base_models import carbon
-        from ..base_models import get_base_models as base_model_dispatch
-        from ..base_models.get_base_models import get_raw_sequence_length_limit, resolve_data_max_length
-        from ..data.data_mixin import DataArguments, DataMixin
-        from ..embedder import get_embedding_filename
-        from ..base_models.supported_models import gui_models
+from protify.base_models import carbon
+from protify.base_models import get_base_models as base_model_dispatch
+from protify.base_models.get_base_models import get_raw_sequence_length_limit, resolve_data_max_length
+from protify.base_models.supported_models import gui_models
+from protify.data.data_mixin import DataArguments, DataMixin
+from protify.embedder import get_embedding_filename
 
 
 class FakeCarbonTokenizer:
@@ -487,13 +470,7 @@ def test_raw_sequence_budget_combines_models_and_survives_an_empty_selection():
 
 
 def test_carbon_lora_targets_do_not_leak_into_other_models():
-    try:
-        from src.protify.base_models.lora import LLAMA_LORA_TARGET_MODULES, LORA_TARGET_MODULES
-    except ImportError:
-        try:
-            from protify.base_models.lora import LLAMA_LORA_TARGET_MODULES, LORA_TARGET_MODULES
-        except ImportError:
-            from ..base_models.lora import LLAMA_LORA_TARGET_MODULES, LORA_TARGET_MODULES
+    from protify.base_models.lora import LLAMA_LORA_TARGET_MODULES, LORA_TARGET_MODULES
 
     # PEFT matches by name suffix, so a global union would attach adapters inside any other
     # Llama-derived checkpoint loaded through --model_types custom.

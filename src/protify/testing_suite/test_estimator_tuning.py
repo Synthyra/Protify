@@ -11,34 +11,18 @@ import pytest
 
 from scipy import sparse
 
-
-try:
-    from src.protify.probes import estimator_tuning
-    from src.protify.probes.estimator_probe import EstimatorProbeArguments
-    from src.protify.probes.estimator_tuning import (
-        MINIMIZED_METRICS,
-        SEARCH_SPACES,
-        EstimatorSearchArguments,
-        default_trial_params,
-        default_tune_metric,
-        search_space_names,
-        tune_estimator_probe,
-    )
-except ImportError:
-    from protify.probes import estimator_tuning
-    from protify.probes.estimator_probe import EstimatorProbeArguments
-    from protify.probes.estimator_tuning import (
-        MINIMIZED_METRICS,
-        SEARCH_SPACES,
-        EstimatorSearchArguments,
-        default_trial_params,
-        default_tune_metric,
-        search_space_names,
-        tune_estimator_probe,
-    )
-
-
-pytest.importorskip("optuna")
+from protify.probes import estimator_tuning
+from protify.probes.estimator_probe import EstimatorProbeArguments
+from protify.probes.estimator_tuning import (
+    MINIMIZED_METRICS,
+    SEARCH_SPACES,
+    LIBRARY_DEFAULTS,
+    EstimatorSearchArguments,
+    default_trial_params,
+    default_tune_metric,
+    search_space_names,
+    tune_estimator_probe,
+)
 
 
 FEATURE_WIDTH = 6
@@ -177,10 +161,7 @@ def test_a_probe_type_with_no_space_is_refused():
 
 
 def test_every_estimator_probe_type_has_a_search_space():
-    try:
-        from src.protify.probes.estimator_probe import ESTIMATOR_PROBE_TYPES
-    except ImportError:
-        from protify.probes.estimator_probe import ESTIMATOR_PROBE_TYPES
+    from protify.probes.estimator_probe import ESTIMATOR_PROBE_TYPES
 
     assert set(SEARCH_SPACES) == set(ESTIMATOR_PROBE_TYPES)
 
@@ -205,28 +186,44 @@ def test_a_compressed_feature_matrix_reaches_the_fit_unchanged(recorded_fits, mo
 def test_the_first_trial_is_the_shipped_defaults(recorded_fits):
     """The search starts where an untuned run lands, so it can only move away by scoring
     better on validation."""
-    try:
-        from src.protify.probes.estimator_probe import ESTIMATOR_DEFAULTS
-    except ImportError:
-        from protify.probes.estimator_probe import ESTIMATOR_DEFAULTS
+    from protify.probes.estimator_probe import ESTIMATOR_DEFAULTS
 
     X, y = _split()
     tune_estimator_probe(
         _probe_args(), EstimatorSearchArguments(n_trials=3, seed=1), X, y, X, y
     )
     first = recorded_fits[0]["overrides"]
-    for name, value in default_trial_params(_probe_args()).items():
-        assert first[name] == pytest.approx(value), name
-    assert first["max_depth"] == ESTIMATOR_DEFAULTS["xgboost"]["max_depth"]
+    for name in ("learning_rate", "max_depth", "min_child_weight", "subsample", "colsample_bytree", "reg_lambda"):
+        assert first[name] == pytest.approx(ESTIMATOR_DEFAULTS["xgboost"][name]), name
+    # The parameters the shipped defaults leave to XGBoost sit at XGBoost's own values.
+    assert first["reg_alpha"] == 0.0
+    assert first["scale_pos_weight"] == 1.0
 
 
 @pytest.mark.parametrize("probe_type", ["xgboost", "lightgbm", "random_forest"])
-def test_every_enqueued_default_is_a_parameter_the_space_asks_for(probe_type):
-    """A default for a name the space never suggests would be silently ignored."""
+@pytest.mark.parametrize("task_type,num_labels", [("singlelabel", 2), ("singlelabel", 5), ("regression", 1)])
+def test_the_warm_start_names_every_parameter_the_space_asks_for(probe_type, task_type, num_labels):
+    """A searched parameter left out of the first trial would be sampled into it, so the first trial would not be the untuned run."""
     args = _probe_args()
-    args.probe_type = probe_type
-    assert set(default_trial_params(args)) <= set(search_space_names(args))
-    assert default_trial_params(args), f"{probe_type} enqueues nothing"
+    args.probe_type, args.task_type, args.num_labels = probe_type, task_type, num_labels
+    assert list(default_trial_params(args)) == search_space_names(args)
+
+
+def test_the_warm_start_matches_the_libraries_defaults():
+    """Where the shipped defaults say nothing, the first trial uses what an untuned fit uses."""
+    from lightgbm import LGBMClassifier
+    from sklearn.ensemble import RandomForestClassifier
+
+    forest = RandomForestClassifier().get_params()
+    assert {name: forest[name] for name in LIBRARY_DEFAULTS["random_forest"]} == LIBRARY_DEFAULTS["random_forest"]
+    assert LGBMClassifier().get_params()["subsample"] == LIBRARY_DEFAULTS["lightgbm"]["subsample"]
+
+
+def test_tuning_returns_estimator_parameters_not_the_trials_switches(recorded_fits):
+    X, y = _split()
+    best = tune_estimator_probe(_probe_args(), EstimatorSearchArguments(n_trials=4, seed=1), X, y, X, y)
+    assert "l1_penalty" not in best
+    assert "reg_alpha" in best and best["reg_alpha"] >= 0.0
 
 
 @pytest.mark.parametrize("probe_type", ["xgboost", "lightgbm", "random_forest"])

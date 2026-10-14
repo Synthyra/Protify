@@ -11,15 +11,9 @@ import pytest
 
 from types import SimpleNamespace
 
-
-try:
-    from src.protify.hyperopt_utils import HyperoptModule
-    from src.protify.probes.estimator_probe import with_split_metric_prefix
-    from src.protify.probes.get_probe import ProbeArguments, get_probe
-except ImportError:
-    from protify.hyperopt_utils import HyperoptModule
-    from protify.probes.estimator_probe import with_split_metric_prefix
-    from protify.probes.get_probe import ProbeArguments, get_probe
+from protify.hyperopt_utils import HyperoptModule
+from protify.probes.estimator_probe import with_split_metric_prefix
+from protify.probes.get_probe import ProbeArguments, get_probe
 
 
 def hyperopt_module(probe_type: str = "mlp") -> HyperoptModule:
@@ -146,10 +140,7 @@ def test_estimator_metrics_are_renamed_onto_the_trainer_convention(raw, split, e
 
 def test_the_sweep_metric_defaults_are_emitted_by_both_probe_families():
     """eval_loss cannot be the default, because an estimator probe never reports a loss."""
-    try:
-        from src.protify.main import DEFAULT_SWEEP_METRIC_CLS, DEFAULT_SWEEP_METRIC_REG
-    except ImportError:
-        from protify.main import DEFAULT_SWEEP_METRIC_CLS, DEFAULT_SWEEP_METRIC_REG
+    from protify.main import DEFAULT_SWEEP_METRIC_CLS, DEFAULT_SWEEP_METRIC_REG
 
     assert DEFAULT_SWEEP_METRIC_CLS == "eval_mcc"
     assert DEFAULT_SWEEP_METRIC_REG == "eval_spearman_rho"
@@ -157,6 +148,33 @@ def test_the_sweep_metric_defaults_are_emitted_by_both_probe_families():
     prefixed = with_split_metric_prefix({"mcc": 0.0, "spearman_rho": 0.0}, "eval")
     assert DEFAULT_SWEEP_METRIC_CLS in prefixed
     assert DEFAULT_SWEEP_METRIC_REG in prefixed
+
+
+# Set by MainProcess itself from a parsed flag, so the parser has no default for it.
+DERIVED_ARGUMENTS = {"torch_compile"}
+
+
+def test_the_parser_defaults_hold_every_argument_main_process_reads():
+    """The GUI starts from `build_parser().parse_args([])`, the CLI's own defaults.
+
+    It once started from an empty Namespace, so an estimator run from the GUI failed on
+    `keep_dead_features`, which only the parser sets, and its sweeps optimized a different
+    metric than the CLI's.
+    """
+    import re
+
+    from pathlib import Path
+
+    from protify import main
+
+    source = Path(main.__file__).read_text(encoding="utf-8")
+    read = set(re.findall(r"self\.full_args\.([a-z_]+)", source)) - {"__dict__"} - DERIVED_ARGUMENTS
+    defaults = main.build_parser().parse_args([])
+
+    assert read, "the pattern no longer finds MainProcess's argument reads"
+    assert sorted(name for name in read if not hasattr(defaults, name)) == []
+    assert defaults.sweep_metric_cls == main.DEFAULT_SWEEP_METRIC_CLS
+    assert defaults.sweep_metric_reg == main.DEFAULT_SWEEP_METRIC_REG
 
 
 def test_probe_arguments_default_pooling_is_a_usable_value():

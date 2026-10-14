@@ -21,17 +21,8 @@ import json
 import pytest
 import torch
 
-
-try:
-    from src.protify.base_models.calm import CaLmConfig, CaLmModel, get_calm_tokenizer
-    from src.protify.base_models.calm_utils import RotaryEmbedding
-except ImportError:
-    try:
-        from protify.base_models.calm import CaLmConfig, CaLmModel, get_calm_tokenizer
-        from protify.base_models.calm_utils import RotaryEmbedding
-    except ImportError:
-        from ..base_models.calm import CaLmConfig, CaLmModel, get_calm_tokenizer
-        from ..base_models.calm_utils import RotaryEmbedding
+from protify.base_models.calm import CaLmConfig, CaLmModel, get_calm_tokenizer
+from protify.base_models.calm_utils import RotaryEmbedding
 
 
 VOCAB_SIZE = 131  # v, CaLM's codon vocabulary

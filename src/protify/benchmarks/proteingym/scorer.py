@@ -949,7 +949,7 @@ class ProteinGymRunner:
         Dict[str, float]
             Mapping of model_name -> elapsed_time
         """
-        from base_models.get_base_models import get_base_model
+        from ...base_models.get_base_models import get_base_model
         from .data_loader import load_proteingym_dms
         
         timing = {}

@@ -17,15 +17,9 @@ import torch
 
 from scipy import sparse
 
-
-try:
-    from src.protify.data.data_mixin import DataMixin
-    from src.protify.probes.trainers import TrainerMixin
-    from src.protify.testing_suite.embedding_store_builder import build_store
-except ImportError:
-    from protify.data.data_mixin import DataMixin
-    from protify.probes.trainers import TrainerMixin
-    from protify.testing_suite.embedding_store_builder import build_store
+from protify.data.data_mixin import DataMixin
+from protify.probes.trainers import TrainerMixin
+from protify.testing_suite.embedding_store_builder import build_store
 
 
 FEATURE_WIDTH = 8

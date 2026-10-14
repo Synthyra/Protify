@@ -11,20 +11,11 @@ from pathlib import Path
 from transformers import AutoModel, BertConfig, BertModel, BertTokenizerFast
 
 from foundry.checkpoint_loading import uninitialized_memory_as_nan
-
-
-try:
-    from probes.export_packaged_model import _copy_runtime_code
-    from probes.get_probe import ProbeArguments, get_probe
-    from probes.mlp_probe import MLPProbe, MLPProbeConfig
-    from probes.packaged_probe_model import PackagedProbeConfig, PackagedProbeModel
-    from probes.transformer_probe import TransformerForSequenceClassification, TransformerProbeConfig
-except ImportError:
-    from ..probes.export_packaged_model import _copy_runtime_code
-    from ..probes.get_probe import ProbeArguments, get_probe
-    from ..probes.mlp_probe import MLPProbe, MLPProbeConfig
-    from ..probes.packaged_probe_model import PackagedProbeConfig, PackagedProbeModel
-    from ..probes.transformer_probe import TransformerForSequenceClassification, TransformerProbeConfig
+from protify.probes.export_packaged_model import _write_packaged_module
+from protify.probes.get_probe import ProbeArguments, get_probe
+from protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
+from protify.probes.packaged_probe_model import PackagedProbeConfig, PackagedProbeModel
+from protify.probes.transformer_probe import TransformerForSequenceClassification, TransformerProbeConfig
 
 
 def _create_tiny_backbone(backbone_dir: Path) -> tuple[BertModel, BertTokenizerFast]:
@@ -57,7 +48,7 @@ def _save_and_load_with_automodel(
     packaged_model.config.architectures = ["PackagedProbeModel"]
     packaged_model.save_pretrained(str(model_dir), safe_serialization=True)
     tokenizer.save_pretrained(str(model_dir))
-    _copy_runtime_code(model_dir)
+    _write_packaged_module(model_dir)
     return AutoModel.from_pretrained(str(model_dir), trust_remote_code=True)
 
 
@@ -488,38 +479,67 @@ def test_packaged_probe_keeps_its_pooling(probe_type: str, pooling_types: list[s
         gc.collect()
 
 
-# Run in a child whose import path is the export alone, so nothing resolves from this tree.
-_EXPORTED_TRANSFORMER_SCRIPT = """
-import importlib.util, json, sys, torch
-spec = importlib.util.spec_from_file_location("exported_transformer", sys.argv[1])
-exported_transformer = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(exported_transformer)
-import interpnet
-stack = exported_transformer.Transformer(hidden_size=16, n_heads=2, n_layers=1, attention_backend="sdpa").eval()
+def test_the_export_writes_one_module_that_imports_protify_by_name(tmp_path: Path) -> None:
+    """A repository carries no copy of Protify: its module imports the installed package by absolute name."""
+    _write_packaged_module(tmp_path)
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["packaged_probe_model.py"]
+    source = (tmp_path / "packaged_probe_model.py").read_text(encoding="utf-8")
+    import_lines = [line for line in source.splitlines() if line.startswith(("from ", "import "))]
+    assert not [line for line in import_lines if line.startswith("from .")]
+    assert "from protify.probes.get_probe import rebuild_probe_from_saved_config" in import_lines
+    assert "from protify.version import PROTIFY_VERSION" in import_lines
+    assert not [line for line in import_lines if "interpnet" in line or "foundry" in line]
+
+
+# A child whose path holds this checkout's packages but not the export, as an installed Protify would be.
+_LOAD_EXPORT_SCRIPT = """
+import json, sys, torch
+from transformers import AutoModel
+model = AutoModel.from_pretrained(sys.argv[1], trust_remote_code=True).eval()
+input_ids = torch.tensor([[2, 5, 6, 7, 3], [2, 6, 7, 8, 3]])
 with torch.no_grad():
-    hidden_states = stack(torch.randn(1, 4, 16)).last_hidden_state
-print(json.dumps({"interpnet": interpnet.__file__, "shape": list(hidden_states.shape)}))
+    logits = model(input_ids=input_ids, attention_mask=torch.ones_like(input_ids)).logits
+print(json.dumps({"module": type(model).__module__, "logits": logits.tolist()}))
 """
 
 
-def test_the_exported_runtime_builds_the_transformer_without_the_source_tree(tmp_path: Path) -> None:
-    """An exported repository carries interpnet, which the transformer probe's stack comes from."""
-    _copy_runtime_code(tmp_path)
+def test_an_exported_repository_loads_from_the_installed_package_and_standardizes(tmp_path: Path) -> None:
+    """The training standardizer travels in the checkpoint, and a fresh process reproduces the logits."""
+    backbone_dir = tmp_path / "backbone"
+    model_dir = tmp_path / "packaged"
+    backbone_dir.mkdir()
+    model_dir.mkdir()
+    backbone, tokenizer = _create_tiny_backbone(backbone_dir)
+    torch.manual_seed(0)
+    probe = MLPProbe(MLPProbeConfig(input_size=16, hidden_size=32, num_labels=2, n_layers=1, task_type="singlelabel")).eval()
+    mean = torch.linspace(-1.0, 1.0, 16)  # (d,)
+    scale = torch.linspace(0.5, 2.0, 16)  # (d,)
+    config = PackagedProbeConfig(
+        base_model_name=str(backbone_dir), probe_type="mlp", probe_config=probe.config.to_dict(), pooling_types=["mean"],
+        task_type="singlelabel", num_labels=2, sep_token_id=tokenizer.sep_token_id, standardized_width=16,
+        protify_version="0.1.0",
+    )
+    packaged = PackagedProbeModel(config=config, base_model=backbone, probe=probe, standardizer=(mean, scale)).eval()
+    input_ids = torch.tensor([[2, 5, 6, 7, 3], [2, 6, 7, 8, 3]])  # (b, l)
+    attention_mask = torch.ones_like(input_ids)  # (b, l)
+    with torch.no_grad():
+        pooled = backbone(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state.mean(dim=1)  # (b, d)
+        expected = probe(embeddings=(pooled - mean) / scale).logits  # (b, c)
+        torch.testing.assert_close(packaged(input_ids=input_ids, attention_mask=attention_mask).logits, expected)
 
+    _save_and_load_with_automodel(packaged, tokenizer, model_dir)
+    # The child's path is this checkout's package roots, as an installed Protify's would be.
+    import foundry
+    import protify
+
+    package_roots = {str(Path(protify.__file__).resolve().parents[1]), str(Path(foundry.__file__).resolve().parents[1])}
     child = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            _EXPORTED_TRANSFORMER_SCRIPT,
-            str(tmp_path / "protify" / "model_components" / "transformer.py"),
-        ],
-        cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(tmp_path)},
-        capture_output=True,
-        text=True,
-        check=True,
+        [sys.executable, "-c", _LOAD_EXPORT_SCRIPT, str(model_dir)],
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": os.pathsep.join(sorted(package_roots))},
+        capture_output=True, text=True, check=True,
     )
     reported = json.loads(child.stdout.strip().splitlines()[-1])
 
-    assert Path(reported["interpnet"]).resolve().is_relative_to(tmp_path.resolve())
-    assert reported["shape"] == [1, 4, 16]
+    assert reported["module"].startswith("transformers_modules")
+    torch.testing.assert_close(torch.tensor(reported["logits"]), expected, rtol=1e-5, atol=1e-5)

@@ -15,7 +15,7 @@ from torch import Tensor, nn
 from .linear import LinearLayer
 
 
-__all__ = ["SwiGLU", "correction_fn_256", "swiglu_ffn"]
+__all__ = ["SwiGLU", "correction_fn_256", "swiglu_ffn", "swiglu_ln_ffn"]
 
 
 def correction_fn_256(expansion_ratio: float, hidden_size: int) -> int:
@@ -74,3 +74,12 @@ def swiglu_ffn(
             xavier_init=xavier_init,
         ),
     )
+
+
+def swiglu_ln_ffn(hidden_size: int, expansion_ratio: float, dropout: float = 0.1, use_bias: bool = False) -> nn.Sequential:
+    """Build the feed-forward block of the residue-embedding probes, mapping `(..., d)` to `(..., d)`.
+
+    `swiglu_ffn` with a biased layer normalization and `nn.Linear`'s default initialization, as
+    Protify's transformer probe and InterpNet were trained; `use_bias` gives both projections a bias.
+    """
+    return swiglu_ffn(hidden_size, expansion_ratio, dropout, bias=use_bias, norm_bias=True, xavier_init=False)

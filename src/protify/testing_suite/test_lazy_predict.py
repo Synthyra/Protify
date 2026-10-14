@@ -16,14 +16,7 @@ from numpy.typing import NDArray
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import Ridge, RidgeClassifier
 
-
-try:
-    from src.protify.probes.lazy_predict import LazyClassifier, LazyRegressor
-except ImportError:
-    try:
-        from protify.probes.lazy_predict import LazyClassifier, LazyRegressor
-    except ImportError:
-        from ..probes.lazy_predict import LazyClassifier, LazyRegressor
+from protify.probes.lazy_predict import LazyClassifier, LazyRegressor
 
 
 # Subset of models for fast pytest runs (avoids "all" which is slow in Docker)

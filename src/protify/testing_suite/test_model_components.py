@@ -2,17 +2,8 @@
 
 import torch
 
-
-try:
-    from src.protify.model_components.mlp import intermediate_correction_fn, SwiGLU, swiglu_ln_ffn
-    from src.protify.model_components.attention import RotaryEmbedding, rotate_half, MultiHeadAttention
-except ImportError:
-    try:
-        from protify.model_components.mlp import intermediate_correction_fn, SwiGLU, swiglu_ln_ffn
-        from protify.model_components.attention import RotaryEmbedding, rotate_half, MultiHeadAttention
-    except ImportError:
-        from ..model_components.mlp import intermediate_correction_fn, SwiGLU, swiglu_ln_ffn
-        from ..model_components.attention import RotaryEmbedding, rotate_half, MultiHeadAttention
+from protify.model_components.attention import RotaryEmbedding, rotate_half, MultiHeadAttention
+from protify.model_components.mlp import intermediate_correction_fn, SwiGLU, swiglu_ln_ffn
 
 
 def test_intermediate_correction_fn_multiple_of_256() -> None:

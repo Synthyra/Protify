@@ -6,59 +6,22 @@ import torch.nn.functional as F
 
 from types import SimpleNamespace
 
-
-try:
-    from src.protify import probes as probes_package
-    from src.protify.probes import trainers as trainers_module
-    from src.protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
-    from src.protify.probes.parallel_linear_probe import (
-        ParallelLinearProbe,
-        ParallelLinearProbeConfig,
-        ParallelLinearProbeEnsemble,
-    )
-    from src.protify.probes.parallel_probe_batches import ParallelRunDataset
-    from src.protify.probes.trainers import (
-        ParallelProbePerRunGradientClipCallback,
-        TrainerArguments,
-        TrainerMixin,
-        _clip_parallel_probe_gradients_per_run,
-        _compute_eval_accumulation_steps,
-    )
-except ImportError:
-    try:
-        from protify import probes as probes_package
-        from protify.probes import trainers as trainers_module
-        from protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
-        from protify.probes.parallel_linear_probe import (
-            ParallelLinearProbe,
-            ParallelLinearProbeConfig,
-            ParallelLinearProbeEnsemble,
-        )
-        from protify.probes.parallel_probe_batches import ParallelRunDataset
-        from protify.probes.trainers import (
-            ParallelProbePerRunGradientClipCallback,
-            TrainerArguments,
-            TrainerMixin,
-            _clip_parallel_probe_gradients_per_run,
-            _compute_eval_accumulation_steps,
-        )
-    except ImportError:
-        from .. import probes as probes_package
-        from ..probes import trainers as trainers_module
-        from ..probes.mlp_probe import MLPProbe, MLPProbeConfig
-        from ..probes.parallel_linear_probe import (
-            ParallelLinearProbe,
-            ParallelLinearProbeConfig,
-            ParallelLinearProbeEnsemble,
-        )
-        from ..probes.parallel_probe_batches import ParallelRunDataset
-        from ..probes.trainers import (
-            ParallelProbePerRunGradientClipCallback,
-            TrainerArguments,
-            TrainerMixin,
-            _clip_parallel_probe_gradients_per_run,
-            _compute_eval_accumulation_steps,
-        )
+from protify import probes as probes_package
+from protify.probes import trainers as trainers_module
+from protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
+from protify.probes.parallel_linear_probe import (
+    ParallelLinearProbe,
+    ParallelLinearProbeConfig,
+    ParallelLinearProbeEnsemble,
+)
+from protify.probes.parallel_probe_batches import ParallelRunDataset
+from protify.probes.trainers import (
+    ParallelProbePerRunGradientClipCallback,
+    TrainerArguments,
+    TrainerMixin,
+    _clip_parallel_probe_gradients_per_run,
+    _compute_eval_accumulation_steps,
+)
 
 
 def _trainer_mixin_for_parallel_tests(task_type: str = 'singlelabel') -> TrainerMixin:
@@ -1369,7 +1332,7 @@ def test_parallel_trainer_reports_parallel_execution_metadata(monkeypatch) -> No
     assert test_metrics['parallel_probe_invocation_reduction'] == 1
     assert test_metrics['parallel_probe_compression_ratio'] == pytest.approx(2.0)
     assert test_metrics['parallel_probe_run_seeds'] == [42, 43]
-    assert test_metrics['parallel_probe_best_selection_metric'] == 'test_loss'
+    assert test_metrics['parallel_probe_best_selection_metric'] == 'eval_loss'
     records = test_metrics['parallel_probe_run_records']
     assert len(records) == 2
     assert records[0]['run_index'] == 0
@@ -1399,8 +1362,48 @@ def test_parallel_trainer_reports_parallel_execution_metadata(monkeypatch) -> No
     assert test_metrics['parallel_probe_best_run_number'] == 1
     assert test_metrics['parallel_probe_best_run_id'] == 'data/model/seed-42'
     assert test_metrics['parallel_probe_best_seed'] == 42
-    assert test_metrics['parallel_probe_best_test_loss'] < 0.2
+    assert test_metrics['parallel_probe_best_valid_loss'] < 0.2
+    assert test_metrics['parallel_probe_best_test_loss'] == pytest.approx(records[0]['test_loss'])
     assert captured['freed_memory']
+
+
+def test_parallel_trainer_selects_the_best_run_on_validation_when_test_disagrees(monkeypatch) -> None:
+    labels = np.array([0, 1, 0, 1], dtype=np.int64)
+    right = np.array([[3.0, 0.0], [0.0, 3.0], [3.0, 0.0], [0.0, 3.0]], dtype=np.float32)  # (n, c)
+    wrong = right[:, ::-1].copy()  # (n, c)
+    rows = [(torch.full((4,), float(index)), torch.tensor(label)) for index, label in enumerate(labels)]
+    valid_dataset, test_dataset = list(rows), list(rows)
+
+    class DisagreeingTrainer:
+        def __init__(self, *args, **kwargs):
+            self.model = kwargs['model']
+            self.accelerator = SimpleNamespace(free_memory=lambda: None)
+
+        def evaluate(self, dataset):
+            return {'eval_loss': 0.0}
+
+        def train(self):
+            return SimpleNamespace(metrics={'train_runtime': 1.0})
+
+        def predict(self, dataset):
+            # Run 1 is right on validation and wrong on test; run 0 the reverse.
+            per_run = (wrong, right) if dataset is valid_dataset else (right, wrong)
+            return SimpleNamespace(predictions=np.stack(per_run, axis=1), label_ids=labels)  # (n, runs, c)
+
+    mixin = _trainer_mixin_for_parallel_tests()
+    monkeypatch.setattr(trainers_module, "Trainer", DisagreeingTrainer)
+    _model, _valid_metrics, test_metrics, _y_pred, _y_true = mixin._train_parallel_linear_probe_runs(
+        train_dataset=list(rows), valid_dataset=valid_dataset, test_dataset=test_dataset, data_collator=None,
+        tokenizer=None, log_id='log', model_name='model', data_name='data',
+    )
+
+    records = test_metrics['parallel_probe_run_records']
+    assert records[1]['valid_loss'] < records[0]['valid_loss']
+    assert records[0]['test_loss'] < records[1]['test_loss']
+    assert test_metrics['parallel_probe_best_run_index'] == 1
+    assert test_metrics['parallel_probe_best_valid_loss'] == pytest.approx(records[1]['valid_loss'])
+    # The chosen run's test loss is reported as it is, though another run's is lower.
+    assert test_metrics['parallel_probe_best_test_loss'] == pytest.approx(records[1]['test_loss'])
 
 
 def test_parallel_trainer_chunks_seed_groups_and_aggregates_metadata(monkeypatch) -> None:
@@ -1536,6 +1539,7 @@ def test_parallel_trainer_chunks_seed_groups_and_aggregates_metadata(monkeypatch
     assert test_metrics['parallel_probe_best_run_number'] == 3
     assert test_metrics['parallel_probe_best_run_id'] == 'data/model/seed-44'
     assert test_metrics['parallel_probe_best_seed'] == 44
+    assert test_metrics['parallel_probe_best_valid_loss'] < 0.01
     assert test_metrics['parallel_probe_best_test_loss'] < 0.01
     assert y_pred.shape == (4, 2)
     assert y_true.shape == (4,)

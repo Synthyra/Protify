@@ -3,14 +3,7 @@ import torch
 
 from types import SimpleNamespace
 
-
-try:
-    from src.protify.scripts import benchmark_parallel_probes as benchmark
-except ImportError:
-    try:
-        from protify.scripts import benchmark_parallel_probes as benchmark
-    except ImportError:
-        from ..scripts import benchmark_parallel_probes as benchmark
+from protify.scripts import benchmark_parallel_probes as benchmark
 
 
 def _args(**overrides: int | float | str | bool | None) -> SimpleNamespace:

@@ -12,25 +12,14 @@ import pytest
 
 from scipy import sparse
 
-
-try:
-    from src.protify.data import feature_matrix
-    from src.protify.data.feature_matrix import (
-        LAYOUT_PROBE_ROWS,
-        live_column_indices,
-        matrix_density,
-        stack_pooled_rows,
-        take_columns,
-    )
-except ImportError:
-    from protify.data import feature_matrix
-    from protify.data.feature_matrix import (
-        LAYOUT_PROBE_ROWS,
-        live_column_indices,
-        matrix_density,
-        stack_pooled_rows,
-        take_columns,
-    )
+from protify.data import feature_matrix
+from protify.data.feature_matrix import (
+    LAYOUT_PROBE_ROWS,
+    live_column_indices,
+    matrix_density,
+    stack_pooled_rows,
+    take_columns,
+)
 
 
 FEATURE_WIDTH = 12

@@ -27,6 +27,10 @@ echo "Installing PyTorch 2.14..."
 pip install --force-reinstall torch==2.14.0 --index-url https://download.pytorch.org/whl/cu130
 pip install --force-reinstall numpy==2.5.3
 
+# Make protify, and the foundry code vendored at the repository root, importable from anywhere.
+echo "Installing Protify from this checkout..."
+pip install --no-deps -e .
+
 # List installed packages for verification
 echo -e "\nInstalled packages:"
 pip list

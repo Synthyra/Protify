@@ -3,20 +3,9 @@ import torch
 
 from torch.utils.data import TensorDataset
 
-
-try:
-    from src.protify import probes as probes_package
-    from src.protify.data.data_collators import EmbedsLabelsCollator
-    from src.protify.probes.parallel_probe_batches import ParallelRunDataset
-except ImportError:
-    try:
-        from protify import probes as probes_package
-        from protify.data.data_collators import EmbedsLabelsCollator
-        from protify.probes.parallel_probe_batches import ParallelRunDataset
-    except ImportError:
-        from .. import probes as probes_package
-        from ..data.data_collators import EmbedsLabelsCollator
-        from ..probes.parallel_probe_batches import ParallelRunDataset
+from protify import probes as probes_package
+from protify.data.data_collators import EmbedsLabelsCollator
+from protify.probes.parallel_probe_batches import ParallelRunDataset
 
 
 def _base_dataset() -> TensorDataset:

@@ -6,7 +6,7 @@ This page documents base (protein/chemical) models and embedding generation: `Ba
 
 ## Overview
 
-Protify supports two ways to specify models: **preset names** (`model_names`, e.g. ESM2-8, ProtT5) resolved from a built-in map, or **explicit paths and types** (`model_paths` plus `model_types`) for custom or local models. Embeddings are produced by running the base model (or downloading/reading from disk) and optionally pooling per-residue outputs to vectors. They are saved in the workspace's feature store, one directory per representation under `--embedding_save_dir`. Caches written before that change (`.pth` dictionaries and SQLite `.db` files) are converted into the store, never recomputed; see [Old caches](#old-caches).
+Protify supports two ways to specify models: **preset names** (`model_names`, e.g. ESM2-8, ProtT5) resolved from a built-in map, or **explicit paths and types** (`model_paths` plus `model_types`) for custom or local models. Embeddings are produced by running the base model (or downloading/reading from disk) and optionally pooling per-residue outputs to vectors. They are saved in FastPLMs' feature store, one directory per representation under `--embedding_save_dir`. Caches written before that change (`.pth` dictionaries and SQLite `.db` files) are converted into the store, never recomputed; see [Old caches](#old-caches).
 
 ---
 
@@ -92,7 +92,7 @@ Defined in [embedder.py](../src/protify/embedder.py). Constructor maps long name
 
 ## The feature store
 
-Every cache is one directory of the workspace's feature store (`fastplms.features`), named by a key that `foundry.embedding.plain_feature_key` computes from a descriptor. The descriptor states every fact that changes the stored numbers, and the store keeps it unchanged in its `feature.json`:
+Every cache is one directory of FastPLMs' feature store (`fastplms.features`), named by a key that `foundry.embedding.plain_feature_key` computes from a descriptor. The descriptor states every fact that changes the stored numbers, and the store keeps it unchanged in its `feature.json`:
 
 | Field | Meaning |
 |-------|---------|
@@ -114,7 +114,7 @@ A store serves a request for any dtype it holds exactly: a float32 store serves 
 
 Caches written before the feature store were SQLite `.db` files (table `embeddings(sequence, embedding)`, compact blobs) and pickled `.pth` dictionaries, named by `get_embedding_filename(model_name, matrix_embed, pooling_types, extension, hidden_state_index, max_length, ...)`. That name lists `{model_name}`, matrix mode, an optional hidden-state suffix, `max_length`, and the pooling types sorted and joined with underscores (for example `ESM2-8_False_len2048_mean_var.db`); CARBON names add the model revision and preprocessing schema. Nothing writes these formats now. [legacy_cache.py](../src/protify/legacy_cache.py) reads them, and converts them with `fastplms.features.convert_rows`, which compares every stored row with the decoded one bit for bit. The old file is never changed.
 
-- **By hand:** `py -m src.protify.legacy_cache embeddings/ESM2-8_False_len2048_mean.db` writes the store next to the file. `--root`, `--model`, `--matrix` or `--vector`, `--pooling`, `--hidden_state_index`, `--max_length`, `--dtype`, and `--skip_existing` override what the file name says. The store dtype is the narrowest that holds every row, and a cast that would change a value raises.
+- **By hand:** `python -m protify.legacy_cache embeddings/ESM2-8_False_len2048_mean.db` writes the store next to the file. `--root`, `--model`, `--matrix` or `--vector`, `--pooling`, `--hidden_state_index`, `--max_length`, `--dtype`, and `--skip_existing` override what the file name says. The store dtype is the narrowest that holds every row, and a cast that would change a value raises.
 - **On first use:** a run that finds an old file of its own representation and no store converts it before embedding, the file of its own mode first.
 - **On download:** `--download_embeddings` converts the published file into the store instead of copying it.
 
@@ -129,7 +129,7 @@ A sparse autoencoder (SAE) reads one ESMC hidden state and re-expresses it over 
 Use them through the model names `ESMC-300-SAE`, `ESMC-600-SAE`, and `ESMC-6B-SAE`:
 
 ```bash
-py -m src.protify.main --model_names ESMC-300-SAE --data_names solubility \
+python -m protify.main --model_names ESMC-300-SAE --data_names solubility \
   --probe_type xgboost --embedding_pooling_types max --save_embeddings --sql
 ```
 
@@ -181,43 +181,18 @@ Widening the codebook at fixed `k` makes the pooled vector sparser; raising `k` 
 
 So "sparse autoencoder" describes the per-residue code, not the pooled vector. At `k=512` with codebook 131072 the pooled vector is a third full and essentially every column is live, which is why that cell stores about 237 KB per protein where `k=16` at the same width stores about 9.5 KB, a twenty-five fold difference. Pick low `k` with a wide codebook whenever the pooled vector's sparsity matters, which is whenever it reaches a tree learner or a wide feature matrix. Accuracy does not follow the same ordering, so sweep the cell per task rather than assuming the sparsest is best.
 
-### Filling many caches from one pass
-
-[precompute_sae_and_dense.py](../src/protify/precompute_sae_and_dense.py) fills dense caches and any number of codebook caches from a single backbone forward, since every sparse autoencoder trained at one layer reads the same residual stream:
-
-```bash
-py src/protify/precompute_sae_and_dense.py --model_names ESMC-6B-SAE --sae_layer 60 \
-  --sae_k 16 64 --sae_codebook_dim 65536 131072 \
-  --embedding_pooling_types max max,mean \
-  --data_names gold-ppi --embedding_batch_size 20
-```
-
-`--sae_k` and `--sae_codebook_dim` fill their cross product. `--embedding_pooling_types` takes one pooling set per token, with names inside a token joined by commas, and writes one float32 store per (configuration, pooling set) under exactly the keys separate runs would have used. Every set is a subset of the union the encoder reduces to once, so a second pooling set costs a column slice rather than another pass. Resumption is per cache: a protein already present in some and missing from others is embedded once and written only where it is missing.
-
-`--dense_hidden_state_indices` names the hidden states the dense `mean var` caches pool, one cache per index, each named as an ordinary run with that `--embedding_hidden_state_index` names its cache. It defaults to the SAE's layer. The SAE pass requests every hidden state, so it runs every block, and FastPLMs ends that tuple with the final normalized state, the `last_hidden_state` an ordinary run pools by default. Index -1 therefore fills the plain backbone's store (`ESMC-600`, vector, `mean` and `var`, `max_length` 2048), without a second forward:
-
-```bash
-py src/protify/precompute_sae_and_dense.py --model_names ESMC-600-SAE --sae_layer 27 \
-  --sae_k 64 --sae_codebook_dim 16384 --dense_hidden_state_indices 27 -1 \
-  --data_names DeepLoc-2
-```
-
-Each index must be a Python index into the backbone's `num_hidden_layers + 1` states, -37 to 36 for ESMC-600, and is checked before any data or weights load; a repeated index opens its cache once. Dense rows are pooled from an fp32 copy of the hidden state and stored as fp32, where an ordinary run stores `--embed_dtype`.
-
-The script also takes `--data_revisions`, the [row caps](data.md#split-row-caps) (`--max_train_rows`, `--max_valid_rows`, `--max_test_rows`, `--split_row_cap_seed`), and `--dna_to_aa` as `main.py` does. Each decides which sequences a run reads, and the sequences are the cache keys, so give the precompute the values the training runs use.
-
 ### Comparing cells in one run
 
 Because the resolved name is the model's whole identity, a fully qualified name is a valid `--model_names` entry and several of them sweep the grid in one command, one results column each:
 
 ```bash
-py -m src.protify.main --data_names designed-binder --probe_type xgboost \
+python -m protify.main --data_names designed-binder --probe_type xgboost \
   --embedding_pooling_types max --pair_feature_mode minmax --tune_estimator \
   --model_names ESMC-6B-SAE-l60-k16-c65536 ESMC-6B-SAE-l60-k16-c131072 \
                 ESMC-6B-SAE-l60-k64-c65536 ESMC-6B-SAE-l60-k64-c131072
 ```
 
-Omit `--sae_layer`, `--sae_k`, and `--sae_codebook_dim` here: they would contradict the names, and `resolve_sae_model_name` raises rather than silently picking one. Which cell suits a dataset is a per-task question with no general answer, so measure it; the precompute above makes the embeddings for the whole grid cost one backbone pass.
+Omit `--sae_layer`, `--sae_k`, and `--sae_codebook_dim` here: they would contradict the names, and `resolve_sae_model_name` raises rather than silently picking one. Which cell suits a dataset is a per-task question with no general answer, so measure it; every cell at one layer reads the same residual stream, so one backbone pass can fill the whole grid.
 
 ### Normalization statistics
 
@@ -248,19 +223,19 @@ By default Protify pools the final hidden state. Set `embedding_hidden_state_ind
 ### Preset models
 
 ```bash
-py -m src.protify.main --model_names ESM2-8 ESM2-35 --data_names DeepLoc-2
+python -m protify.main --model_names ESM2-8 ESM2-35 --data_names DeepLoc-2
 ```
 
 ### Custom model with path
 
 ```bash
-py -m src.protify.main --model_paths "org/my-model" --model_types custom --data_names DeepLoc-2
+python -m protify.main --model_paths "org/my-model" --model_types custom --data_names DeepLoc-2
 ```
 
 Protify implements and audits CARBON's raw-DNA 6-mer path locally. It loads the stock Qwen base vocabulary from a pinned commit and does not execute CARBON or Qwen repository code. Remote CARBON model weights must still use a full immutable commit revision:
 
 ```bash
-py -m src.protify.main --model_paths "org/carbon-model@0123456789abcdef0123456789abcdef01234567" --model_types carbon --data_names my-dna-dataset
+python -m protify.main --model_paths "org/carbon-model@0123456789abcdef0123456789abcdef01234567" --model_types carbon --data_names my-dna-dataset
 ```
 
 CARBON uppercases DNA, preserves a final 1-5 bp remainder, and follows the published tokenizer by right-padding that final 6-mer token with `A`. With `padding=max_length`, Protify explicitly produces exact `max_length` tensors for stable compilation.
@@ -268,31 +243,31 @@ CARBON uppercases DNA, preserves a final 1-5 bp remainder, and follows the publi
 ### Save and reuse embeddings
 
 ```bash
-py -m src.protify.main --model_names ESM2-8 --data_names DeepLoc-2 --save_embeddings --embedding_pooling_types mean var
+python -m protify.main --model_names ESM2-8 --data_names DeepLoc-2 --save_embeddings --embedding_pooling_types mean var
 ```
 
 ### Save an intermediate hidden state
 
 ```bash
-py -m src.protify.main --model_names ESMC-300 --data_names DeepLoc-2 --save_embeddings --embedding_hidden_state_index 12
+python -m protify.main --model_names ESMC-300 --data_names DeepLoc-2 --save_embeddings --embedding_hidden_state_index 12
 ```
 
 ### Download precomputed embeddings
 
 ```bash
-py -m src.protify.main --model_names ESM2-150 --data_names DeepLoc-2 --download_embeddings
+python -m protify.main --model_names ESM2-150 --data_names DeepLoc-2 --download_embeddings
 ```
 
 ### Stream rows from the store
 
 ```bash
-py -m src.protify.main --model_names ESM2-8 --data_names DeepLoc-2 --sql --save_embeddings
+python -m protify.main --model_names ESM2-8 --data_names DeepLoc-2 --sql --save_embeddings
 ```
 
 ### Convert an old cache
 
 ```bash
-py -m src.protify.legacy_cache embeddings/ESM2-8_False_len2048_mean.db
+python -m protify.legacy_cache embeddings/ESM2-8_False_len2048_mean.db
 ```
 
 ---

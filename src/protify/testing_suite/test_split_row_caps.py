@@ -1,10 +1,9 @@
 """Capping each split at a row count, the same rows for every seed and every consumer.
 
-A capped split has to be a function of its own rows and `--split_row_cap_seed` alone. The
-ablation trains several seeds per cell, fills its caches in one precompute over every
-dataset, and scores in the uncertainty workflow; if the kept rows moved with the global
-seed, or with which other datasets were loaded, the seeds would train on different data
-and the caches would miss rows a cell reads.
+A capped split has to be a function of its own rows and `--split_row_cap_seed` alone. A run
+trains several seeds, and its caches may be filled in one pass over several datasets; if the
+kept rows moved with the global seed, or with which other datasets were loaded, the seeds
+would train on different data and the caches would miss rows a later run reads.
 
 What has to hold: exact counts, class shares and regression deciles kept, a uniform draw
 where a label gives a row no stratum, row order preserved, a split at or under its cap
@@ -22,21 +21,7 @@ import torch
 
 from datasets import Dataset, DatasetDict
 
-
-try:
-    from src.protify.data.data_mixin import (
-        DataArguments,
-        DataMixin,
-        capped_row_indices,
-        stratified_quotas,
-    )
-except ImportError:
-    from protify.data.data_mixin import (
-        DataArguments,
-        DataMixin,
-        capped_row_indices,
-        stratified_quotas,
-    )
+from protify.data.data_mixin import DataArguments, DataMixin, capped_row_indices, stratified_quotas
 
 
 # Residues that survive sanitization, read as base-20 digits so a sequence names its row.
@@ -337,12 +322,9 @@ def test_a_negative_cap_seed_is_rejected():
 
 def test_main_parses_the_caps_and_hands_them_to_data_arguments(monkeypatch):
     """MainProcess builds DataArguments from the parsed namespace, so a parsed cap reaches the loader."""
-    try:
-        from src.protify.main import parse_arguments
-    except ImportError:
-        from protify.main import parse_arguments
+    from protify.main import parse_arguments
 
-    monkeypatch.setattr(sys.modules[parse_arguments.__module__], 'load_secrets_env', lambda: [])
+    monkeypatch.setattr(sys.modules[parse_arguments.__module__], 'load_secrets_env', lambda **_: [])
     monkeypatch.setattr(sys, 'argv', ['main.py'])
     defaults = parse_arguments()
     assert (defaults.max_train_rows, defaults.max_valid_rows, defaults.max_test_rows) == (None, None, None)
@@ -355,18 +337,3 @@ def test_main_parses_the_caps_and_hands_them_to_data_arguments(monkeypatch):
     data_arguments = DataArguments(**vars(parse_arguments()))  # as apply_current_settings builds it
     assert data_arguments.split_row_caps == {'train': 5000, 'valid': 600, 'test': 700}
     assert data_arguments.split_row_cap_seed == 4
-
-
-def test_the_uncertainty_workflow_accepts_the_caps(monkeypatch):
-    """The workflow refuses any key main.py's parser does not define, so the caps must be defined there."""
-    try:
-        from src.protify.uncertainty import workflow
-    except ImportError:
-        from protify.uncertainty import workflow
-
-    monkeypatch.setattr(sys.modules[workflow.parse_arguments.__module__], 'load_secrets_env', lambda: [])
-    caps = {'max_train_rows': 5000, 'max_valid_rows': 600, 'max_test_rows': 700, 'split_row_cap_seed': 4}
-
-    arguments = workflow.protify_arguments(caps)
-
-    assert {name: getattr(arguments, name) for name in caps} == caps

@@ -20,39 +20,15 @@ import pytest
 import torch
 
 from foundry.checkpoint_loading import assert_unsaved_buffers_match, uninitialized_memory_as_nan
-
-
-try:
-    from src.protify.base_models.calm import CaLmConfig, CaLmModel, _load_calm_backbone
-    from src.protify.probes.get_probe import rebuild_probe_from_saved_config
-    from src.protify.probes.lyra_probe import LyraConfig, LyraForSequenceClassification, LyraForTokenClassification
-    from src.protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
-    from src.protify.probes.transformer_probe import (
-        TransformerForSequenceClassification,
-        TransformerForTokenClassification,
-        TransformerProbeConfig,
-    )
-except ImportError:
-    try:
-        from protify.base_models.calm import CaLmConfig, CaLmModel, _load_calm_backbone
-        from protify.probes.get_probe import rebuild_probe_from_saved_config
-        from protify.probes.lyra_probe import LyraConfig, LyraForSequenceClassification, LyraForTokenClassification
-        from protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
-        from protify.probes.transformer_probe import (
-            TransformerForSequenceClassification,
-            TransformerForTokenClassification,
-            TransformerProbeConfig,
-        )
-    except ImportError:
-        from ..base_models.calm import CaLmConfig, CaLmModel, _load_calm_backbone
-        from ..probes.get_probe import rebuild_probe_from_saved_config
-        from ..probes.lyra_probe import LyraConfig, LyraForSequenceClassification, LyraForTokenClassification
-        from ..probes.mlp_probe import MLPProbe, MLPProbeConfig
-        from ..probes.transformer_probe import (
-            TransformerForSequenceClassification,
-            TransformerForTokenClassification,
-            TransformerProbeConfig,
-        )
+from protify.base_models.calm import CaLmConfig, CaLmModel, _load_calm_backbone
+from protify.probes.get_probe import rebuild_probe_from_saved_config
+from protify.probes.lyra_probe import LyraConfig, LyraForSequenceClassification, LyraForTokenClassification
+from protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
+from protify.probes.transformer_probe import (
+    TransformerForSequenceClassification,
+    TransformerForTokenClassification,
+    TransformerProbeConfig,
+)
 
 
 BATCH = 2  # b

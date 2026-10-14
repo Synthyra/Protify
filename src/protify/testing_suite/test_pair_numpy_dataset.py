@@ -10,17 +10,8 @@ import numpy as np
 import pytest
 import torch
 
-
-try:
-    from src.protify.data.data_mixin import DataMixin
-    from src.protify.testing_suite.embedding_store_builder import build_store_for
-except ImportError:
-    try:
-        from protify.data.data_mixin import DataMixin
-        from protify.testing_suite.embedding_store_builder import build_store_for
-    except ImportError:
-        from ..data.data_mixin import DataMixin
-        from .embedding_store_builder import build_store_for
+from protify.data.data_mixin import DataMixin
+from protify.testing_suite.embedding_store_builder import build_store_for
 
 
 POOLING_TYPES = ['max']

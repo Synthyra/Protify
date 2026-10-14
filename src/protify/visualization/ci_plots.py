@@ -6,11 +6,7 @@ import seaborn as sns
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import r2_score
 
-
-try:
-    from visualization.pauc_plot import plot_roc_with_ci
-except ImportError:
-    from .pauc_plot import plot_roc_with_ci
+from .pauc_plot import plot_roc_with_ci
 
 
 def regression_ci_plot(

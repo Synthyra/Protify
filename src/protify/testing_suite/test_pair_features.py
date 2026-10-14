@@ -11,21 +11,12 @@ import numpy as np
 import pytest
 import torch
 
-
-try:
-    from src.protify.data.pair_features import (
-        PAIR_FEATURE_MODES,
-        check_pair_features_supported,
-        pair_order_matters,
-        pair_vector_halves,
-    )
-except ImportError:
-    from protify.data.pair_features import (
-        PAIR_FEATURE_MODES,
-        check_pair_features_supported,
-        pair_order_matters,
-        pair_vector_halves,
-    )
+from protify.data.pair_features import (
+    PAIR_FEATURE_MODES,
+    check_pair_features_supported,
+    pair_order_matters,
+    pair_vector_halves,
+)
 
 
 FEATURE_WIDTH = 6

@@ -6,20 +6,10 @@ import fastplms.attention as fastplms_attention
 
 from types import SimpleNamespace
 
-# Protify's attention names come from interpnet, whose module keeps the kernel the backend loads.
-from interpnet import attention_utils
-
-
-try:
-    from model_components.attention_utils import AttentionBackend, resolve_attention_backend
-    from model_components.transformer import Transformer
-except ImportError:
-    try:
-        from protify.model_components.attention_utils import AttentionBackend, resolve_attention_backend
-        from protify.model_components.transformer import Transformer
-    except ImportError:
-        from ..model_components.attention_utils import AttentionBackend, resolve_attention_backend
-        from ..model_components.transformer import Transformer
+# The kernels backend keeps its loaded kernel in the module that defines the backends.
+from foundry.layers import attention_backends
+from protify.model_components.attention_utils import AttentionBackend, resolve_attention_backend
+from protify.model_components.transformer import Transformer
 
 
 def test_transformer_returns_attentions_and_s_max_from_2d_mask() -> None:
@@ -111,9 +101,9 @@ def test_resolve_attention_backend_rejects_unknown_values() -> None:
 
 @pytest.fixture
 def unloaded_flash_kernel(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(attention_utils, "FLASH_KERNEL", None)
-    monkeypatch.setattr(attention_utils, "FLASH_KERNEL_VARIANT", None)
-    monkeypatch.setattr(attention_utils, "FLASH_KERNEL_DTYPES", ())
+    monkeypatch.setattr(attention_backends, "FLASH_KERNEL", None)
+    monkeypatch.setattr(attention_backends, "FLASH_KERNEL_VARIANT", None)
+    monkeypatch.setattr(attention_backends, "FLASH_KERNEL_DTYPES", ())
 
 
 @pytest.mark.usefixtures("unloaded_flash_kernel")
@@ -132,7 +122,7 @@ def test_kernels_backend_raises_when_its_kernel_fails_to_load(monkeypatch: pytes
 
     # Only an unsupported platform or GPU moves on to FlashAttention 2; a failed load does not.
     assert attempted == ["flash_attention_3"]
-    assert attention_utils.FLASH_KERNEL is None
+    assert attention_backends.FLASH_KERNEL is None
 
 
 @pytest.mark.usefixtures("unloaded_flash_kernel")
@@ -152,11 +142,11 @@ def test_kernels_backend_passes_over_only_a_kernel_this_platform_cannot_run(
         lambda implementation: (flash_attention_2, "flash_attn2"),
     )
 
-    with caplog.at_level(logging.INFO, logger=attention_utils.__name__):
+    with caplog.at_level(logging.INFO, logger=attention_backends.__name__):
         assert resolve_attention_backend("kernels_flash") == AttentionBackend.KERNELS
 
-    assert attention_utils.FLASH_KERNEL is flash_attention_2
-    assert attention_utils.FLASH_KERNEL_VARIANT == "flash_attn2"
+    assert attention_backends.FLASH_KERNEL is flash_attention_2
+    assert attention_backends.FLASH_KERNEL_VARIANT == "flash_attn2"
     assert "uses flash_attention_2" in caplog.text
     assert "pins no build of kernels-community/flash-attn3" in caplog.text
 
@@ -201,11 +191,11 @@ def test_kernels_backend_raises_on_float32_inputs(monkeypatch: pytest.MonkeyPatc
         RuntimeError,
         match=r"kernels attention cannot run torch\.float32 inputs: flash_attn3 takes torch\.bfloat16",
     ):
-        attention_utils.kernels_attention_func(query_states, query_states, query_states, None)
+        attention_backends.kernels_attention_func(query_states, query_states, query_states, None)
     assert query_dtypes == []
 
     bfloat16_states = query_states.to(torch.bfloat16)  # (b, l, h, d_h)
-    attention_utils.kernels_attention_func(bfloat16_states, bfloat16_states, bfloat16_states, None)
+    attention_backends.kernels_attention_func(bfloat16_states, bfloat16_states, bfloat16_states, None)
     assert query_dtypes == [torch.bfloat16]
 
 
@@ -244,7 +234,7 @@ def test_kernels_backend_returned_attention_puts_no_weight_on_padding(monkeypatc
     assert_padding_is_masked()
 
     # Put the fault back: the kernels backend built no 4D mask, even for the weights path.
-    build_masks = attention_utils.build_attention_masks
+    build_masks = attention_backends.build_attention_masks
     monkeypatch.setattr(
         f"{Transformer.__module__}.build_attention_masks",
         lambda **kwargs: build_masks(**{**kwargs, "output_attentions": False}),

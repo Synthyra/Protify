@@ -78,19 +78,19 @@ When `--proteingym` is True and `--compare_scoring_methods` is True, the main en
 ### Zero-shot on all substitution assays with one model
 
 ```bash
-py -m src.protify.main --proteingym --model_names ESM2-150 --dms_ids all --mode benchmark
+python -m protify.main --proteingym --model_names ESM2-150 --dms_ids all --mode benchmark
 ```
 
 ### Indels with sliding window
 
 ```bash
-py -m src.protify.main --proteingym --model_names ESM2-150 --dms_ids all --mode indels
+python -m protify.main --proteingym --model_names ESM2-150 --dms_ids all --mode indels
 ```
 
 ### Compare scoring methods
 
 ```bash
-py -m src.protify.main --proteingym --compare_scoring_methods --model_names ESM2-150 ESM2-650 --dms_ids all
+python -m protify.main --proteingym --compare_scoring_methods --model_names ESM2-150 ESM2-650 --dms_ids all
 ```
 
 ### Score only (no benchmark script)

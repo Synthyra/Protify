@@ -1,7 +1,7 @@
 """No credential reaches Protify on the command line or in a YAML config.
 
-W&B records each run's command line, so Hugging Face and W&B resolve their own credentials, from
-the environment or a CLI login, and a cloud run reads SYNTHYRA_API_KEY. Every value here is an
+W&B records each run's command line, so credentials come from the environment, which a
+`.secrets.env` may fill for HF_TOKEN, WANDB_API_KEY, and SYNTHYRA_API_KEY alone. Every value here is an
 invented placeholder.
 """
 
@@ -11,19 +11,9 @@ import pytest
 
 from types import SimpleNamespace
 
-
-PROTIFY_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SRC_ROOT = os.path.dirname(PROTIFY_ROOT)
-REPO_ROOT = os.path.dirname(SRC_ROOT)
-for path in (PROTIFY_ROOT, SRC_ROOT, REPO_ROOT):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
-
-import cloud_backend
-
-from src.protify.cloud_cli import _build_cloud_config_from_args, _run_on_cloud, _should_auto_run_cloud
-from src.protify.main import parse_arguments
+from protify import cloud_backend
+from protify.cloud_cli import _build_cloud_config_from_args, _run_on_cloud, _should_auto_run_cloud
+from protify.main import CREDENTIAL_NAMES, parse_arguments
 
 
 @pytest.mark.parametrize("flag", ["--hf_token", "--wandb_api_key", "--synthyra_api_key", "--cloud_api_key"])
@@ -37,7 +27,7 @@ def test_no_option_takes_a_credential(monkeypatch, flag):
 def test_a_yaml_config_holding_a_token_is_refused(tmp_path, monkeypatch):
     yaml_path = tmp_path / "config.yaml"
     yaml_path.write_text("data_names:\n  - DeepLoc-2\nhf_token: placeholder\n", encoding="utf-8")
-    monkeypatch.setattr("src.protify.main.load_secrets_env", lambda: [])
+    monkeypatch.setattr("protify.main.load_secrets_env", lambda **_: [])
     monkeypatch.setattr(sys, "argv", ["main.py", "--yaml_path", str(yaml_path)])
 
     with pytest.raises(SystemExit, match="hf auth login"):
@@ -48,12 +38,28 @@ def test_a_yaml_config_may_leave_a_credential_key_empty(tmp_path, monkeypatch):
     """synth's Protify runner writes `hf_token: null` and `cloud_api_key: null` into its configs."""
     yaml_path = tmp_path / "config.yaml"
     yaml_path.write_text("data_names:\n  - DeepLoc-2\nhf_token: null\ncloud_api_key: null\n", encoding="utf-8")
-    monkeypatch.setattr("src.protify.main.load_secrets_env", lambda: [])
+    monkeypatch.setattr("protify.main.load_secrets_env", lambda **_: [])
     monkeypatch.setattr(sys, "argv", ["main.py", "--yaml_path", str(yaml_path)])
 
     args = parse_arguments()
 
     assert args.cloud is False
+
+
+def test_a_run_takes_only_its_own_credentials_from_a_secrets_file(tmp_path, monkeypatch):
+    """Whatever else the file holds, such as another project's keys, stays out of the process."""
+    unrelated = "PROTIFY_TEST_UNRELATED_KEY"
+    secrets_file = tmp_path / "credentials.env"
+    secrets_file.write_text("".join(f"{name}=placeholder\n" for name in (*CREDENTIAL_NAMES, unrelated)), encoding="utf-8")
+    for name in (*CREDENTIAL_NAMES, unrelated):
+        monkeypatch.setenv(name, "")  # the loader reads empty as unset, and monkeypatch restores the original
+    monkeypatch.setenv("FOUNDRY_SECRETS", str(secrets_file))
+    monkeypatch.setattr(sys, "argv", ["main.py", "--data_names", "DeepLoc-2"])
+
+    parse_arguments()
+
+    assert [os.environ[name] for name in CREDENTIAL_NAMES] == ["placeholder"] * len(CREDENTIAL_NAMES)
+    assert os.environ[unrelated] == ""
 
 
 def test_a_cloud_run_is_asked_for_and_never_implied_by_a_key(monkeypatch):

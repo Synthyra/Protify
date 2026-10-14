@@ -1,3 +1,4 @@
+import math
 import os
 import numpy as np
 import torch
@@ -10,6 +11,7 @@ from typing import Any
 from datasets import Dataset
 from huggingface_hub import HfApi, get_token
 from scipy import sparse
+from torch.utils.data import DataLoader
 from transformers import (
     EarlyStoppingCallback,
     EvalPrediction,
@@ -20,111 +22,60 @@ from transformers import (
     TrainingArguments,
 )
 
-from protify.probes.validation_selection import ValidationSelection
+from .export_packaged_model import export_packaged_model_to_hub
+from .feature_path_selector import (
+    FeaturePathConfig,
+    FeatureSelection,
+    fit_feature_path_selection,
+    subsample_rows,
+)
+from .fit_hooks import fit_hooks_of
+from .get_probe import get_probe
+from .hybrid_probe import HybridProbe, HybridProbeConfig
+from .parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
+from .parallel_probe_batches import ParallelRunDataset
+from .parallel_probe_plan import (
+    build_seed_run_specs,
+    estimate_parallel_probe_plan,
+    max_linear_probe_runs_for_estimated_peak_budget,
+    max_linear_probe_runs_for_training_state_budget,
+    plan_parallel_probe_runs,
+    ParallelProbeRunSpec,
+)
+from ..calibration_report import calibration_report, supports_calibration_report
+from ..console_output import print_message
+from ..data.data_collators import (
+    EmbedsLabelsCollator,
+    PairEmbedsLabelsCollator,
+    PairInputIdsCollator,
+    StringLabelsCollator,
+)
+from ..data.dataset_classes import (
+    EmbedsLabelsDatasetFromDisk,
+    PairEmbedsLabelsDatasetFromDisk,
+    EmbedsLabelsDataset,
+    PairEmbedsLabelsDataset,
+    StringLabelDataset,
+    PairStringLabelDataset,
+    MultiEmbedsLabelsDatasetFromDisk,
+    MultiEmbedsLabelsDataset,
+    EmbeddingStandardizer,
+)
+from ..data.pair_features import pair_order_matters, pair_vector_halves
+from ..feature_cache import open_reader
+from ..metrics import UNDEFINED_METRIC, get_compute_metrics, get_compute_metrics_with_balanced
+from ..metrics_balanced import compute_balanced_regression_metrics
 # Through the package path in both import modes, so the run a sweep opened is the run its trials see.
-from protify.run_tracking import reports_training_job, trainer_callbacks
+from ..run_tracking import reports_training_job, trainer_callbacks
+from ..seed_utils import set_global_seed
+from ..visualization.ci_plots import regression_ci_plot, classification_ci_plot
 
-
-try:
-    from probes.cluster_trainer import ClusterTrainer
-    from probes.training_recipe import resolved_training_recipe, training_outcome, validate_probe_controls
-    from probes.hybrid_probe import HybridProbe, HybridProbeConfig
-    from probes.parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
-    from probes.parallel_probe_batches import ParallelRunDataset
-    from probes.parallel_probe_plan import (
-        build_seed_run_specs,
-        estimate_parallel_probe_plan,
-        max_linear_probe_runs_for_estimated_peak_budget,
-        max_linear_probe_runs_for_training_state_budget,
-        plan_parallel_probe_runs,
-        ParallelProbeRunSpec,
-    )
-    from probes.export_packaged_model import export_packaged_model_to_hub
-    from probes.feature_path_selector import (
-        FeaturePathConfig,
-        FeatureSelection,
-        fit_feature_path_selection,
-        subsample_rows,
-    )
-    from data.dataset_classes import (
-        EmbedsLabelsDatasetFromDisk,
-        PairEmbedsLabelsDatasetFromDisk,
-        EmbedsLabelsDataset,
-        PairEmbedsLabelsDataset,
-        StringLabelDataset,
-        PairStringLabelDataset,
-        MultiEmbedsLabelsDatasetFromDisk,
-        MultiEmbedsLabelsDataset,
-        EmbeddingStandardizer,
-    )
-except ImportError:
-    from .cluster_trainer import ClusterTrainer
-    from .training_recipe import resolved_training_recipe, training_outcome, validate_probe_controls
-    from .hybrid_probe import HybridProbe, HybridProbeConfig
-    from .parallel_linear_probe import ParallelLinearProbe, ParallelLinearProbeConfig
-    from .parallel_probe_batches import ParallelRunDataset
-    from .parallel_probe_plan import (
-        build_seed_run_specs,
-        estimate_parallel_probe_plan,
-        max_linear_probe_runs_for_estimated_peak_budget,
-        max_linear_probe_runs_for_training_state_budget,
-        plan_parallel_probe_runs,
-        ParallelProbeRunSpec,
-    )
-    from .export_packaged_model import export_packaged_model_to_hub
-    from .feature_path_selector import (
-        FeaturePathConfig,
-        FeatureSelection,
-        fit_feature_path_selection,
-        subsample_rows,
-    )
-    from ..data.dataset_classes import (
-        EmbedsLabelsDatasetFromDisk,
-        PairEmbedsLabelsDatasetFromDisk,
-        EmbedsLabelsDataset,
-        PairEmbedsLabelsDataset,
-        StringLabelDataset,
-        PairStringLabelDataset,
-        MultiEmbedsLabelsDatasetFromDisk,
-        MultiEmbedsLabelsDataset,
-        EmbeddingStandardizer,
-    )
-try:
-    from data.data_collators import (
-        EmbedsLabelsCollator,
-        PairEmbedsLabelsCollator,
-        PairInputIdsCollator,
-        StringLabelsCollator,
-    )
-    from data.pair_features import pair_order_matters, pair_vector_halves
-    from feature_cache import open_reader
-    from visualization.ci_plots import regression_ci_plot, classification_ci_plot
-    from console_output import print_message
-    from metrics import get_compute_metrics, get_compute_metrics_with_balanced
-    from metrics_balanced import compute_balanced_regression_metrics
-    from seed_utils import set_global_seed
-    from probes.get_probe import get_probe
-except ImportError:
-    from ..data.data_collators import (
-        EmbedsLabelsCollator,
-        PairEmbedsLabelsCollator,
-        PairInputIdsCollator,
-        StringLabelsCollator,
-    )
-    from ..data.pair_features import pair_order_matters, pair_vector_halves
-    from ..feature_cache import open_reader
-    from ..visualization.ci_plots import regression_ci_plot, classification_ci_plot
-    from ..console_output import print_message
-    from ..metrics import get_compute_metrics, get_compute_metrics_with_balanced
-    from ..metrics_balanced import compute_balanced_regression_metrics
-    from ..seed_utils import set_global_seed
-    from .get_probe import get_probe
 
 # One split's rows: a Hugging Face dataset, or a mapping from column name to values as the fold trainer builds.
 SplitData = Dataset | Mapping[str, Sequence[Any]]
 # One training run's model, validation metrics, test metrics, test predictions, and test labels.
 TrainOutcome = tuple[torch.nn.Module, dict[str, Any], dict[str, Any], np.ndarray | None, np.ndarray | None]
-# One sequential probe run: index, test loss, test predictions, test labels, seed, trained model.
+# One sequential probe run: index, validation loss, test predictions, test labels, seed, trained model.
 RunResult = tuple[int, float, np.ndarray, np.ndarray, int, torch.nn.Module]
 
 
@@ -285,6 +236,40 @@ def _as_builtin(value: Any) -> Any:
     return value
 
 
+def _selection_loss(valid_metrics: Mapping[str, Any]) -> float:
+    """The validation loss a multi-seed run is ranked by; test never decides which seed is kept."""
+    if 'eval_loss' not in valid_metrics:
+        raise ValueError(f"validation metrics carry no eval_loss to choose a seed by: {sorted(valid_metrics)}")
+    return float(valid_metrics['eval_loss'])
+
+
+def validate_probe_controls(arguments: Any) -> None:
+    """Reject invalid numeric controls before constructing a trainer or starting a fit."""
+    for name, minimum in (
+        ("num_epochs", 1), ("probe_batch_size", 1), ("probe_grad_accum", 1),
+        ("probe_max_steps", -1), ("probe_warmup_steps", 0), ("probe_eval_steps", 1),
+        ("num_workers", 0), ("patience", 1),
+    ):
+        value = getattr(arguments, name)
+        if type(value) is not int or value < minimum or (name == "probe_max_steps" and value == 0):
+            raise ValueError(f"invalid {name}: {value!r}")
+    for name in ("weight_decay", "probe_max_grad_norm", "early_stopping_threshold", "adam_beta1", "adam_beta2", "adam_epsilon"):
+        value = getattr(arguments, name)
+        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"invalid {name}: {value!r}")
+        if (name.startswith("adam_beta") and value >= 1) or (name == "adam_epsilon" and value == 0):
+            raise ValueError(f"invalid {name}: {value!r}")
+    if arguments.probe_precision not in {"float32", "bfloat16", "float16"}:
+        raise ValueError("invalid probe_precision")
+    if arguments.probe_eval_strategy not in {"auto", "epoch", "steps"}:
+        raise ValueError("invalid probe_eval_strategy")
+    accumulation = arguments.eval_accumulation_steps
+    if accumulation not in (None, "auto") and (
+        isinstance(accumulation, bool) or not str(accumulation).isdigit() or int(accumulation) < 1
+    ):
+        raise ValueError("eval_accumulation_steps must be auto, null, or a positive integer")
+
+
 @dataclass
 class TrainerArguments:
     def __init__(
@@ -345,7 +330,6 @@ class TrainerArguments:
             adam_beta1: float = 0.9,
             adam_beta2: float = 0.999,
             adam_epsilon: float = 1e-8,
-            record_training_recipe: bool = False,
             report_to: str = 'none',
             wandb_project: str = 'Protify',
             wandb_entity: str | None = None,
@@ -373,7 +357,6 @@ class TrainerArguments:
         self.adam_beta1 = adam_beta1
         self.adam_beta2 = adam_beta2
         self.adam_epsilon = adam_epsilon
-        self.record_training_recipe = record_training_recipe
         # `wandb` opens a foundry.logging run per training job (run_tracking); the Trainer itself reports nowhere.
         self.report_to = report_to
         self.wandb_project = wandb_project
@@ -527,8 +510,7 @@ class TrainerArguments:
             self, probe_args: Any, train_dataset: Any, valid_dataset: Any, test_dataset: Any, *, probe: bool = True
     ) -> TrainingArguments:
         """Resolve the same training arguments for planning, execution, and resume checks."""
-        sampling_plan = getattr(train_dataset, 'sampling_plan', None)
-        self.train_data_size = sampling_plan.draws_per_epoch if sampling_plan is not None else len(train_dataset)
+        self.train_data_size = fit_hooks_of(train_dataset).draws_per_epoch(train_dataset)
         self.num_labels = probe_args.num_labels
         self.eval_dataset_size = len(valid_dataset) if valid_dataset is not None else len(test_dataset)
         self.eval_output_multiplier = 1
@@ -589,9 +571,22 @@ tags: []
 
 Fine-tuned with Protify.
 
+## How to use
+
+A packaged repository holds the backbone recipe and the probe, and loads with Transformers. Its
+module imports Protify, so install it first (`pip install protify`, or
+`pip install git+https://github.com/Synthyra/Protify`).
+
+```python
+from transformers import AutoModel, AutoTokenizer
+
+model = AutoModel.from_pretrained("{repo_id}", trust_remote_code=True)
+tokenizer = AutoTokenizer.from_pretrained("{repo_id}")
+```
+
 ## About Protify
 
-Protify is an open source platform designed to simplify and democratize workflows for chemical language models. With Protify, deep learning models can be trained to predict chemical properties without requiring extensive coding knowledge or computational resources.
+Protify is an open source platform designed to simplify and democratize workflows for protein and chemical language models. With Protify, deep learning models can be trained to predict properties without requiring extensive coding knowledge or computational resources.
 
 ### Why Protify?
 
@@ -816,7 +811,7 @@ Protify is an open source platform designed to simplify and democratize workflow
         ) -> dict[str, Any]:
         predictions_by_run = []
         reference_labels = None
-        for _run_idx, _test_loss, y_pred, y_true, _seed, _model in run_results:
+        for _run_idx, _valid_loss, y_pred, y_true, _seed, _model in run_results:
             predictions = np.asarray(y_pred, dtype=np.float32)
             if predictions.ndim == 1:
                 predictions = predictions.reshape(-1, 1)
@@ -1148,6 +1143,7 @@ Protify is an open source platform designed to simplify and democratize workflow
                         pair_feature_mode=self._pair_feature_mode,
                         private=True,
                         feature_selection=feature_selection,
+                        embedding_standardizer=getattr(train_dataset, 'embedding_standardizer', None),
                     )
                     print_message(export_message)
                 except Exception as packaged_error:  # noqa: broad-except best-effort Hub export: the failure is printed and the direct push follows
@@ -1263,7 +1259,8 @@ Protify is an open source platform designed to simplify and democratize workflow
             best_run_idx = -1
             best_run_id = ""
             best_seed = base_seed
-            best_loss = float('inf')
+            best_valid_loss = float('inf')
+            best_test_loss = None
             group_output_dirs = []
             group_runtime_records = []
             parallel_run_records = []
@@ -1396,8 +1393,11 @@ Protify is an open source platform designed to simplify and democratize workflow
                             'test_loss': test_loss,
                         }
                     )
-                    if test_loss < best_loss:
-                        best_loss = test_loss
+                    # The kept seed is chosen on validation, never on test, which it is then scored on.
+                    assert valid_loss is not None, "Parallel probe validation produced no eval_loss to choose a seed by."
+                    if valid_loss < best_valid_loss:
+                        best_valid_loss = valid_loss
+                        best_test_loss = test_loss
                         best_run_idx = global_run_idx
                         best_run_id = run_spec.run_id
                         best_seed = run_spec.seed
@@ -1523,13 +1523,14 @@ Protify is an open source platform designed to simplify and democratize workflow
             aggregated_test['parallel_probe_run_records'] = self._parallel_probe_json_safe(parallel_run_records)
             aggregated_test['parallel_probe_valid_run_metrics'] = self._parallel_probe_json_safe(all_valid_metrics)
             aggregated_test['parallel_probe_test_run_metrics'] = self._parallel_probe_json_safe(all_test_metrics)
-            aggregated_test['parallel_probe_best_selection_metric'] = 'test_loss'
+            aggregated_test['parallel_probe_best_selection_metric'] = 'eval_loss'
             aggregated_test['parallel_probe_best_run_index'] = best_run_idx
             aggregated_test['parallel_probe_best_run_number'] = best_run_idx + 1
             aggregated_test['parallel_probe_best_run_id'] = best_run_id
             aggregated_test['parallel_probe_best_seed'] = best_seed
-            aggregated_test['parallel_probe_best_test_loss'] = best_loss
-            print_message(f"Best parallel run: {best_run_idx + 1} (seed={best_seed}, test_loss={best_loss:.4f})")
+            aggregated_test['parallel_probe_best_valid_loss'] = best_valid_loss
+            aggregated_test['parallel_probe_best_test_loss'] = best_test_loss
+            print_message(f"Best parallel run by validation loss: {best_run_idx + 1} (seed={best_seed}, eval_loss={best_valid_loss:.4f})")
 
             if self.trainer_args.make_plots and self.trainer_args.plots_dir is not None and not skip_plot:
                 output_dir = os.path.join(self.trainer_args.plots_dir, log_id)
@@ -1578,7 +1579,6 @@ Protify is an open source platform designed to simplify and democratize workflow
             skip_plot: bool = False,
             feature_selection: FeatureSelection | None = None,
             evaluate_test: bool = True,
-            checkpoint_selection: str | None = None,
         ) -> TrainOutcome:
         task_type = self.trainer_args.task_type
         tokenwise = self.probe_args.tokenwise
@@ -1592,36 +1592,26 @@ Protify is an open source platform designed to simplify and democratize workflow
             raise ValueError('explicit label masks must be present in train, validation, and test')
         if observed_labels and task_type in ('regression', 'sigmoid_regression') and self.trainer_args.balanced_regression_metrics:
             raise ValueError('balanced regression metrics need observed-label weights before masked training')
-        # A declared multilabel release selects its checkpoint on the observed loss alone. The complete metrics run over
-        # every observed entry of the split, which no training loop can afford at a vocabulary of thousands, and the
-        # release's uncertainty report computes them from the saved predictions.
-        selection_only = observed_labels and task_type == 'multilabel' and getattr(train_dataset, 'frozen_release', False)
+        hooks = fit_hooks_of(train_dataset)
+        # A multilabel release with observed labels selects its checkpoint on the observed loss alone. The complete
+        # metrics run over every observed entry of the split, which no training loop can afford at a vocabulary of
+        # thousands, and the release computes them from the saved predictions.
+        selection_only = observed_labels and task_type == 'multilabel' and hooks.reserves_test
         compute_metrics = get_compute_metrics(task_type, tokenwise=tokenwise, observed_labels=observed_labels, selection_only=selection_only)
-        sampling_plan = getattr(train_dataset, 'sampling_plan', None)
         hf_trainer_args = self.trainer_args.for_datasets(self.probe_args, train_dataset, valid_dataset, test_dataset, probe=probe)
         stopping = self.trainer_args.early_stopping(probe=probe)
-        record_recipe = sampling_plan is not None or self.trainer_args.record_training_recipe
-        selection = ValidationSelection(checkpoint_selection) if checkpoint_selection is not None else None
-        if selection is not None and (not observed_labels or task_type != 'singlelabel' or self.probe_args.num_labels != 2
-                                     or not getattr(train_dataset, 'frozen_release', False)):
-            raise ValueError('initial MCC checkpoint selection requires a frozen observed binary release')
-        if record_recipe:
-            train_dataset.training_recipe = resolved_training_recipe(hf_trainer_args, self.probe_args, stopping, sampling_plan,
-                                                                     checkpoint_selection=checkpoint_selection)
-        trainer_class = ClusterTrainer if sampling_plan is not None else Trainer
-        trainer = trainer_class(
+        hooks.before_training(train_dataset, hf_trainer_args, self.probe_args, stopping)
+        trainer = hooks.build_trainer(
             model=model,
             args=hf_trainer_args,
             train_dataset=train_dataset,
             eval_dataset=valid_dataset,
             data_collator=data_collator,
             compute_metrics=compute_metrics,
-            callbacks=[selection if selection is not None else EarlyStoppingCallback(**stopping), *trainer_callbacks()],
-            **({'sampling_plan': sampling_plan} if sampling_plan is not None else {}),
+            callbacks=[hooks.stopping_callback(stopping), *trainer_callbacks()],
         )
         trainer.can_return_loss = True
-        # Frozen releases reserve test labels for evaluation after checkpoint selection.
-        initial_dataset = valid_dataset if not evaluate_test or getattr(train_dataset, 'frozen_release', False) else test_dataset
+        initial_dataset = valid_dataset if not evaluate_test or hooks.reserves_test else test_dataset
         metrics = trainer.evaluate(initial_dataset)
         print_message(f'Initial metrics: {metrics}')
 
@@ -1642,18 +1632,12 @@ Protify is an open source platform designed to simplify and democratize workflow
             )
 
         train_output = trainer.train()
-        selected_outcome = selection.restore(trainer.model, trainer.state) if selection is not None else None
-        if record_recipe:
-            train_dataset.training_outcome = selected_outcome if selection is not None else training_outcome(trainer)
+        hooks.after_training(trainer, train_dataset)
         train_runtime = train_output.metrics.get('train_runtime', 0.0)
-        if sampling_plan is not None:
-            train_dataset.sampling_receipt = trainer.sampling_receipt()
-        # A Gaussian process head fits its Laplace posterior in one pass over the training
-        # data, with the weights early stopping restored, so everything below reads the
-        # posterior predictive. No other probe defines the step.
+        # A probe with a posterior, such as a Gaussian process head, fits it in one pass over the
+        # training data with the restored weights, so everything below reads the posterior predictive.
         if hasattr(trainer.model, 'fit_posterior'):
-            posterior_rows = trainer.get_eval_dataloader(train_dataset) if sampling_plan is not None else trainer.get_train_dataloader()
-            trainer.model.fit_posterior(posterior_rows)
+            trainer.model.fit_posterior(hooks.posterior_rows(trainer, train_dataset))
 
         valid_metrics = trainer.evaluate(valid_dataset)
         print_message(f'Final validation metrics: {valid_metrics}')
@@ -1779,6 +1763,7 @@ Protify is an open source platform designed to simplify and democratize workflow
                                     pair_feature_mode=self._pair_feature_mode,
                                     private=True,
                                     feature_selection=feature_selection,
+                                    embedding_standardizer=getattr(train_dataset, 'embedding_standardizer', None),
                                 )
                                 print_message(export_message)
                             except Exception as packaged_error:  # noqa: broad-except best-effort Hub export: the failure is printed and the direct push follows
@@ -1830,8 +1815,11 @@ Protify is an open source platform designed to simplify and democratize workflow
 
             numbers = [_as_python_number(value) for value in values]
             if all(number is not None for number in numbers):
-                mean_val = np.mean(numbers)
-                std_val = np.std(numbers)
+                # A run whose rows could not define the metric is left out rather than averaged
+                # in as the sentinel, which stands only when no run defines it.
+                defined = [number for number in numbers if number != UNDEFINED_METRIC] or [UNDEFINED_METRIC]
+                mean_val = np.mean(defined)
+                std_val = np.std(defined)
                 # Store as formatted string with mean±std
                 aggregated[key] = f"{mean_val:.4f}±{std_val:.4f}"
                 # Also store raw mean for sorting/comparison purposes
@@ -2068,14 +2056,16 @@ Protify is an open source platform designed to simplify and democratize workflow
             db_path: str | None,
             ppi: bool,
             feature_selection: FeatureSelection | None = None,
-        ) -> tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, torch.utils.data.Dataset, Any]:
-        """The train, validation, and test datasets a probe reads, and their collator.
+            calibration_dataset: SplitData | None = None,
+        ) -> tuple[torch.utils.data.Dataset, torch.utils.data.Dataset, torch.utils.data.Dataset, Any, torch.utils.data.Dataset | None]:
+        """The train, validation, and test datasets a probe reads, their collator, and the calibration dataset.
 
         The embedding standardizer is fit on the training split alone and shared by all
-        three. With SQL each vector is read from the cache at `db_path` as it is needed;
+        of them. With SQL each vector is read from the cache at `db_path` as it is needed;
         otherwise `emb_dict` holds them in memory. The collator takes the tokenizer, `full`,
         and the task type; each dataset takes its split, the cache, the batch and read sizes,
-        and the pair settings.
+        and the pair settings. The calibration dataset is built as test is, or None without
+        `calibration_dataset`.
         """
         # emb_dict: (d,) pooled or (l + 2, d) token rows per sequence
         batch_size = self.trainer_args.probe_batch_size
@@ -2161,7 +2151,15 @@ Protify is an open source platform designed to simplify and democratize workflow
         else:
             test_ds = dataset_class(**deepcopy(common_kwargs))
 
-        return train_ds, valid_ds, test_ds, data_collator
+        calibration_ds = None
+        if calibration_dataset is not None:
+            common_kwargs['hf_dataset'] = calibration_dataset
+            if use_multi:
+                calibration_ds = dataset_class(seq_cols=use_multi, **deepcopy(common_kwargs))
+            else:
+                calibration_ds = dataset_class(**deepcopy(common_kwargs))
+
+        return train_ds, valid_ds, test_ds, data_collator, calibration_ds
 
     @reports_training_job
     def trainer_probe(
@@ -2184,26 +2182,23 @@ Protify is an open source platform designed to simplify and democratize workflow
         """Train one probe, or `num_runs` of them, over the dataset's splits.
 
         `probe_datasets`, as `(train, valid, test, collator)`, replaces the datasets built from
-        one model's cache, as the default probe's joined branches do.
+        one model's cache, as the default probe's joined branches do, and gets no calibration report.
         """
         # emb_dict: (d,) pooled or (l + 2, d) token rows per sequence
         task_type = self.probe_args.task_type
-        num_runs = getattr(self.trainer_args, 'num_runs', 1)
-        base_seed = self.trainer_args.seed
-        # Matrix embeddings keep one row per residue, which changes the dataset class, the
-        # collator, and whether pooled-vector transforms apply at all. MainProcess derives
-        # this from --matrix_embed; reading it here is what the rest of this method assumed
-        # without ever binding the name.
-        full = self._full
-
         print(f'task_type: {task_type}')
         # The cache belongs to the model that produced the embeddings, which is the source
         # model when this run reuses another model's cache.
         cache_model_name = source_model_name or model_name
         db_path = self._embedding_store(cache_model_name)
 
+        # A dataset's calibration split, when it has one, is read the way test is (calibration_report.py).
+        calibration_rows = getattr(self, 'calibration_sets', {}).get(data_name)
+        if not supports_calibration_report(task_type) or self.probe_args.tokenwise:
+            calibration_rows = None
+        calibration_ds = None
         if probe_datasets is None:
-            train_ds, valid_ds, test_ds, data_collator = self._build_probe_datasets(
+            train_ds, valid_ds, test_ds, data_collator, calibration_ds = self._build_probe_datasets(
                 train_dataset,
                 valid_dataset,
                 test_dataset,
@@ -2212,9 +2207,71 @@ Protify is an open source platform designed to simplify and democratize workflow
                 db_path,
                 ppi,
                 feature_selection,
+                calibration_dataset=calibration_rows,
             )
         else:
             train_ds, valid_ds, test_ds, data_collator = probe_datasets
+
+        outcome = self._train_probe_runs(
+            model, tokenizer, model_name, data_name, train_ds, valid_ds, test_ds, data_collator,
+            ppi=ppi, log_id=log_id, skip_plot=skip_plot, source_model_name=source_model_name, feature_selection=feature_selection,
+        )
+        if calibration_ds is not None:
+            self._add_calibration_report(outcome, calibration_ds, data_collator)
+        return outcome
+
+    def _add_calibration_report(self, outcome: TrainOutcome, calibration_dataset: torch.utils.data.Dataset, data_collator: Any) -> None:
+        """Add the calibration report to the outcome's test metrics, read off the model the outcome keeps."""
+        model, _, test_metrics, test_outputs, test_labels = outcome
+        if isinstance(test_outputs, tuple):
+            test_outputs = test_outputs[0]
+        if test_outputs is None or isinstance(test_labels, tuple):
+            # No test predictions, or labels that carry an observation mask: the report needs every label.
+            return
+
+        calibration_outputs, calibration_labels = self._predict_split(model, calibration_dataset, data_collator)
+        report = calibration_report(self.probe_args.task_type, calibration_outputs, calibration_labels, test_outputs, test_labels)
+        test_metrics.update({f'test_{name}': value for name, value in report.items()})
+        print_message('Calibration report: ' + ', '.join(f'{name}={value:.4f}' for name, value in report.items()))
+
+    def _predict_split(self, model: torch.nn.Module, dataset: torch.utils.data.Dataset, data_collator: Any) -> tuple[np.ndarray, np.ndarray]:
+        """The model's raw outputs and the labels on one split, in row order."""
+        loader = DataLoader(dataset, batch_size=self.trainer_args.probe_batch_size, shuffle=False, collate_fn=data_collator)
+        device = next(model.parameters()).device
+        model.eval()
+        outputs, labels = [], []
+        with torch.inference_mode():
+            for batch in loader:
+                labels.append(batch['labels'].numpy())  # (b,) or (b, 1)
+                batch = {key: value.to(device) if isinstance(value, torch.Tensor) else value for key, value in batch.items()}
+                outputs.append(model(**batch).logits.float().cpu().numpy())  # (b, c) or (b, 1)
+        return np.concatenate(outputs), np.concatenate(labels)  # (n, c) or (n, 1), then (n,) or (n, 1)
+
+    def _train_probe_runs(
+            self,
+            model: torch.nn.Module,
+            tokenizer: Any,
+            model_name: str,
+            data_name: str,
+            train_ds: torch.utils.data.Dataset,
+            valid_ds: torch.utils.data.Dataset,
+            test_ds: torch.utils.data.Dataset,
+            data_collator: Any,
+            *,
+            ppi: bool,
+            log_id: str | None,
+            skip_plot: bool,
+            source_model_name: str | None,
+            feature_selection: FeatureSelection | None,
+        ) -> TrainOutcome:
+        """Train one probe, or `num_runs` of them in parallel or in turn, and keep the run chosen on validation."""
+        task_type = self.probe_args.task_type
+        num_runs = getattr(self.trainer_args, 'num_runs', 1)
+        base_seed = self.trainer_args.seed
+        # Matrix embeddings keep one row per residue, which changes the dataset class, the
+        # collator, and whether pooled-vector transforms apply at all. MainProcess derives
+        # this from --matrix_embed.
+        full = self._full
 
         # Single run - original behavior
         if num_runs == 1:
@@ -2272,7 +2329,7 @@ Protify is an open source platform designed to simplify and democratize workflow
 
         all_valid_metrics = []
         all_test_metrics = []
-        run_results = []  # Store (run_idx, test_loss, y_pred, y_true, seed, model) for plotting best
+        run_results = []  # (run_idx, validation loss, test predictions, test labels, seed, model) per run
         
         for run_idx in range(num_runs):
             run_seed = base_seed + run_idx
@@ -2303,9 +2360,8 @@ Protify is an open source platform designed to simplify and democratize workflow
             all_valid_metrics.append(valid_metrics)
             all_test_metrics.append(test_metrics)
             
-            # Track test loss for determining best run
-            test_loss = test_metrics.get('test_loss', test_metrics.get('eval_loss', float('inf')))
-            run_results.append((run_idx, test_loss, y_pred, y_true, run_seed, run_model))
+            # The kept seed is chosen on validation loss; test only scores it.
+            run_results.append((run_idx, _selection_loss(valid_metrics), y_pred, y_true, run_seed, run_model))
         
         # Restore original seed
         self.trainer_args.seed = base_seed
@@ -2326,15 +2382,16 @@ Protify is an open source platform designed to simplify and democratize workflow
                 'run_index': run_result[0],
                 'run_number': run_result[0] + 1,
                 'seed': run_result[4],
-                'test_loss': run_result[1],
+                'valid_loss': run_result[1],
+                'test_loss': all_test_metrics[run_result[0]].get('test_loss'),
             }
             for run_result in run_results
         ]
         
-        # Find the best run (lowest test loss)
+        # The kept run has the lowest validation loss.
         best_run = min(run_results, key=lambda x: x[1])
         best_run_idx, best_loss, best_y_pred, best_y_true, best_seed, best_model = best_run
-        print_message(f"Best run: {best_run_idx + 1} (seed={best_seed}, test_loss={best_loss:.4f})")
+        print_message(f"Best run by validation loss: {best_run_idx + 1} (seed={best_seed}, eval_loss={best_loss:.4f})")
         
         # Generate plot for best run (unless skip_plot is True)
         if not skip_plot:
@@ -2410,7 +2467,7 @@ Protify is an open source platform designed to simplify and democratize workflow
         
         all_valid_metrics = []
         all_test_metrics = []
-        run_results = []  # Store (run_idx, test_loss, y_pred, y_true, seed, model) for plotting best
+        run_results = []  # (run_idx, validation loss, test predictions, test labels, seed, model) per run
         
         for run_idx in range(num_runs):
             run_seed = base_seed + run_idx
@@ -2442,9 +2499,8 @@ Protify is an open source platform designed to simplify and democratize workflow
             all_valid_metrics.append(valid_metrics)
             all_test_metrics.append(test_metrics)
             
-            # Track test loss for determining best run
-            test_loss = test_metrics.get('test_loss', test_metrics.get('eval_loss', float('inf')))
-            run_results.append((run_idx, test_loss, y_pred, y_true, run_seed, trained_model))
+            # The kept seed is chosen on validation loss; test only scores it.
+            run_results.append((run_idx, _selection_loss(valid_metrics), y_pred, y_true, run_seed, trained_model))
         
         # Restore original seed
         self.trainer_args.seed = base_seed
@@ -2453,10 +2509,10 @@ Protify is an open source platform designed to simplify and democratize workflow
         aggregated_valid = self._aggregate_metrics(all_valid_metrics)
         aggregated_test = self._aggregate_metrics(all_test_metrics)
         
-        # Find the best run (lowest test loss)
+        # The kept run has the lowest validation loss.
         best_run = min(run_results, key=lambda x: x[1])
         best_run_idx, best_loss, best_y_pred, best_y_true, best_seed, best_model = best_run
-        print_message(f"Best run: {best_run_idx + 1} (seed={best_seed}, test_loss={best_loss:.4f})")
+        print_message(f"Best run by validation loss: {best_run_idx + 1} (seed={best_seed}, eval_loss={best_loss:.4f})")
         
         # Generate plot for best run (unless skip_plot is True)
         if not skip_plot:
@@ -2521,7 +2577,7 @@ Protify is an open source platform designed to simplify and democratize workflow
             
             all_valid_metrics = []
             all_test_metrics = []
-            run_results = []  # Store (run_idx, test_loss, y_pred, y_true, seed, model) for plotting best
+            run_results = []  # (run_idx, validation loss, test predictions, test labels, seed, model) per run
             
             for run_idx in range(num_runs):
                 run_seed = base_seed + run_idx
@@ -2556,9 +2612,8 @@ Protify is an open source platform designed to simplify and democratize workflow
                 all_valid_metrics.append(valid_metrics)
                 all_test_metrics.append(test_metrics)
                 
-                # Track test loss for determining best run
-                test_loss = test_metrics.get('test_loss', test_metrics.get('eval_loss', float('inf')))
-                run_results.append((run_idx, test_loss, y_pred, y_true, run_seed, trained_model))
+                # The kept seed is chosen on validation loss; test only scores it.
+                run_results.append((run_idx, _selection_loss(valid_metrics), y_pred, y_true, run_seed, trained_model))
             
             # Restore original seed
             self.trainer_args.seed = base_seed
@@ -2568,10 +2623,10 @@ Protify is an open source platform designed to simplify and democratize workflow
             aggregated_valid = self._aggregate_metrics(all_valid_metrics)
             aggregated_test = self._aggregate_metrics(all_test_metrics)
             
-            # Find the best run (lowest test loss)
+            # The kept run has the lowest validation loss.
             best_run = min(run_results, key=lambda x: x[1])
             best_run_idx, best_loss, best_y_pred, best_y_true, best_seed, best_model = best_run
-            print_message(f"Best hybrid run: {best_run_idx + 1} (seed={best_seed}, test_loss={best_loss:.4f})")
+            print_message(f"Best hybrid run by validation loss: {best_run_idx + 1} (seed={best_seed}, eval_loss={best_loss:.4f})")
             
             # Generate plot for best run (unless skip_plot is True)
             task_type = self.probe_args.task_type

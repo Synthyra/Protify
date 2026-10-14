@@ -15,8 +15,20 @@ Neural network layers that several projects' models are built from, one submodul
 | `feedforward` | SwiGLU and the pre-normalized SwiGLU feed-forward block |
 | `attention` | Multi-head self-attention and two attention poolers |
 | `transformer` | The transformer block: attention, then the feed-forward block |
+| `attention_backends` | Attention backend selection (`flex`, `sdpa`, `kernels`), masks for each, and unpadding for FlashAttention |
+| `probe_attention` | Multi-head self-attention on a selectable backend, with rotary tables computed once up to `max_seq_len` |
+| `probe_transformer` | The pre-normalized transformer stack of the residue-embedding probes, and head-size resolution |
+| `losses` | Training losses of probe heads, by task type, and binary cross entropy with ignored targets and smoothing |
 
-The last four are the annotation transformer's layers. With `nn.Linear`'s default initialization,
+`attention_backends`, `probe_attention`, `probe_transformer`, `losses`, and `feedforward.swiglu_ln_ffn`
+are the generic layers of Protify's transformer probe and of the InterpNet probe, moved here from
+`interpnet` on 2026-10-14 so the public Protify carries them without InterpNet, which stays
+private. Their code and state-dict keys are unchanged. Only the `kernels` backend imports FastPLMs,
+which loads FlashAttention through its `kernels.lock` and raises when a supported kernel fails to
+load. Tests: `tests/tier1_unit/test_layers_attention_backends.py`,
+`test_layers_probe_attention.py`, and `test_layers_losses.py`.
+
+`linear`, `feedforward`, `attention`, and `transformer` are the annotation transformer's layers. With `nn.Linear`'s default initialization,
 and in the feed-forward block a biased layer normalization, the attention and the feed-forward
 block are also DSM's and synth's translator's, and the feed-forward block is InterpNet's. With an
 unbiased layer normalization before its projection, and spectral normalization when asked for, the

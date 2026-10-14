@@ -9,13 +9,8 @@ the format's specification and shares no code with the decoder.
 import struct
 import torch
 
-
-try:
-    from src.protify.legacy_cache import _COMPACT_VERSION, _SPARSE_VERSION, blob_dtype, embedding_blob_to_tensor
-    from src.protify.testing_suite.legacy_cache_writer import LEGACY_BFLOAT16_CODE, dense_blob, sparse_blob
-except ImportError:
-    from protify.legacy_cache import _COMPACT_VERSION, _SPARSE_VERSION, blob_dtype, embedding_blob_to_tensor
-    from protify.testing_suite.legacy_cache_writer import LEGACY_BFLOAT16_CODE, dense_blob, sparse_blob
+from protify.legacy_cache import _COMPACT_VERSION, _SPARSE_VERSION, blob_dtype, embedding_blob_to_tensor
+from protify.testing_suite.legacy_cache_writer import LEGACY_BFLOAT16_CODE, dense_blob, sparse_blob
 
 
 def _sparse_vector(width: int, density: float, dtype: torch.dtype = torch.float16) -> torch.Tensor:

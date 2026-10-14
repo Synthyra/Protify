@@ -77,3 +77,59 @@ def calculate_topk_metrics(
         metrics[f"topk_pred_neg_acc_{k}"] = float((flat_labels[bottom] == 0).mean())
 
     return metrics
+
+
+def balanced_subsamples(labels: np.ndarray, *, seed: int = 0, subsamples: int = 10) -> list[np.ndarray]:
+    """Index sets of class-balanced views: the majority class downsampled without replacement to the minority's size.
+
+    View i draws with seed ``seed + 11 * (i + 1)``, the seeds Atlas's balanced metrics have always used, so callers see the
+    same views. An input already balanced is its own single view, in its own order.
+    """
+    # labels: (n,) of 0 and 1.
+    labels = np.asarray(labels).ravel()
+    positive, negative = np.flatnonzero(labels == 1), np.flatnonzero(labels == 0)  # (n_pos,), (n_neg,)
+    if not len(positive) or not len(negative) or len(positive) + len(negative) != len(labels):
+        raise ValueError("balanced views need binary labels with both classes present")
+    if len(positive) == len(negative):
+        return [np.arange(len(labels))]
+    if subsamples < 1:
+        raise ValueError("balanced views need at least one subsample")
+    majority, minority = (negative, positive) if len(negative) > len(positive) else (positive, negative)
+    views = []
+    for view in range(subsamples):
+        generator = np.random.default_rng(seed + 11 * (view + 1))
+        indices = np.concatenate([minority, generator.choice(majority, size=len(minority), replace=False)])  # (2 n_min,)
+        generator.shuffle(indices)
+        views.append(indices)
+    return views
+
+
+def balanced_mcc(labels: np.ndarray, scores: np.ndarray, *, seed: int = 0, subsamples: int = 10) -> dict[str, float]:
+    """Balanced MCC: MCC at the threshold that maximizes its mean over the balanced views of `balanced_subsamples`.
+
+    A score at or above the threshold predicts positive. Candidate thresholds are every distinct score in any view, swept
+    in ascending order so a tie goes to the lowest, and a view predicted all one class scores 0. Counts come from sorted
+    scores, one pass per view, so a sweep over millions of pairs is cheap. Returns the mean MCC, its population standard
+    deviation across views at that threshold, the threshold, and the number of views.
+    """
+    # labels, scores: (n,).
+    labels = np.asarray(labels).ravel()
+    scores = np.asarray(scores, dtype=np.float64).ravel()
+    if scores.shape != labels.shape or not np.isfinite(scores).all():
+        raise ValueError("balanced MCC needs one finite score per label")
+    views = balanced_subsamples(labels, seed=seed, subsamples=subsamples)
+    candidates = np.unique(np.concatenate([scores[view] for view in views]))  # (t,), ascending
+    mcc = np.zeros((len(views), len(candidates)))  # (s, t)
+    for row, view in enumerate(views):
+        view_labels, view_scores = labels[view], scores[view]  # Each (m,).
+        positive = np.sort(view_scores[view_labels == 1])  # (m_pos,)
+        negative = np.sort(view_scores[view_labels == 0])  # (m_neg,)
+        tp = (len(positive) - np.searchsorted(positive, candidates, side="left")).astype(np.float64)  # (t,)
+        fp = (len(negative) - np.searchsorted(negative, candidates, side="left")).astype(np.float64)  # (t,)
+        fn, tn = len(positive) - tp, len(negative) - fp  # Each (t,).
+        denominator = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))  # (t,)
+        np.divide(tp * tn - fp * fn, denominator, out=mcc[row], where=denominator > 0)
+    mean = mcc.mean(axis=0)  # (t,)
+    best = int(np.argmax(mean))
+    return {"balanced_mcc": float(mean[best]), "balanced_mcc_std": float(mcc[:, best].std()),
+            "threshold": float(candidates[best]), "subsamples": float(len(views))}

@@ -5,7 +5,7 @@ import torch
 
 from transformers import T5Config
 
-from src.protify.base_models.t5 import (
+from protify.base_models.t5 import (
     T5ForSequenceClassification,
     T5ForTokenClassification,
 )

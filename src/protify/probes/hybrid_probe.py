@@ -4,14 +4,7 @@ from typing import Any
 from torch import nn
 from transformers import PreTrainedModel, PretrainedConfig
 
-
-try:
-    from ..pooler import Pooler
-except ImportError:
-    try:
-        from protify.pooler import Pooler
-    except ImportError:
-        from pooler import Pooler
+from ..pooler import Pooler
 
 
 class HybridProbeConfig(PretrainedConfig):

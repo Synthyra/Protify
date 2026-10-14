@@ -10,13 +10,13 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 from packaging.requirements import Requirement
 
-from src.protify.base_models.dplm import presets as dplm_presets
-from src.protify.base_models.dplm2 import DPLM2TokenizerWrapper
-from src.protify.base_models.dplm2 import presets as dplm2_presets
-from src.protify.base_models.e1 import E1ForEmbedding
-from src.protify.base_models.esm2 import presets as esm2_presets
-from src.protify.base_models.fastplms_loading import DEFAULT_ATTENTION_IMPLEMENTATION, load_fastplms_model
-from src.protify.base_models.supported_models import (
+from protify.base_models.dplm import presets as dplm_presets
+from protify.base_models.dplm2 import DPLM2TokenizerWrapper
+from protify.base_models.dplm2 import presets as dplm2_presets
+from protify.base_models.e1 import E1ForEmbedding
+from protify.base_models.esm2 import presets as esm2_presets
+from protify.base_models.fastplms_loading import DEFAULT_ATTENTION_IMPLEMENTATION, load_fastplms_model
+from protify.base_models.supported_models import (
     all_presets_with_paths,
     currently_supported_models,
     standard_models,

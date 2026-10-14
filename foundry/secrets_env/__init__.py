@@ -13,7 +13,10 @@ Which file loads, the first match winning:
 3. The nearest `.secrets.env` in `start` or a directory above it. `start` defaults to this
    package's directory. foundry sits at the workspace root, whose file is in the Dropbox folder
    above it, and a projection vendors it inside the repository, whose root holds that
-   repository's file, so the default finds the right file in both.
+   repository's file, so the default finds the right file in both. An installed copy, under
+   `site-packages` or `dist-packages`, has no default: the directories above it belong to the
+   interpreter rather than to a project, so only `start`, `path`, or `FOUNDRY_SECRETS` finds a
+   file for it.
 
 A named file that does not exist loads nothing: the search never moves past it to another file.
 
@@ -63,6 +66,8 @@ ALIASES = {
     "HUGGING_FACE_HUB_TOKEN": "HF_TOKEN",
 }
 PACKAGE_DIRECTORY = Path(__file__).resolve().parent
+# Directories an installer puts packages in, above which no project's secrets file lives.
+INSTALL_DIRECTORIES = frozenset({"site-packages", "dist-packages"})
 
 
 def find_secrets_file(start: Path | None = None, *, path: Path | None = None) -> Path | None:
@@ -72,6 +77,9 @@ def find_secrets_file(start: Path | None = None, *, path: Path | None = None) ->
         named = Path(os.environ[PATH_VARIABLE])
     if named is not None:
         return named if named.is_file() else None
+
+    if start is None and INSTALL_DIRECTORIES.intersection(PACKAGE_DIRECTORY.parts):
+        return None
 
     origin = (start or PACKAGE_DIRECTORY).resolve()
     directories = origin.parents if origin.is_file() else (origin, *origin.parents)

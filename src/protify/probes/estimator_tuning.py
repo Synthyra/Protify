@@ -23,25 +23,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-
-try:
-    from probes.estimator_probe import (
-        ESTIMATOR_DEFAULTS,
-        ESTIMATOR_PROBE_TYPES,
-        REGRESSION_TASK_TYPES,
-        EstimatorProbeArguments,
-        fit_and_score_valid,
-    )
-    from console_output import print_message
-except ImportError:
-    from .estimator_probe import (
-        ESTIMATOR_DEFAULTS,
-        ESTIMATOR_PROBE_TYPES,
-        REGRESSION_TASK_TYPES,
-        EstimatorProbeArguments,
-        fit_and_score_valid,
-    )
-    from ..console_output import print_message
+from .estimator_probe import (
+    ESTIMATOR_DEFAULTS,
+    ESTIMATOR_PROBE_TYPES,
+    REGRESSION_TASK_TYPES,
+    EstimatorProbeArguments,
+    fit_and_score_valid,
+)
+from ..console_output import print_message
 
 
 # The default objective is the metric the results table reports, because a search scored on
@@ -114,7 +103,12 @@ def _xgboost_space(trial: Any, args: EstimatorProbeArguments) -> dict[str, Any]:
         # on fit time, so the range reaches further down than a dense embedding needs.
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.02, 1.0, log=True),
         "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 100.0, log=True),
-        "reg_alpha": trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True),
+        # The untuned model has no L1 penalty, which a log range cannot hold, so the penalty is
+        # switched on before its strength is searched; the warm start switches it off.
+        "reg_alpha": (
+            trial.suggest_float("reg_alpha", 1e-4, 10.0, log=True)
+            if trial.suggest_categorical("l1_penalty", [False, True]) else 0.0
+        ),
     }
     if is_binary_classification(args):
         # Only binary classification reads it, and the objective this searches against,
@@ -132,6 +126,10 @@ def _lightgbm_space(trial: Any, args: EstimatorProbeArguments) -> dict[str, Any]
         "min_child_samples": trial.suggest_int("min_child_samples", 1, 64, log=True),
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.02, 1.0, log=True),
         "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+        # LightGBM bags rows only every `subsample_freq` iterations and never by default, so
+        # without this the search spent trials on a subsample nothing read. At subsample 1.0,
+        # the untuned value, every iteration still reads every row.
+        "subsample_freq": 1,
         "reg_lambda": trial.suggest_float("reg_lambda", 0.01, 100.0, log=True),
     }
     if is_binary_classification(args):
@@ -198,15 +196,29 @@ def search_space_names(args: EstimatorProbeArguments) -> list[str]:
     return recorder.names
 
 
-def default_trial_params(args: EstimatorProbeArguments) -> dict[str, Any]:
-    """The shipped defaults, restricted to what this task's search space covers.
+# What an untuned fit uses for each searched parameter `ESTIMATOR_DEFAULTS` leaves to the library:
+# the library's own default, or for `l1_penalty` the switch that leaves XGBoost's `reg_alpha` at its
+# default of 0.
+LIBRARY_DEFAULTS: dict[str, dict[str, Any]] = {
+    "xgboost": {"l1_penalty": False, "scale_pos_weight": 1.0},
+    "lightgbm": {"subsample": 1.0, "scale_pos_weight": 1.0},
+    "random_forest": {"max_depth": None, "class_weight": None},
+}
 
-    Enqueued as the first trial so the search starts where an untuned run would land and
-    moves away from it only by scoring better on validation. Optuna samples every
-    parameter left out here, which is each one the defaults do not name.
+
+def default_trial_params(args: EstimatorProbeArguments) -> dict[str, Any]:
+    """The untuned configuration, as values for every parameter this task's search space asks for.
+
+    Enqueued as the first trial so the search starts exactly where an untuned run lands and
+    moves away from it only by scoring better on validation. A searched parameter with no
+    untuned value raises rather than letting Optuna sample it into the first trial.
     """
-    defaults = ESTIMATOR_DEFAULTS[args.probe_type]
-    return {name: defaults[name] for name in search_space_names(args) if name in defaults}
+    untuned = {**ESTIMATOR_DEFAULTS[args.probe_type], **LIBRARY_DEFAULTS[args.probe_type]}
+    names = search_space_names(args)
+    unknown = [name for name in names if name not in untuned]
+    if unknown:
+        raise ValueError(f"{args.probe_type} searches {unknown} with no untuned value; add it to LIBRARY_DEFAULTS.")
+    return {name: untuned[name] for name in names}
 
 
 def tune_estimator_probe(
@@ -288,5 +300,7 @@ def tune_estimator_probe(
 
     print_message(f"Searched {len(completed)} of {search.n_trials} trials")
     print_message(f"Best validation {metric}: {study.best_value:.5f}")
-    print_message(f"Best {args.probe_type} hyperparameters: {study.best_params}")
-    return dict(study.best_params)
+    # The space turns the trial's choices, such as the L1 switch, into the estimator's own parameters.
+    best = suggest(optuna.trial.FixedTrial(study.best_params), args)
+    print_message(f"Best {args.probe_type} hyperparameters: {best}")
+    return best

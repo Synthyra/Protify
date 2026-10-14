@@ -18,20 +18,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from foundry.checkpoint_loading import uninitialized_memory_as_nan
-
-
-try:
-    from src.protify.cloud_cli import _build_cloud_config_from_args
-    from src.protify.hyperopt_utils import HyperoptModule
-    from src.protify.main import parse_arguments
-    from src.protify.probes.get_probe import ProbeArguments, get_probe, rebuild_probe_from_saved_config
-    from src.protify.probes.transformer_probe import BoMPooling
-except ImportError:
-    from protify.cloud_cli import _build_cloud_config_from_args
-    from protify.hyperopt_utils import HyperoptModule
-    from protify.main import parse_arguments
-    from protify.probes.get_probe import ProbeArguments, get_probe, rebuild_probe_from_saved_config
-    from protify.probes.transformer_probe import BoMPooling
+from protify.cloud_cli import _build_cloud_config_from_args
+from protify.hyperopt_utils import HyperoptModule
+from protify.main import parse_arguments
+from protify.probes.get_probe import ProbeArguments, get_probe, rebuild_probe_from_saved_config
+from protify.probes.transformer_probe import BoMPooling
 
 
 BATCH = 2  # b
@@ -377,7 +368,7 @@ def test_a_sweep_offers_hidden_sizes_every_head_size_divides(
 def test_the_command_line_and_a_cloud_run_pass_the_pooling_only_when_set(
     flag: list[str], expected: list[str] | None, monkeypatch
 ) -> None:
-    monkeypatch.setattr(sys.modules[parse_arguments.__module__], "load_secrets_env", lambda: [])
+    monkeypatch.setattr(sys.modules[parse_arguments.__module__], "load_secrets_env", lambda **_: [])
     monkeypatch.setattr(sys, "argv", ["main.py", "--data_names", "DeepLoc-2", *flag])
 
     arguments = parse_arguments()
@@ -398,7 +389,7 @@ def test_a_yaml_config_passes_the_pooling_only_when_set(
 ) -> None:
     yaml_path = tmp_path / "config.yaml"
     yaml_path.write_text(f"data_names:\n  - DeepLoc-2\n{setting}\n", encoding="utf-8")
-    monkeypatch.setattr(sys.modules[parse_arguments.__module__], "load_secrets_env", lambda: [])
+    monkeypatch.setattr(sys.modules[parse_arguments.__module__], "load_secrets_env", lambda **_: [])
     monkeypatch.setattr(sys, "argv", ["main.py", "--yaml_path", str(yaml_path)])
 
     arguments = parse_arguments()

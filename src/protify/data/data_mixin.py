@@ -14,30 +14,10 @@ from typing import TYPE_CHECKING, Any
 from datasets import Dataset, DatasetDict, load_dataset
 from pandas import read_csv, read_excel
 
-
-try:
-    from console_output import print_message
-    from seed_utils import get_global_seed
-    from feature_cache import open_reader, read_embeddings, require_feature
-    from data.dataset_classes import EmbeddingStandardizer, read_cached_row
-    from metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
-except ImportError:
-    from ..console_output import print_message
-    from ..seed_utils import get_global_seed
-    from ..feature_cache import open_reader, read_embeddings, require_feature
-    from .dataset_classes import EmbeddingStandardizer, read_cached_row
-    from ..metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
 from .cache_reader import cached_rows
+from .dataset_classes import EmbeddingStandardizer, read_cached_row
 from .feature_matrix import FeatureMatrix, matrix_density, stack_pooled_rows
 from .pair_features import DEFAULT_PAIR_FEATURE_MODE, pair_order_matters, pair_vector_halves
-from .supported_datasets import (
-    get_dataset_source,
-    resolve_dataset_name,
-    rigorous_benchmark,
-    standard_data_benchmark,
-    supported_datasets,
-    vector_benchmark,
-)
 from .sequence_alphabets import (
     AA_SET,
     CODON_SET,
@@ -51,6 +31,18 @@ from .sequence_alphabets import (
     DNA_CODON_TO_AA,
     RNA_CODON_TO_AA,
 )
+from .supported_datasets import (
+    get_dataset_source,
+    resolve_dataset_name,
+    rigorous_benchmark,
+    standard_data_benchmark,
+    supported_datasets,
+    vector_benchmark,
+)
+from ..console_output import print_message
+from ..feature_cache import open_reader, read_embeddings, require_feature
+from ..metrics_balanced import compute_sample_weights, apply_weights_from_reference, _default_bin_borders
+from ..seed_utils import get_global_seed
 
 
 FASTA_EXTENSIONS = {'.fa', '.fasta', '.faa', '.fna', '.ffn', '.frn'}
@@ -58,7 +50,12 @@ SPLIT_ALIASES = {
     'train': ('train',),
     'valid': ('valid', 'validation', 'val', 'dev'),
     'test': ('test', 'testing'),
+    # Optional: a dataset that has one gets a calibration report (`calibration_report.py`).
+    'calibration': ('calibration', 'calib', 'cal'),
 }
+# The names a dataset's label and sequence columns go by, the first present winning.
+LABEL_COLUMNS = ('labels', 'label', 'Labels', 'Label')
+SEQUENCE_COLUMNS = ('seqs', 'Seqs', 'seq', 'Seq', 'sequence', 'Sequence', 'sequences', 'Sequences')
 # Dataset names that do not resolve to a single Hub dataset `get_data` loads.
 UNPINNABLE_DATA_NAMES = frozenset({'standard_benchmark', 'vector_benchmark', 'rigorous_benchmark', 'protein_gym'})
 # A capped regression split keeps each of this many label quantiles in its share, deciles.
@@ -596,7 +593,7 @@ class DataMixin:
             frame = read_csv(file_path, delimiter=self._delimiter)
         return Dataset.from_pandas(frame)
 
-    def _load_local_dataset_dir(self, data_dir: str) -> tuple[Dataset, Dataset, Dataset]:
+    def _load_local_dataset_dir(self, data_dir: str) -> dict[str, Dataset]:
         split_files = {}
         for file_path in glob(os.path.join(data_dir, '*')):
             if not os.path.isfile(file_path):
@@ -619,7 +616,8 @@ class DataMixin:
             split_name: self._read_local_split_file(file_path)
             for split_name, file_path in split_files.items()
         }
-        return self._select_train_valid_test_splits(dataset, os.path.basename(os.path.normpath(data_dir)))
+        train_set, valid_set, test_set = self._select_train_valid_test_splits(dataset, os.path.basename(os.path.normpath(data_dir)))
+        return self._with_calibration_split({'train': train_set, 'valid': valid_set, 'test': test_set}, dataset)
 
     def _active_translation_mode(self) -> str | None:
         mode_to_flag = {
@@ -755,7 +753,7 @@ class DataMixin:
         """
         return ''.join(char for char in seq.upper() if char in AA_SET)
 
-    def _find_first_present_column(self, available_columns: list[str], candidates_ordered: list[str]) -> str:
+    def _find_first_present_column(self, available_columns: list[str], candidates_ordered: Sequence[str]) -> str:
         """Return the first column from candidates_ordered that exists in available_columns (case-insensitive)."""
         lowercase_to_actual = {col.lower(): col for col in available_columns}
         for candidate in candidates_ordered:
@@ -821,9 +819,10 @@ class DataMixin:
         The draw depends only on the split's rows, its name, and `split_row_cap_seed`, so a
         dataset keeps the same rows under every training seed, loaded alone or beside other
         datasets, in main.py, the SAE precompute, and the uncertainty workflow alike. A
-        split at or under its cap comes back as it was, rows and order unchanged.
+        split at or under its cap comes back as it was, rows and order unchanged, and a
+        calibration split has no cap.
         """
-        cap = self.data_args.split_row_caps[split_name]
+        cap = self.data_args.split_row_caps.get(split_name)
         if cap is None or len(split) <= cap:
             return split
 
@@ -897,248 +896,171 @@ class DataMixin:
 
     def process_datasets(
             self,
-            hf_datasets: list[tuple[Dataset, Dataset, Dataset, bool]],
+            hf_datasets: list[tuple[Dataset, Dataset, Dataset, bool] | tuple[Dataset, Dataset, Dataset, bool, Dataset | None]],
             data_names: list[str],
         ) -> ProcessedDatasets:
+        """Clean, trim, cap, and label every split of each dataset, and gather the sequences to embed.
+
+        An optional fifth element is the dataset's calibration split. It goes through every step
+        the other splits do, apart from the row caps, and lands in `calibration_sets` rather than
+        in the returned splits, which stay train, valid, and test.
+        """
         max_length = self._data_max_length
         datasets, all_seqs = {}, set()
+        self.calibration_sets: dict[str, Dataset] = {}
         translation_mode = self._active_translation_mode()
         for dataset, data_name in zip(hf_datasets, data_names, strict=True):
             print_message(f'Processing {data_name}')
-            train_set, valid_set, test_set, ppi = dataset
-            print(train_set)
-            print(valid_set)
-            print(test_set)
+            train_set, valid_set, test_set, ppi = dataset[:4]
+            calibration_set = dataset[4] if len(dataset) > 4 else None
+            splits = {'train': train_set, 'valid': valid_set, 'test': test_set}
+            if calibration_set is not None:
+                splits['calibration'] = calibration_set
+            for split in splits.values():
+                print(split)
+            cols = self.data_args.multi_column
+
             ### sanitize
             # 1) Drop rows with None or NaN in any sequence column(s) or labels
-            before_train, before_valid, before_test = len(train_set), len(valid_set), len(test_set)
+            before = {name: len(split) for name, split in splits.items()}
             if ppi:
-                train_set = train_set.filter(lambda x: not (self._is_missing_value(x['SeqA']) or self._is_missing_value(x['SeqB']) or self._is_missing_value(x['labels'])))
-                valid_set = valid_set.filter(lambda x: not (self._is_missing_value(x['SeqA']) or self._is_missing_value(x['SeqB']) or self._is_missing_value(x['labels'])))
-                test_set = test_set.filter(lambda x: not (self._is_missing_value(x['SeqA']) or self._is_missing_value(x['SeqB']) or self._is_missing_value(x['labels'])))
-            elif self.data_args.multi_column:
-                cols = self.data_args.multi_column
-                # assert columns exist
+                def complete(x: dict[str, Any]) -> bool:
+                    return not (self._is_missing_value(x['SeqA']) or self._is_missing_value(x['SeqB']) or self._is_missing_value(x['labels']))
+            elif cols:
                 for col in cols:
-                    assert col in train_set.column_names or col in valid_set.column_names or col in test_set.column_names, f"Column {col} not found in dataset {data_name}"
+                    assert any(col in split.column_names for split in splits.values()), f"Column {col} not found in dataset {data_name}"
 
-                def _filter_row(x: dict[str, Any]) -> bool:
+                def complete(x: dict[str, Any]) -> bool:
                     return (not self._is_missing_value(x['labels'])) and all(not self._is_missing_value(x[col]) for col in cols)
-
-                train_set = train_set.filter(_filter_row)
-                valid_set = valid_set.filter(_filter_row)
-                test_set = test_set.filter(_filter_row)
             else:
-                train_set = train_set.filter(lambda x: not (self._is_missing_value(x['seqs']) or self._is_missing_value(x['labels'])))
-                valid_set = valid_set.filter(lambda x: not (self._is_missing_value(x['seqs']) or self._is_missing_value(x['labels'])))
-                test_set = test_set.filter(lambda x: not (self._is_missing_value(x['seqs']) or self._is_missing_value(x['labels'])))
-            if any([
-                len(train_set) != before_train,
-                len(valid_set) != before_valid,
-                len(test_set) != before_test,
-            ]):
-                print_message(
-                    f"Removed None / NaN rows - train: {before_train - len(train_set)}, valid: {before_valid - len(valid_set)}, test: {before_test - len(test_set)}"
-                )
+                def complete(x: dict[str, Any]) -> bool:
+                    return not (self._is_missing_value(x['seqs']) or self._is_missing_value(x['labels']))
+            splits = {name: split.filter(complete) for name, split in splits.items()}
+            self._report_removed_rows('Removed None / NaN rows', before, splits)
 
             # 2) Legacy sanitization for non-translation workflows
             if translation_mode is None:
-                if ppi:
-                    train_set = train_set.map(lambda x: {'SeqA': self._sanitize_sequence(x['SeqA']),
-                                                         'SeqB': self._sanitize_sequence(x['SeqB'])})
-                    valid_set = valid_set.map(lambda x: {'SeqA': self._sanitize_sequence(x['SeqA']),
-                                                         'SeqB': self._sanitize_sequence(x['SeqB'])})
-                    test_set = test_set.map(lambda x: {'SeqA': self._sanitize_sequence(x['SeqA']),
-                                                        'SeqB': self._sanitize_sequence(x['SeqB'])})
-                elif self.data_args.multi_column:
-                    cols = self.data_args.multi_column
-                    for col in cols:
-                        train_set = train_set.map(lambda x, _col=col: {_col: self._sanitize_sequence(x[_col])})
-                        valid_set = valid_set.map(lambda x, _col=col: {_col: self._sanitize_sequence(x[_col])})
-                        test_set = test_set.map(lambda x, _col=col: {_col: self._sanitize_sequence(x[_col])})
-                else:
-                    train_set = train_set.map(lambda x: {'seqs': self._sanitize_sequence(x['seqs'])})
-                    valid_set = valid_set.map(lambda x: {'seqs': self._sanitize_sequence(x['seqs'])})
-                    test_set = test_set.map(lambda x: {'seqs': self._sanitize_sequence(x['seqs'])})
+                splits = {name: self._map_sequences(split, ppi, self._sanitize_sequence) for name, split in splits.items()}
 
             # 3) Translate before enforcing the target model's raw-sequence
             # budget. Length limits apply to the sequence the tokenizer sees,
             # not to the source alphabet before a 3x expansion or contraction.
             if translation_mode is not None:
-                if ppi:
-                    train_set = train_set.map(lambda x: {'SeqA': self._translate_sequence_for_mode(x['SeqA'], translation_mode),
-                                                         'SeqB': self._translate_sequence_for_mode(x['SeqB'], translation_mode)})
-                    valid_set = valid_set.map(lambda x: {'SeqA': self._translate_sequence_for_mode(x['SeqA'], translation_mode),
-                                                         'SeqB': self._translate_sequence_for_mode(x['SeqB'], translation_mode)})
-                    test_set = test_set.map(lambda x: {'SeqA': self._translate_sequence_for_mode(x['SeqA'], translation_mode),
-                                                       'SeqB': self._translate_sequence_for_mode(x['SeqB'], translation_mode)})
-                elif self.data_args.multi_column:
-                    cols = self.data_args.multi_column
-                    for col in cols:
-                        train_set = train_set.map(lambda x, _col=col: {_col: self._translate_sequence_for_mode(x[_col], translation_mode)})
-                        valid_set = valid_set.map(lambda x, _col=col: {_col: self._translate_sequence_for_mode(x[_col], translation_mode)})
-                        test_set = test_set.map(lambda x, _col=col: {_col: self._translate_sequence_for_mode(x[_col], translation_mode)})
-                else:
-                    train_set = train_set.map(lambda x: {'seqs': self._translate_sequence_for_mode(x['seqs'], translation_mode)})
-                    valid_set = valid_set.map(lambda x: {'seqs': self._translate_sequence_for_mode(x['seqs'], translation_mode)})
-                    test_set = test_set.map(lambda x: {'seqs': self._translate_sequence_for_mode(x['seqs'], translation_mode)})
+                def translate(sequence: str) -> str:
+                    return self._translate_sequence_for_mode(sequence, translation_mode)
+
+                splits = {name: self._map_sequences(split, ppi, translate) for name, split in splits.items()}
                 print_message(f"Translated sequences with mode {translation_mode} before length enforcement.")
 
             # 4) Remove any length 0 sequences
-            before_train, before_valid, before_test = len(train_set), len(valid_set), len(test_set)
+            before = {name: len(split) for name, split in splits.items()}
             if ppi:
-                train_set = train_set.filter(lambda x: len(x['SeqA']) > 0 and len(x['SeqB']) > 0)
-                valid_set = valid_set.filter(lambda x: len(x['SeqA']) > 0 and len(x['SeqB']) > 0)
-                test_set = test_set.filter(lambda x: len(x['SeqA']) > 0 and len(x['SeqB']) > 0)
-            elif self.data_args.multi_column:
-                cols = self.data_args.multi_column
-                train_set = train_set.filter(lambda x: all(len(x[col]) > 0 for col in cols))
-                valid_set = valid_set.filter(lambda x: all(len(x[col]) > 0 for col in cols))
-                test_set = test_set.filter(lambda x: all(len(x[col]) > 0 for col in cols))
+                def non_empty(x: dict[str, Any]) -> bool:
+                    return len(x['SeqA']) > 0 and len(x['SeqB']) > 0
+            elif cols:
+                def non_empty(x: dict[str, Any]) -> bool:
+                    return all(len(x[col]) > 0 for col in cols)
             else:
-                train_set = train_set.filter(lambda x: len(x['seqs']) > 0)
-                valid_set = valid_set.filter(lambda x: len(x['seqs']) > 0)
-                test_set = test_set.filter(lambda x: len(x['seqs']) > 0)
-
-            if any([
-                len(train_set) != before_train,
-                len(valid_set) != before_valid,
-                len(test_set) != before_test,
-            ]): 
-                print_message(
-                    f"Removed length 0 rows - train: {before_train - len(train_set)}, valid: {before_valid - len(valid_set)}, test: {before_test - len(test_set)}"
-                )
+                def non_empty(x: dict[str, Any]) -> bool:
+                    return len(x['seqs']) > 0
+            splits = {name: split.filter(non_empty) for name, split in splits.items()}
+            self._report_removed_rows('Removed length 0 rows', before, splits)
 
             # 5) Trim or truncate by length if necessary
-            before_train, before_valid, before_test = len(train_set), len(valid_set), len(test_set)
+            before = {name: len(split) for name, split in splits.items()}
             if self._trim: # trim by length
                 if ppi:
-                    train_set = train_set.filter(lambda x: len(x['SeqA']) + len(x['SeqB']) <= max_length)
-                    valid_set = valid_set.filter(lambda x: len(x['SeqA']) + len(x['SeqB']) <= max_length)
-                    test_set = test_set.filter(lambda x: len(x['SeqA']) + len(x['SeqB']) <= max_length)
-                elif self.data_args.multi_column:
-                    cols = self.data_args.multi_column
-                    train_set = train_set.filter(lambda x: all(len(x[col]) <= max_length for col in cols))
-                    valid_set = valid_set.filter(lambda x: all(len(x[col]) <= max_length for col in cols))
-                    test_set = test_set.filter(lambda x: all(len(x[col]) <= max_length for col in cols))
+                    def fits(x: dict[str, Any]) -> bool:
+                        return len(x['SeqA']) + len(x['SeqB']) <= max_length
+                elif cols:
+                    def fits(x: dict[str, Any]) -> bool:
+                        return all(len(x[col]) <= max_length for col in cols)
                 else:
-                    train_set = train_set.filter(lambda x: len(x['seqs']) <= max_length)
-                    valid_set = valid_set.filter(lambda x: len(x['seqs']) <= max_length)
-                    test_set = test_set.filter(lambda x: len(x['seqs']) <= max_length)
+                    def fits(x: dict[str, Any]) -> bool:
+                        return len(x['seqs']) <= max_length
+                splits = {name: split.filter(fits) for name, split in splits.items()}
+            elif ppi: # truncate to max_length
+                splits = {name: split.map(self._truncate_pairs) for name, split in splits.items()}
+            else:
+                splits = {name: self._map_sequences(split, ppi, lambda sequence: sequence[:max_length]) for name, split in splits.items()}
 
-            else: # truncate to max_length
-                if ppi:
-                    train_set = train_set.map(self._truncate_pairs)
-                    valid_set = valid_set.map(self._truncate_pairs)
-                    test_set = test_set.map(self._truncate_pairs)
-                elif self.data_args.multi_column:
-                    cols = self.data_args.multi_column
-                    for col in cols:
-                        train_set = train_set.map(lambda x, _col=col: { _col: x[_col][:max_length] })
-                        valid_set = valid_set.map(lambda x, _col=col: { _col: x[_col][:max_length] })
-                        test_set = test_set.map(lambda x, _col=col: { _col: x[_col][:max_length] })
-                else:
-                    train_set = train_set.map(lambda x: {'seqs': x['seqs'][:max_length]})
-                    valid_set = valid_set.map(lambda x: {'seqs': x['seqs'][:max_length]})
-                    test_set = test_set.map(lambda x: {'seqs': x['seqs'][:max_length]})
-
-            if any([
-                len(train_set) != before_train,
-                len(valid_set) != before_valid,
-                len(test_set) != before_test,
-            ]):
-                print_message(
-                    f"Trimmed rows - train: {(before_train - len(train_set)) / before_train * 100:.2f}%, \
-                    valid: {(before_valid - len(valid_set)) / before_valid * 100:.2f}%, \
-                    test: {(before_test - len(test_set)) / before_test * 100:.2f}%"
+            if any(len(split) != before[name] for name, split in splits.items()):
+                trimmed = ', '.join(
+                    f'{name}: {(before[name] - len(split)) / before[name] * 100 if before[name] else 0.0:.2f}%'
+                    for name, split in splits.items()
                 )
+                print_message(f"Trimmed rows - {trimmed}")
 
             # 6) Cap each split's rows. After every filter, so a cap counts rows that survive
             # them, and before all_seqs, so the embedder and every consumer see kept rows only.
-            train_set = self._cap_split_rows(data_name, 'train', train_set)
-            valid_set = self._cap_split_rows(data_name, 'valid', valid_set)
-            test_set = self._cap_split_rows(data_name, 'test', test_set)
+            splits = {name: self._cap_split_rows(data_name, name, split) for name, split in splits.items()}
 
             # 7) Record all_seqs
-            if ppi:
-                all_seqs.update(list(train_set['SeqA']) + list(train_set['SeqB']))
-                all_seqs.update(list(valid_set['SeqA']) + list(valid_set['SeqB']))
-                all_seqs.update(list(test_set['SeqA']) + list(test_set['SeqB']))
-            elif self.data_args.multi_column:
-                cols = self.data_args.multi_column
-                for col in cols:
-                    all_seqs.update(list(train_set[col]))
-                    all_seqs.update(list(valid_set[col]))
-                    all_seqs.update(list(test_set[col]))
-            else:
-                all_seqs.update(list(train_set['seqs']))
-                all_seqs.update(list(valid_set['seqs']))
-                all_seqs.update(list(test_set['seqs']))
+            for split in splits.values():
+                if ppi:
+                    all_seqs.update(list(split['SeqA']) + list(split['SeqB']))
+                elif cols:
+                    for col in cols:
+                        all_seqs.update(list(split[col]))
+                else:
+                    all_seqs.update(list(split['seqs']))
 
             # confirm the type of labels
-            check_labels = list(train_set['labels'])
+            check_labels = list(splits['train']['labels'])
             label_type = self._label_type_checker(check_labels)
 
             if label_type == 'string': # might be string or multilabel
-                example = list(valid_set['labels'])[0]
+                example = list(splits['valid']['labels'])[0]
                 try:
-                    import ast
                     new_ex = ast.literal_eval(example)
                     if isinstance(new_ex, list): # if ast runs correctly and is now a list it is multilabel labels
                         label_type = 'multilabel'
-                        train_set = train_set.map(lambda ex: {'labels': ast.literal_eval(ex['labels'])})
-                        valid_set = valid_set.map(lambda ex: {'labels': ast.literal_eval(ex['labels'])})
-                        test_set = test_set.map(lambda ex: {'labels': ast.literal_eval(ex['labels'])})
+                        splits = {name: split.map(lambda ex: {'labels': ast.literal_eval(ex['labels'])}) for name, split in splits.items()}
                 except (ValueError, SyntaxError):
                     label_type = 'string' # if ast throws error it is actually string
 
             if label_type == 'string': # if still string, it's for tokenwise classification
-                train_labels = list(train_set['labels'])
+                train_labels = list(splits['train']['labels'])
                 unique_tags = set(tag for doc in train_labels for tag in doc)
                 tag2id = {tag: id for id, tag in enumerate(sorted(unique_tags))}
                 # add cls token to labels
-                train_set = train_set.map(lambda ex: {'labels': self._encode_labels(ex['labels'], tag2id=tag2id)})
-                valid_set = valid_set.map(lambda ex: {'labels': self._encode_labels(ex['labels'], tag2id=tag2id)})
-                test_set = test_set.map(lambda ex: {'labels': self._encode_labels(ex['labels'], tag2id=tag2id)})
+                splits = {name: split.map(lambda ex: {'labels': self._encode_labels(ex['labels'], tag2id=tag2id)}) for name, split in splits.items()}
                 label_type = 'tokenwise'
                 num_labels = len(unique_tags)
             else:
                 if label_type == 'regression':
                     # Detect sigmoid_regression (values in [0,1] covering the range)
-                    if self._is_sigmoid_regression(list(train_set['labels'])):
+                    if self._is_sigmoid_regression(list(splits['train']['labels'])):
                         label_type = 'sigmoid_regression'
                     num_labels = 1
                 elif label_type == 'multilabel':
-                    train_labels_list = list(train_set['labels'])
+                    train_labels_list = list(splits['train']['labels'])
                     label_lengths = set(len(lab) for lab in train_labels_list)
                     if len(label_lengths) > 1:
                         # Variable-length sparse index lists: convert to multi-hot
-                        all_labels = (
-                            list(train_set['labels'])
-                            + list(valid_set['labels'])
-                            + list(test_set['labels'])
-                        )
+                        all_labels = [lab for split in splits.values() for lab in split['labels']]
                         num_labels = max(idx for lab in all_labels for idx in lab) + 1
                         def _to_multihot(ex: dict[str, Any], n: int=num_labels) -> dict[str, list[int]]:
                             vec = [0] * n
                             for idx in ex['labels']:
                                 vec[idx] = 1
                             return {'labels': vec}
-                        train_set = train_set.map(_to_multihot)
-                        valid_set = valid_set.map(_to_multihot)
-                        test_set = test_set.map(_to_multihot)
+                        splits = {name: split.map(_to_multihot) for name, split in splits.items()}
                     else:
                         num_labels = len(train_labels_list[0])
                 else: # singlelabel classification
                     try:
-                        train_labels_list = list(train_set['labels'])
+                        train_labels_list = list(splits['train']['labels'])
                         num_labels = len(train_labels_list[0])
                     except (TypeError, IndexError):
-                        unique = np.unique(list(train_set['labels']))
+                        unique = np.unique(list(splits['train']['labels']))
                         max_label = max(unique) # sometimes there are missing labels
                         full_list = np.arange(0, max_label+1)
                         num_labels = len(full_list)
+            train_set, valid_set, test_set = splits['train'], splits['valid'], splits['test']
             datasets[data_name] = (train_set, valid_set, test_set, num_labels, label_type, ppi)
+            if 'calibration' in splits:
+                self.calibration_sets[data_name] = splits['calibration']
 
             if label_type in ('regression', 'sigmoid_regression'):
                 self._compute_balanced_weights_for(data_name, train_set, valid_set, test_set)
@@ -1150,13 +1072,28 @@ class DataMixin:
         all_seqs = sorted(all_seqs, key=len, reverse=True) # longest first
         return datasets, all_seqs
 
+    def _map_sequences(self, split: Dataset, ppi: bool, transform: Callable[[str], str]) -> Dataset:
+        """`transform` applied to every sequence column of a split: SeqA and SeqB, the multi columns, or seqs."""
+        if ppi:
+            return split.map(lambda x: {'SeqA': transform(x['SeqA']), 'SeqB': transform(x['SeqB'])})
+        if self.data_args.multi_column:
+            for col in self.data_args.multi_column:
+                split = split.map(lambda x, _col=col: {_col: transform(x[_col])})
+            return split
+        return split.map(lambda x: {'seqs': transform(x['seqs'])})
+
+    @staticmethod
+    def _report_removed_rows(action: str, before: dict[str, int], splits: dict[str, Dataset]) -> None:
+        if any(len(split) != before[name] for name, split in splits.items()):
+            removed = ', '.join(f'{name}: {before[name] - len(split)}' for name, split in splits.items())
+            print_message(f"{action} - {removed}")
+
     def get_data(self) -> ProcessedDatasets:
         """
-        Supports tabular local splits and labeled FASTA files.
+        Supports tabular local splits and labeled FASTA files. A split named calibration, calib,
+        or cal is carried beside the others when a dataset has one, and is never required.
         """
         datasets, data_names = [], []
-        label_candidates = ['labels', 'label', 'Labels', 'Label']
-        seq_candidates = ['seqs', 'Seqs', 'seq', 'Seq', 'sequence', 'Sequence', 'sequences', 'Sequences']
 
         for data_path in self.data_args.data_paths:
             data_name = data_path.split('/')[-1]
@@ -1173,81 +1110,11 @@ class DataMixin:
             print_message(f'PPI (or dual sequence input dataset): {ppi}')
 
             train_set, valid_set, test_set = self._select_train_valid_test_splits(dataset, data_name)
+            splits = self._with_calibration_split({'train': train_set, 'valid': valid_set, 'test': test_set}, dataset)
 
-            print_message(f'Train set: {len(train_set)}, Valid set: {len(valid_set)}, Test set: {len(test_set)}')
-            if ppi:
-                # Standardize PPI columns to 'SeqA', 'SeqB', and 'labels'
-                print('Standardizing PPI column names')
-                try:
-                    a_col, b_col = self._find_ppi_sequence_columns(train_set.column_names)
-                except KeyError:
-                    # Retry with validation/test in case train is empty or missing columns
-                    try:
-                        a_col, b_col = self._find_ppi_sequence_columns(valid_set.column_names)
-                    except KeyError:
-                        a_col, b_col = self._find_ppi_sequence_columns(test_set.column_names)
-                
-                try:
-                    lbl_col = self._find_first_present_column(train_set.column_names, label_candidates)
-                except KeyError:
-                    try:
-                        lbl_col = self._find_first_present_column(valid_set.column_names, label_candidates)
-                    except KeyError:
-                        lbl_col = self._find_first_present_column(test_set.column_names, label_candidates)
-
-                train_set = train_set.rename_columns({a_col: 'SeqA', b_col: 'SeqB', lbl_col: 'labels'})
-                valid_set = valid_set.rename_columns({a_col: 'SeqA', b_col: 'SeqB', lbl_col: 'labels'})
-                test_set = test_set.rename_columns({a_col: 'SeqA', b_col: 'SeqB', lbl_col: 'labels'})
-
-                print('Removing extras')
-                train_set = train_set.remove_columns([col for col in train_set.column_names if col not in ['SeqA', 'SeqB', 'labels', 'label_mask']])
-                valid_set = valid_set.remove_columns([col for col in valid_set.column_names if col not in ['SeqA', 'SeqB', 'labels', 'label_mask']])
-                test_set = test_set.remove_columns([col for col in test_set.column_names if col not in ['SeqA', 'SeqB', 'labels', 'label_mask']])
-            else:
-                print('Standardizing column names')
-                use_multi = self.data_args.multi_column is not None
-                if not use_multi:
-                    try:
-                        seq_col = self._find_first_present_column(train_set.column_names, seq_candidates)
-                    except KeyError:
-                        try:
-                            seq_col = self._find_first_present_column(valid_set.column_names, seq_candidates)
-                        except KeyError:
-                            seq_col = self._find_first_present_column(test_set.column_names, seq_candidates)
-
-                try:
-                    label_col = self._find_first_present_column(train_set.column_names, label_candidates)
-                except KeyError:
-                    try:
-                        label_col = self._find_first_present_column(valid_set.column_names, label_candidates)
-                    except KeyError:
-                        label_col = self._find_first_present_column(test_set.column_names, label_candidates)
-
-                # Always standardize label column to 'labels'
-                train_set = train_set.rename_columns({label_col: 'labels'})
-                valid_set = valid_set.rename_columns({label_col: 'labels'})
-                test_set = test_set.rename_columns({label_col: 'labels'})
-
-                if not use_multi:
-                    train_set = train_set.rename_columns({seq_col: 'seqs'})
-                    valid_set = valid_set.rename_columns({seq_col: 'seqs'})
-                    test_set = test_set.rename_columns({seq_col: 'seqs'})
-                    # drop everything else
-                    print('Removing extras')
-                    train_set = train_set.remove_columns([col for col in train_set.column_names if col not in ['seqs', 'labels', 'label_mask']])
-                    valid_set = valid_set.remove_columns([col for col in valid_set.column_names if col not in ['seqs', 'labels', 'label_mask']])
-                    test_set = test_set.remove_columns([col for col in test_set.column_names if col not in ['seqs', 'labels', 'label_mask']])
-                else:
-                    # Validate requested multi columns exist (assert exact match)
-                    for col in self.data_args.multi_column:
-                        assert col in train_set.column_names or col in valid_set.column_names or col in test_set.column_names, f"Column {col} not found in dataset {data_name}"
-                    # Keep only requested columns and labels
-                    keep_cols = set(self.data_args.multi_column + ['labels', 'label_mask'])
-                    train_set = train_set.remove_columns([col for col in train_set.column_names if col not in keep_cols])
-                    valid_set = valid_set.remove_columns([col for col in valid_set.column_names if col not in keep_cols])
-                    test_set = test_set.remove_columns([col for col in test_set.column_names if col not in keep_cols])
-
-            datasets.append((train_set, valid_set, test_set, ppi))
+            print_message(', '.join(f'{name.capitalize()} set: {len(split)}' for name, split in splits.items()))
+            splits = self._standardize_columns(splits, ppi, data_name)
+            datasets.append((splits['train'], splits['valid'], splits['test'], ppi, splits.get('calibration')))
             data_names.append(data_name)
 
         for data_dir in self.data_args.data_dirs:
@@ -1255,86 +1122,73 @@ class DataMixin:
             data_name = os.path.basename(os.path.normpath(data_dir))
             # Determine PPI by directory hint or columns
             ppi = 'ppi' in data_dir.lower()
-            train_set, valid_set, test_set = self._load_local_dataset_dir(data_dir)
+            splits = self._load_local_dataset_dir(data_dir)
 
             # If not indicated by directory, infer from columns
             if not ppi:
-                ppi = self._is_ppi_from_columns(train_set.column_names)
+                ppi = self._is_ppi_from_columns(splits['train'].column_names)
 
-            if ppi:
-                print('Standardizing PPI column names')
-                try:
-                    a_col, b_col = self._find_ppi_sequence_columns(train_set.column_names)
-                except KeyError:
-                    try:
-                        a_col, b_col = self._find_ppi_sequence_columns(valid_set.column_names)
-                    except KeyError:
-                        a_col, b_col = self._find_ppi_sequence_columns(test_set.column_names)
-
-                try:
-                    lbl_col = self._find_first_present_column(train_set.column_names, label_candidates)
-                except KeyError:
-                    try:
-                        lbl_col = self._find_first_present_column(valid_set.column_names, label_candidates)
-                    except KeyError:
-                        lbl_col = self._find_first_present_column(test_set.column_names, label_candidates)
-
-                train_set = train_set.rename_columns({a_col: 'SeqA', b_col: 'SeqB', lbl_col: 'labels'})
-                valid_set = valid_set.rename_columns({a_col: 'SeqA', b_col: 'SeqB', lbl_col: 'labels'})
-                test_set = test_set.rename_columns({a_col: 'SeqA', b_col: 'SeqB', lbl_col: 'labels'})
-
-                print('Removing extras')
-                train_set = train_set.remove_columns([col for col in train_set.column_names if col not in ['SeqA', 'SeqB', 'labels', 'label_mask']])
-                valid_set = valid_set.remove_columns([col for col in valid_set.column_names if col not in ['SeqA', 'SeqB', 'labels', 'label_mask']])
-                test_set = test_set.remove_columns([col for col in test_set.column_names if col not in ['SeqA', 'SeqB', 'labels', 'label_mask']])
-            else:
-                print('Standardizing column names')
-                use_multi = self.data_args.multi_column is not None
-                if not use_multi:
-                    try:
-                        seq_col = self._find_first_present_column(train_set.column_names, seq_candidates)
-                    except KeyError:
-                        try:
-                            seq_col = self._find_first_present_column(valid_set.column_names, seq_candidates)
-                        except KeyError:
-                            seq_col = self._find_first_present_column(test_set.column_names, seq_candidates)
-
-                try:
-                    label_col = self._find_first_present_column(train_set.column_names, label_candidates)
-                except KeyError:
-                    try:
-                        label_col = self._find_first_present_column(valid_set.column_names, label_candidates)
-                    except KeyError:
-                        label_col = self._find_first_present_column(test_set.column_names, label_candidates)
-
-                # Always standardize label column to 'labels'
-                train_set = train_set.rename_columns({label_col: 'labels'})
-                valid_set = valid_set.rename_columns({label_col: 'labels'})
-                test_set = test_set.rename_columns({label_col: 'labels'})
-
-                if not use_multi:
-                    train_set = train_set.rename_columns({seq_col: 'seqs'})
-                    valid_set = valid_set.rename_columns({seq_col: 'seqs'})
-                    test_set = test_set.rename_columns({seq_col: 'seqs'})
-                    # drop everything else
-                    print('Removing extras')
-                    train_set = train_set.remove_columns([col for col in train_set.column_names if col not in ['seqs', 'labels', 'label_mask']])
-                    valid_set = valid_set.remove_columns([col for col in valid_set.column_names if col not in ['seqs', 'labels', 'label_mask']])
-                    test_set = test_set.remove_columns([col for col in test_set.column_names if col not in ['seqs', 'labels', 'label_mask']])
-                else:
-                    # Validate requested multi columns exist
-                    for col in self.data_args.multi_column:
-                        assert col in train_set.column_names or col in valid_set.column_names or col in test_set.column_names, f"Column {col} not found in dataset {data_name}"
-                    # Keep only requested columns and labels
-                    keep_cols = set(self.data_args.multi_column + ['labels', 'label_mask'])
-                    train_set = train_set.remove_columns([col for col in train_set.column_names if col not in keep_cols])
-                    valid_set = valid_set.remove_columns([col for col in valid_set.column_names if col not in keep_cols])
-                    test_set = test_set.remove_columns([col for col in test_set.column_names if col not in keep_cols])
-
-            datasets.append((train_set, valid_set, test_set, ppi))
+            splits = self._standardize_columns(splits, ppi, data_name)
+            datasets.append((splits['train'], splits['valid'], splits['test'], ppi, splits.get('calibration')))
             data_names.append(data_name)
 
         return self.process_datasets(hf_datasets=datasets, data_names=data_names)
+
+    def _with_calibration_split(self, splits: dict[str, Dataset], dataset: DatasetDict | dict[str, Dataset]) -> dict[str, Dataset]:
+        """The splits, with the dataset's calibration split added when it has one."""
+        calibration_name = self._resolve_split_name(list(dataset.keys()), 'calibration')
+        if calibration_name is None:
+            return splits
+        return {**splits, 'calibration': dataset[calibration_name]}
+
+    def _standardize_columns(self, splits: dict[str, Dataset], ppi: bool, data_name: str) -> dict[str, Dataset]:
+        """Every split's columns renamed to SeqA, SeqB, or seqs, and labels, with the rest dropped.
+
+        A column is looked up in the splits in order, train first, so a split that lacks it, such
+        as an empty one, takes the name another split gives it.
+        """
+        def first_present(find: Callable[[list[str]], Any]) -> Any:
+            for position, split in enumerate(splits.values()):
+                try:
+                    return find(split.column_names)
+                except KeyError:
+                    if position == len(splits) - 1:
+                        raise
+            raise KeyError('no splits to search')
+
+        def find_labels(columns: list[str]) -> str:
+            return self._find_first_present_column(columns, LABEL_COLUMNS)
+
+        if ppi:
+            # Standardize PPI columns to 'SeqA', 'SeqB', and 'labels'
+            print('Standardizing PPI column names')
+            a_col, b_col = first_present(self._find_ppi_sequence_columns)
+            lbl_col = first_present(find_labels)
+            splits = {name: split.rename_columns({a_col: 'SeqA', b_col: 'SeqB', lbl_col: 'labels'}) for name, split in splits.items()}
+            print('Removing extras')
+            keep_cols = {'SeqA', 'SeqB', 'labels', 'label_mask'}
+        else:
+            print('Standardizing column names')
+            use_multi = self.data_args.multi_column is not None
+            if not use_multi:
+                seq_col = first_present(lambda columns: self._find_first_present_column(columns, SEQUENCE_COLUMNS))
+            label_col = first_present(find_labels)
+
+            # Always standardize label column to 'labels'
+            splits = {name: split.rename_columns({label_col: 'labels'}) for name, split in splits.items()}
+            if not use_multi:
+                splits = {name: split.rename_columns({seq_col: 'seqs'}) for name, split in splits.items()}
+                # drop everything else
+                print('Removing extras')
+                keep_cols = {'seqs', 'labels', 'label_mask'}
+            else:
+                # Validate requested multi columns exist (assert exact match)
+                for col in self.data_args.multi_column:
+                    assert any(col in split.column_names for split in splits.values()), f"Column {col} not found in dataset {data_name}"
+                # Keep only requested columns and labels
+                keep_cols = set(self.data_args.multi_column + ['labels', 'label_mask'])
+
+        return {name: split.remove_columns([col for col in split.column_names if col not in keep_cols]) for name, split in splits.items()}
 
     def get_embedding_dim_sql(self, save_path: str, test_seq: str, tokenizer: object) -> int:
         """The embedding width of a streamed cache, which `--sql` keeps on disk.

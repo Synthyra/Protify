@@ -8,7 +8,7 @@ This page documents W&B (Weights and Biases) hyperparameter sweeps in Protify: s
 
 When `--use_wandb_hyperopt` is set, the pipeline searches the parameters defined in the sweep YAML. For each (model, dataset) combination (skipping random/onehot), it runs multiple trials, selects the best config by the chosen metric, writes a CSV of results, and then runs one final training with the best config.
 
-The search runs in process with Optuna, and each (model, dataset) sweep is one W&B run: its trials are rows of the `tuning/trials` table, updated after every trial, and the final fit charts its `train/` and `val/` curves and its `val/` and `test/` metrics. A W&B sweep made one run per trial, which the workspace's W&B convention retired because the run list buried the runs worth reading.
+The search runs in process with Optuna, and each (model, dataset) sweep is one W&B run: its trials are rows of the `tuning/trials` table, updated after every trial, and the final fit charts its `train/` and `val/` curves and its `val/` and `test/` metrics. A W&B sweep used to make one run per trial, which was retired because the run list buried the runs worth reading.
 
 ---
 
@@ -44,7 +44,7 @@ File: [src/protify/yamls/sweep.yaml](../src/protify/yamls/sweep.yaml).
 - **parameters:** W&B sweep format. Examples:
   - `lr`, `weight_decay`: `distribution: log_uniform_values`, `min`, `max`.
   - `hidden_size`, `n_layers`, `dropout`, `pre_ln`: uniform or int_uniform.
-  - Transformer-specific: `transformer_hidden_size`, `classifier_dropout`, `classifier_size`, `probe_pooling_types`, `embedding_pooling_types`, `embedding_hidden_state_index`.
+  - Transformer-specific: `hidden_size` (a multiple of `head_size`), `classifier_dropout`, `classifier_size`, `probe_pooling_types`, `embedding_pooling_types`, `embedding_hidden_state_index`.
   - LoRA: `lora_r`, `lora_alpha`, `lora_dropout`.
   - Trainer: `num_epochs`, `probe_batch_size`, `base_batch_size`, `probe_grad_accum`, `base_grad_accum`, `patience`, `seed`.
 
@@ -83,19 +83,19 @@ Set `WANDB_API_KEY`, or put it in the `.secrets.env` that `foundry.secrets_env` 
 ### Run a sweep (after setting W&B credentials)
 
 ```bash
-py -m src.protify.main --yaml_path src/protify/yamls/base.yaml --use_wandb_hyperopt --sweep_count 5 --wandb_project my_project --wandb_entity my_entity
+python -m protify.main --yaml_path src/protify/yamls/base.yaml --use_wandb_hyperopt --sweep_count 5 --wandb_project my_project --wandb_entity my_entity
 ```
 
 ### Optimize Spearman for regression
 
 ```bash
-py -m src.protify.main --data_names DeepLoc-2 --model_names ESM2-8 --use_wandb_hyperopt --sweep_metric_reg eval_spearman_rho --sweep_goal maximize
+python -m protify.main --data_names DeepLoc-2 --model_names ESM2-8 --use_wandb_hyperopt --sweep_metric_reg eval_spearman_rho --sweep_goal maximize
 ```
 
 ### Custom sweep config
 
 ```bash
-py -m src.protify.main --yaml_path src/protify/yamls/base.yaml --use_wandb_hyperopt --sweep_config_path my_sweep.yaml --sweep_count 20
+python -m protify.main --yaml_path src/protify/yamls/base.yaml --use_wandb_hyperopt --sweep_config_path my_sweep.yaml --sweep_count 20
 ```
 
 ---

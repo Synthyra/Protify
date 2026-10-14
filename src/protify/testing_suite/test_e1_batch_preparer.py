@@ -14,14 +14,9 @@ import torch
 
 from pathlib import Path
 
-
-try:
-    from src.protify.base_models import e1_utils
-except ImportError:
-    from protify.base_models import e1_utils
-
 from fastplms.models.e1.modeling_e1 import E1BatchPreparer as FastE1BatchPreparer
 from fastplms.models.e1.modeling_e1 import get_tokenizer as get_fastplms_tokenizer
+from protify.base_models import e1_utils
 
 
 BATCH = ["MKT", "ACD,EFGH,IK", "XACXD,GGXG"]

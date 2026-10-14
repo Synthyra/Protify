@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import io
 import os
+import tempfile
 import time
+import urllib.parse
 import pandas as pd
 import requests
 
@@ -23,6 +25,7 @@ from Bio import SeqIO
 from tqdm.auto import tqdm
 
 from foundry.compression import open_text_maybe_gzip
+from foundry.downloads.https import download_file
 from foundry.retry import retry
 from foundry.serialization import read_json_dict, read_pickle_dict, write_pickle_dict_atomic
 
@@ -486,7 +489,7 @@ def uniprot_idmapping(
         return {}, {}, {}
     try:
         mapping_table = pd.read_csv(io.StringIO(text), sep="\t")
-    except Exception:
+    except Exception:  # noqa: broad-except - preserve the public empty-mapping result for unparsable tables
         return {}, {}, {}
 
     mapping_table.columns = [column.lower() for column in mapping_table.columns]
@@ -558,7 +561,7 @@ def resolve_uniprot_sequences(
         for future in tqdm(as_completed(futures), total=len(futures), desc="UniProt ID Mapping"):
             try:
                 chunk_map, chunk_seqs, chunk_orgs = future.result()
-            except Exception as error:
+            except Exception as error:  # noqa: broad-except - failed chunks remain unmapped for a later retry
                 print(f"Warning: Chunk failed with {error}")
                 continue
             with cache_lock:
@@ -685,37 +688,44 @@ def _download_fasta(
     *,
     url_printed: bool,
 ) -> bool:
-    """Stream a FASTA file to `output_path`; retry on any error or an empty file, doubling the delay.
+    """Fetch and validate a FASTA before replacing `output_path`, retrying with backoff.
 
-    A failed attempt removes its partial file. Returns whether an attempt succeeded.
+    Partial transfers resume within these retries. Each source gets its own staging
+    directory, so a fallback cannot append bytes from a different source.
     """
+    if max_retries <= 0:
+        return False
+    destination = Path(output_path)
+    request_url = f"{url}?{urllib.parse.urlencode(params)}" if params else url
     delay = retry_delay
-    for attempt in range(max_retries):
-        try:
-            print(f"Downloading {description} (attempt {attempt + 1}/{max_retries})...")
-            if url_printed:
-                print(f"  URL: {url}")
-            response = requests.get(url, params=params, stream=True, timeout=300)
-            response.raise_for_status()
-            with open(output_path, "wb") as handle:
-                for chunk in response.iter_content(chunk_size=8192):
-                    handle.write(chunk)
-
-            record_count = _count_fasta_records(output_path)
-            if record_count == 0:
-                raise ValueError("Empty FASTA file")
-            print(f"  Downloaded {record_count} {count_label}")
-            return True
-        except Exception as error:
-            print(f"  Download failed: {error}")
-            if os.path.exists(output_path):
-                os.remove(output_path)
-            if attempt < max_retries - 1:
-                print(f"  Retrying in {delay} seconds...")
-                time.sleep(delay)
-                delay *= 2
-            else:
-                print(f"  Failed after {max_retries} attempts")
+    try:
+        with tempfile.TemporaryDirectory(prefix=".uniprot-", dir=destination.parent) as staging:
+            candidate = Path(staging) / destination.name
+            for attempt in range(max_retries):
+                try:
+                    print(f"Downloading {description} (attempt {attempt + 1}/{max_retries})...")
+                    if url_printed:
+                        print(f"  URL: {url}")
+                    download_file(request_url, candidate, timeout_seconds=300)
+                    record_count = _count_fasta_records(str(candidate))
+                    if record_count == 0:
+                        raise ValueError("Empty FASTA file")
+                    candidate.replace(destination)
+                    print(f"  Downloaded {record_count} {count_label}")
+                    return True
+                except Exception as error:  # noqa: broad-except - preserve the public boolean failure contract
+                    # The public API reports exhausted transport or FASTA errors as False.
+                    # Reject complete but invalid candidates; retain resumable partial bytes.
+                    print(f"  Download failed: {error}")
+                    candidate.unlink(missing_ok=True)
+                    if attempt < max_retries - 1:
+                        print(f"  Retrying in {delay} seconds...")
+                        time.sleep(delay)
+                        delay *= 2
+                    else:
+                        print(f"  Failed after {max_retries} attempts")
+    except OSError as error:
+        print(f"  Download failed: {error}")
     return False
 
 

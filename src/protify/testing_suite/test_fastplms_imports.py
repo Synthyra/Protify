@@ -162,60 +162,30 @@ def test_import_dplm2_tokenizer():
 
 
 def test_base_models_import_esm2():
-    try:
-        from src.protify.base_models.esm2 import FastEsmForMaskedLM, build_esm2_model
-    except ImportError:
-        try:
-            from protify.base_models.esm2 import FastEsmForMaskedLM, build_esm2_model
-        except ImportError:
-            from base_models.esm2 import FastEsmForMaskedLM, build_esm2_model
+    from protify.base_models.esm2 import FastEsmForMaskedLM, build_esm2_model
     assert FastEsmForMaskedLM is not None
     assert callable(build_esm2_model)
 
 
 def test_base_models_import_esmc():
-    try:
-        from src.protify.base_models.esmc import ESMplusplusForMaskedLM, build_esmc_model
-    except ImportError:
-        try:
-            from protify.base_models.esmc import ESMplusplusForMaskedLM, build_esmc_model
-        except ImportError:
-            from base_models.esmc import ESMplusplusForMaskedLM, build_esmc_model
+    from protify.base_models.esmc import ESMplusplusForMaskedLM, build_esmc_model
     assert ESMplusplusForMaskedLM is not None
     assert callable(build_esmc_model)
 
 
 def test_base_models_import_dplm():
-    try:
-        from src.protify.base_models.dplm import DPLMForMaskedLM, build_dplm_model
-    except ImportError:
-        try:
-            from protify.base_models.dplm import DPLMForMaskedLM, build_dplm_model
-        except ImportError:
-            from base_models.dplm import DPLMForMaskedLM, build_dplm_model
+    from protify.base_models.dplm import DPLMForMaskedLM, build_dplm_model
     assert DPLMForMaskedLM is not None
     assert callable(build_dplm_model)
 
 
 def test_base_models_import_dplm2():
-    try:
-        from src.protify.base_models.dplm2 import DPLM2ForMaskedLM, build_dplm2_model
-    except ImportError:
-        try:
-            from protify.base_models.dplm2 import DPLM2ForMaskedLM, build_dplm2_model
-        except ImportError:
-            from base_models.dplm2 import DPLM2ForMaskedLM, build_dplm2_model
+    from protify.base_models.dplm2 import DPLM2ForMaskedLM, build_dplm2_model
     assert DPLM2ForMaskedLM is not None
     assert callable(build_dplm2_model)
 
 
 def test_base_models_import_e1():
-    try:
-        from src.protify.base_models.e1 import E1ForMaskedLM, build_e1_model
-    except ImportError:
-        try:
-            from protify.base_models.e1 import E1ForMaskedLM, build_e1_model
-        except ImportError:
-            from base_models.e1 import E1ForMaskedLM, build_e1_model
+    from protify.base_models.e1 import E1ForMaskedLM, build_e1_model
     assert E1ForMaskedLM is not None
     assert callable(build_e1_model)

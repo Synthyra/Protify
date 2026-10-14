@@ -12,10 +12,6 @@ step. The contract it mirrors is `load_sae_models` plus `compute_sae=True` retur
 sparse (n, c) tensor per attached layer over the batch's valid tokens.
 """
 
-import json
-import os
-import subprocess
-import sys
 import tempfile
 import numpy as np
 import pytest
@@ -25,25 +21,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from torch import nn
 
-
-try:
-    from probes.export_packaged_model import (
-        _copy_runtime_code,
-        _sae_export_fields,
-        _standalone_packaged_module_source,
-    )
-    from probes.feature_path_selector import FeatureSelection
-    from probes.mlp_probe import MLPProbe, MLPProbeConfig
-    from probes.packaged_probe_model import PackagedProbeConfig, PackagedProbeModel
-except ImportError:
-    from ..probes.export_packaged_model import (
-        _copy_runtime_code,
-        _sae_export_fields,
-        _standalone_packaged_module_source,
-    )
-    from ..probes.feature_path_selector import FeatureSelection
-    from ..probes.mlp_probe import MLPProbe, MLPProbeConfig
-    from ..probes.packaged_probe_model import PackagedProbeConfig, PackagedProbeModel
+from protify.base_models.esmc_sae import (
+    ALL_LAYER_K,
+    ESMC_SAE_COVERAGE,
+    SAE_CODEBOOK_DIMS,
+    SAE_K_VALUES,
+    SAE_REVISIONS,
+    resolve_sae_selection,
+)
+from protify.probes.export_packaged_model import (
+    _sae_export_fields,
+    _standalone_packaged_module_source,
+)
+from protify.probes.feature_path_selector import FeatureSelection
+from protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
+from protify.probes.packaged_probe_model import PackagedProbeConfig, PackagedProbeModel
 
 
 CODEBOOK_DIM = 8  # c
@@ -62,10 +54,12 @@ class FakeSaeBackbone(nn.Module):
         self.embedding = nn.Embedding(16, CODEBOOK_DIM)
         self.attached_layers: list[int] = []
         self.attached_repository: str | None = None
+        self.attached_revision: str | None = None
 
-    def load_sae_models(self, repository: str, layers: list[int]) -> None:
+    def load_sae_models(self, repository: str, layers: list[int], revision: str | None = None) -> None:
         self.attached_repository = repository
         self.attached_layers = list(layers)
+        self.attached_revision = revision
 
     def forward(self, input_ids, attention_mask=None, compute_sae=False, **kwargs):
         # input_ids, attention_mask: (b, l)
@@ -119,7 +113,19 @@ def test_sae_fields_resolve_the_backbone_and_codebook_repository():
 
     assert fields["base_model_name"] == "Synthyra/ESMplusplus_6B"
     assert fields["sae_repository"] == "biohub/ESMC-6B-sae-layer60-k512-codebook131072"
+    assert fields["sae_revision"] == SAE_REVISIONS["biohub/ESMC-6B-sae-layer60-k512-codebook131072"]
     assert fields["sae_layer"] == 60
+
+
+def test_every_resolvable_sae_checkpoint_is_pinned_to_a_full_commit():
+    selections = []
+    for backbone, coverage in ESMC_SAE_COVERAGE.items():
+        selections += [resolve_sae_selection(backbone, coverage.depth_layer, k, codebook)
+                       for k in SAE_K_VALUES for codebook in SAE_CODEBOOK_DIMS]
+        selections += [resolve_sae_selection(backbone, 0, ALL_LAYER_K, codebook) for codebook in coverage.all_layer_codebook_dims]
+    for selection in selections:
+        assert len(selection.revision) == 40 and int(selection.revision, 16) >= 0, selection.repository
+    assert {selection.repository for selection in selections} == set(SAE_REVISIONS)
 
 
 def test_a_dense_model_name_contributes_no_sae_fields():
@@ -148,10 +154,7 @@ def test_pooling_covers_the_special_tokens_too():
         features = packaged.backbone(
             input_ids=input_ids, attention_mask=attention_mask, compute_sae=True
         ).sae_outputs[f"layer{SAE_LAYER}"].coalesce()
-        try:
-            from base_models.sae_pooling import pool_sae_outputs
-        except ImportError:
-            from ..base_models.sae_pooling import pool_sae_outputs
+        from protify.base_models.sae_pooling import pool_sae_outputs
         pooled = pool_sae_outputs(features, attention_mask, ("max",))  # (1, c)
 
         tokens = packaged.backbone.embedding(input_ids).relu()  # (1, 5, c), CLS, 3 residues, EOS
@@ -160,36 +163,14 @@ def test_pooling_covers_the_special_tokens_too():
     assert torch.allclose(pooled, expected)
 
 
-# Run in a child whose import path is the export alone, so nothing resolves from this tree.
-# Rows are BOS, two residues, EOS of one sequence; the boundary rows reach the pool, so it covers l + 2 = 4 rows.
-_EXPORTED_POOLING_SCRIPT = """
-import importlib.util, json, sys, torch
-spec = importlib.util.spec_from_file_location("sae_pooling", sys.argv[1])
-sae_pooling = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(sae_pooling)
-import foundry.embedding
-features = torch.tensor([[9.0, 9.0, 9.0], [1.0, 0.0, 2.0], [3.0, 0.0, 1.0], [9.0, 9.0, 9.0]]).to_sparse()
-pooled = sae_pooling.pool_sae_outputs(features, torch.ones(1, 4), ("max", "mean", "sum"))
-print(json.dumps({"foundry": foundry.embedding.__file__, "pooled": pooled.tolist()}))
-"""
+def test_max_mean_and_sum_pool_every_row_and_concatenate_in_order():
+    """Rows are BOS, two residues, EOS of one sequence; all l + 2 = 4 rows reach each pool."""
+    from protify.base_models.sae_pooling import pool_sae_outputs
+    features = torch.tensor([[9.0, 9.0, 9.0], [1.0, 0.0, 2.0], [3.0, 0.0, 1.0], [9.0, 9.0, 9.0]]).to_sparse()  # (4, c=3)
 
+    pooled = pool_sae_outputs(features, torch.ones(1, 4), ("max", "mean", "sum"))  # (1, 3c)
 
-def test_the_exported_runtime_pools_without_the_source_tree(tmp_path):
-    """An exported repository carries foundry.embedding, which its SAE pooling imports."""
-    _copy_runtime_code(tmp_path)
-
-    child = subprocess.run(
-        [sys.executable, "-c", _EXPORTED_POOLING_SCRIPT, str(tmp_path / "protify" / "base_models" / "sae_pooling.py")],
-        cwd=tmp_path,
-        env={**os.environ, "PYTHONPATH": str(tmp_path)},
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    reported = json.loads(child.stdout.strip().splitlines()[-1])
-
-    assert Path(reported["foundry"]).resolve().is_relative_to(tmp_path.resolve())
-    assert reported["pooled"] == [[9.0, 9.0, 9.0, 5.5, 4.5, 5.25, 22.0, 18.0, 21.0]]
+    assert pooled.tolist() == [[9.0, 9.0, 9.0, 5.5, 4.5, 5.25, 22.0, 18.0, 21.0]]
 
 
 def test_feature_selection_narrows_what_the_probe_reads():
@@ -232,10 +213,7 @@ def test_the_sae_selection_survives_a_config_round_trip():
 
 def test_the_standalone_module_registers_a_sequence_classification_head():
     """People reach for AutoModelForSequenceClassification first on a classifier repo."""
-    try:
-        from probes import export_packaged_model
-    except ImportError:
-        from ..probes import export_packaged_model
+    from protify.probes import export_packaged_model
 
     source = Path(export_packaged_model.__file__).read_text(encoding="utf-8")
     assert '"AutoModelForSequenceClassification": "packaged_probe_model.PackagedProbeModel"' in source

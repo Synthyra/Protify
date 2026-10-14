@@ -6,11 +6,7 @@ from typing import Any
 from transformers import EsmConfig, EsmTokenizer
 from transformers.utils import ModelOutput
 
-
-try:
-    from ..model_components.transformer import TransformerConfig, TransformerForMaskedLM
-except ImportError:
-    from protify.model_components.transformer import TransformerConfig, TransformerForMaskedLM
+from ..model_components.transformer import TransformerConfig, TransformerForMaskedLM
 
 
 # The `Random` noise control is not here: its rows are generated where they are read and never stored

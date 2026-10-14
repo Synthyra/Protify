@@ -1,12 +1,19 @@
+"""Build a probe from its arguments, or rebuild one from a saved config.
+
+Protify defines the `mlp`, `transformer`, and `lyra` probes. Another package adds a probe type
+with `register_probe_type`, after which `ProbeArguments`, `get_probe`, and
+`rebuild_probe_from_saved_config` treat it as they treat Protify's own.
+"""
+
 import importlib
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from transformers import PreTrainedModel
 
 from .lyra_probe import LyraForSequenceClassification, LyraForTokenClassification, LyraConfig
 from .mlp_probe import MLPProbe, MLPProbeConfig
-from .projected_probe import PROJECTED_PROBE_OUTPUTS, PROJECTED_PROBE_TRUNKS, ProjectedProbe, ProjectedProbeConfig
 from .transformer_probe import TransformerForSequenceClassification, TransformerForTokenClassification, TransformerProbeConfig
 
 
@@ -20,37 +27,72 @@ def normalize_probe_type(probe_type: str) -> str:
     return _RENAMED_PROBE_TYPES.get(probe_type, probe_type)
 
 
-# External probe types can be registered here by packages on PYTHONPATH.
-# Each entry maps probe_type -> {"module": "dotted.module.path", "seq_cls": "ClassName", "tok_cls": "ClassName", "config_cls": "ConfigName"}
-_EXTERNAL_PROBE_REGISTRY: dict[str, dict[str, str]] = {}
+# (probe type, fields or saved config, tokenwise) -> probe
+ProbeBuilder = Callable[[str, dict[str, Any], bool], PreTrainedModel]
+
+
+@dataclass(frozen=True)
+class ProbeType:
+    """A probe type another package defines.
+
+    `build(probe_type, fields, tokenwise)` returns a new probe from the `ProbeArguments` fields,
+    and `rebuild(probe_type, config, tokenwise)` one from a saved config, which may predate fields
+    the type now stores; `build` serves both when no `rebuild` is given. `settings(probe_type,
+    options)` returns the fields the type keeps beyond the shared ones, read from the keyword
+    arguments `ProbeArguments` was given, with the type's defaults for those absent; they are saved
+    with every probe of the type and with no other, so registering a type never changes what
+    another type serializes.
+    """
+
+    build: ProbeBuilder
+    rebuild: ProbeBuilder | None = None
+    settings: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
+    # Who defines the type, so the same definition registering again is told from a different one.
+    origin: str = ""
+
+
+_REGISTERED_PROBE_TYPES: dict[str, ProbeType] = {}
+
+
+def register_probe_type(probe_type: str, build: ProbeBuilder, *, rebuild: ProbeBuilder | None = None,
+                        settings: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None) -> None:
+    """Add a probe type; registering a name Protify defines, or one another builder holds, raises."""
+    _register(probe_type, ProbeType(build, rebuild, settings, origin=_qualified_name(build)))
 
 
 def register_external_probe(probe_type: str, module: str, seq_cls: str, tok_cls: str, config_cls: str) -> None:
-    _EXTERNAL_PROBE_REGISTRY[probe_type] = {
-        "module": module,
-        "seq_cls": seq_cls,
-        "tok_cls": tok_cls,
-        "config_cls": config_cls,
-    }
+    """Register a probe type by the names of its module, model classes, and config class."""
+    def build(_probe_type: str, fields: dict[str, Any], tokenwise: bool) -> PreTrainedModel:
+        probe_module = importlib.import_module(module)
+        config = getattr(probe_module, config_cls)(**fields)
+        return getattr(probe_module, tok_cls if tokenwise else seq_cls)(config)
+
+    _register(probe_type, ProbeType(build, origin=f"{module}:{seq_cls},{tok_cls},{config_cls}"))
 
 
-def _load_external_probe(probe_type: str, tokenwise: bool, config_kwargs: dict[str, Any]) -> PreTrainedModel | None:
-    if probe_type not in _EXTERNAL_PROBE_REGISTRY:
-        return None
-    entry = _EXTERNAL_PROBE_REGISTRY[probe_type]
-    mod = importlib.import_module(entry["module"])
-    config_cls = getattr(mod, entry["config_cls"])
-    model_cls_name = entry["tok_cls"] if tokenwise else entry["seq_cls"]
-    model_cls = getattr(mod, model_cls_name)
-    config = config_cls(**config_kwargs)
-    return model_cls(config)
+def _register(probe_type: str, definition: ProbeType) -> None:
+    if probe_type in ('mlp', 'linear', 'transformer', 'lyra'):
+        raise ValueError(f"{probe_type!r} is a Protify probe type and cannot be registered")
+    previous = _REGISTERED_PROBE_TYPES.get(probe_type)
+    # A module imported again (a reload, or a second import path) registers the same definition anew.
+    if previous is not None and previous.origin != definition.origin:
+        raise ValueError(f"probe type {probe_type!r} is already registered by {previous.origin}")
+    _REGISTERED_PROBE_TYPES[probe_type] = definition
+
+
+def _qualified_name(function: Callable[..., Any]) -> str:
+    return f"{function.__module__}.{function.__qualname__}"
+
+
+def registered_probe_types() -> tuple[str, ...]:
+    return tuple(sorted(_REGISTERED_PROBE_TYPES))
 
 
 @dataclass
 class ProbeArguments:
     def __init__(
             self,
-            probe_type: str = 'mlp', # valid options: mlp, transformer, lyra, projected, sngp, projected_linear, projected_faithful, projected_beta_nll, xgboost, lightgbm, random_forest
+            probe_type: str = 'mlp', # Protify's: mlp, transformer, lyra; estimators: xgboost, lightgbm, random_forest; plus any registered type
             tokenwise: bool = False,
             ### MLP Probe
             input_size: int = 960,
@@ -78,13 +120,6 @@ class ProbeArguments:
             bom_k: int = 60,
             expansion_ratio: float = 8 / 3,
             max_length: int = 2048,
-            ### Projected and SNGP probes
-            projection_size: int = 1024,
-            projected_hidden_size: int | None = None,
-            spectral_bound: float = 0.95,
-            input_clip: float | None = 10.0,
-            branch_widths: list[int] | None = None,
-            branch_sizes: list[int] | None = None,
             ### LoRA
             lora: bool = False,
             lora_r: int = 8,
@@ -127,20 +162,24 @@ class ProbeArguments:
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
         self.lora_dropout = lora_dropout
-        # get_probe hands this whole object to the probe config, which saves every field. The
-        # projected head's settings are stored only for that head, so every other probe type
-        # keeps serializing exactly the fields it did before the head existed.
-        if self.probe_type in PROJECTED_PROBE_OUTPUTS:
-            self.projection_size = projection_size
-            self.projected_trunk = PROJECTED_PROBE_TRUNKS.get(self.probe_type, 'projected')
-            if projected_hidden_size is not None:
-                self.projected_hidden_size = projected_hidden_size
-            elif self.probe_type == 'projected':
-                self.projected_hidden_size = 8192
-            self.spectral_bound = spectral_bound
-            self.input_clip = input_clip
-            self.branch_widths = branch_widths
-            self.branch_sizes = branch_sizes
+        # get_probe hands this whole object to the probe config, which saves every field, so a
+        # registered type's own settings are stored only for that type.
+        registered = _REGISTERED_PROBE_TYPES.get(self.probe_type)
+        if registered is not None and registered.settings is not None:
+            for name, value in registered.settings(self.probe_type, kwargs).items():
+                setattr(self, name, value)
+
+
+def _build_protify_probe(probe_type: str, tokenwise: bool, fields: dict[str, Any]) -> PreTrainedModel | None:
+    if probe_type == 'mlp' and not tokenwise:
+        return MLPProbe(MLPProbeConfig(**fields))
+    if probe_type == 'transformer':
+        config = TransformerProbeConfig(**fields)
+        return TransformerForTokenClassification(config) if tokenwise else TransformerForSequenceClassification(config)
+    if probe_type == 'lyra':
+        config = LyraConfig(**fields)
+        return LyraForTokenClassification(config) if tokenwise else LyraForSequenceClassification(config)
+    return None
 
 
 def get_probe(args: ProbeArguments) -> PreTrainedModel:
@@ -150,33 +189,15 @@ def get_probe(args: ProbeArguments) -> PreTrainedModel:
             f"(probe_type='transformer', tokenwise=False). Got probe_type={args.probe_type!r}, "
             f"tokenwise={args.tokenwise}."
         )
-    if args.probe_type == 'mlp' and not args.tokenwise:
-        config = MLPProbeConfig(**args.__dict__)
-        return MLPProbe(config)
-    elif args.probe_type == 'transformer' and not args.tokenwise:
-        config = TransformerProbeConfig(**args.__dict__)
-        return TransformerForSequenceClassification(config)
-    elif args.probe_type == 'transformer' and args.tokenwise:
-        config = TransformerProbeConfig(**args.__dict__)
-        return TransformerForTokenClassification(config)
-    elif args.probe_type == 'lyra' and not args.tokenwise:
-        config = LyraConfig(**args.__dict__)
-        return LyraForSequenceClassification(config)
-    elif args.probe_type == 'lyra' and args.tokenwise:
-        config = LyraConfig(**args.__dict__)
-        return LyraForTokenClassification(config)
-    elif args.probe_type in PROJECTED_PROBE_OUTPUTS and not args.tokenwise:
-        config = ProjectedProbeConfig(**{
-            **args.__dict__,
-            'output': PROJECTED_PROBE_OUTPUTS[args.probe_type],
-            'trunk': PROJECTED_PROBE_TRUNKS.get(args.probe_type, 'projected'),
-        })
-        return ProjectedProbe(config)
-    else:
-        external = _load_external_probe(args.probe_type, args.tokenwise, args.__dict__)
-        if external is not None:
-            return external
-        raise ValueError(f"Invalid combination of probe type and tokenwise: {args.probe_type} {args.tokenwise}")
+    probe = _build_protify_probe(args.probe_type, args.tokenwise, args.__dict__)
+    if probe is not None:
+        return probe
+    if args.probe_type in _REGISTERED_PROBE_TYPES:
+        return _REGISTERED_PROBE_TYPES[args.probe_type].build(args.probe_type, dict(args.__dict__), args.tokenwise)
+    raise ValueError(
+        f"Invalid combination of probe type and tokenwise: {args.probe_type} {args.tokenwise}. "
+        f"Registered probe types: {registered_probe_types()}"
+    )
 
 
 def rebuild_probe_from_saved_config(
@@ -191,30 +212,13 @@ def rebuild_probe_from_saved_config(
         config_dict["probe_pooling_types"] = config_dict["pooling_types"]
 
     probe_type = normalize_probe_type(probe_type)
-
-    if probe_type == "mlp" and not tokenwise:
-        config = MLPProbeConfig(**config_dict)
-        return MLPProbe(config)
-    if probe_type == "transformer" and not tokenwise:
-        config = TransformerProbeConfig(**config_dict)
-        return TransformerForSequenceClassification(config)
-    if probe_type == "transformer" and tokenwise:
-        config = TransformerProbeConfig(**config_dict)
-        return TransformerForTokenClassification(config)
-    if probe_type == "lyra" and not tokenwise:
-        config = LyraConfig(**config_dict)
-        return LyraForSequenceClassification(config)
-    if probe_type == "lyra" and tokenwise:
-        config = LyraConfig(**config_dict)
-        return LyraForTokenClassification(config)
-    if probe_type in PROJECTED_PROBE_OUTPUTS and not tokenwise:
-        config = ProjectedProbeConfig(**{
-            **config_dict,
-            "output": PROJECTED_PROBE_OUTPUTS[probe_type],
-            "trunk": config_dict.get("trunk", "linear" if probe_type == "projected_linear" else "projected"),
-        })
-        return ProjectedProbe(config)
-    external = _load_external_probe(probe_type, tokenwise, config_dict)
-    if external is not None:
-        return external
-    raise ValueError(f"Unsupported saved probe configuration: {probe_type} tokenwise={tokenwise}")
+    probe = _build_protify_probe(probe_type, tokenwise, config_dict)
+    if probe is not None:
+        return probe
+    if probe_type in _REGISTERED_PROBE_TYPES:
+        registered = _REGISTERED_PROBE_TYPES[probe_type]
+        return (registered.rebuild or registered.build)(probe_type, config_dict, tokenwise)
+    raise ValueError(
+        f"Unsupported saved probe configuration: {probe_type} tokenwise={tokenwise}. "
+        f"Registered probe types: {registered_probe_types()}"
+    )

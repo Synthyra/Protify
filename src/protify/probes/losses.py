@@ -1,7 +1,7 @@
 """Probe training losses.
 
-`get_loss_fct`, `SoftBCEWithLogitsLoss`, and `SoftBCELoss` are `interpnet.losses`'s, so Protify's
-probes and InterpNet train on one implementation. `compute_probe_loss` is Protify's own.
+`get_loss_fct`, `SoftBCEWithLogitsLoss`, and `SoftBCELoss` are `foundry.layers.losses`'s, the one
+implementation every probe trains on. `compute_probe_loss` is Protify's own.
 """
 
 import copy
@@ -9,7 +9,7 @@ import torch
 
 from torch import nn
 
-from interpnet.losses import SoftBCELoss, SoftBCEWithLogitsLoss, get_loss_fct
+from foundry.layers.losses import SoftBCELoss, SoftBCEWithLogitsLoss, get_loss_fct
 
 
 __all__ = ["SoftBCELoss", "SoftBCEWithLogitsLoss", "compute_probe_loss", "get_loss_fct"]

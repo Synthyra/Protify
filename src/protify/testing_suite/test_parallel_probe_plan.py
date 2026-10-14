@@ -2,80 +2,29 @@ import pytest
 
 from dataclasses import replace
 
-
-try:
-    from src.protify import probes as probes_package
-    from src.protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
-    from src.protify.probes.parallel_probe_plan import (
-        ParallelProbeExecutionPlan,
-        ParallelProbeGroup,
-        ParallelProbeGroupEstimate,
-        ParallelProbePlanEstimate,
-        ParallelProbeRunSpec,
-        ParallelProbeExecutionWave,
-        ParallelProbeWaveSchedule,
-        build_seed_run_specs,
-        estimate_parallel_probe_group,
-        estimate_parallel_probe_plan,
-        group_parallel_probe_runs,
-        linear_probe_batch_activation_count,
-        linear_probe_forward_flop_count,
-        linear_probe_parameter_count,
-        linear_probe_parameter_count_for_spec,
-        max_linear_probe_runs_for_estimated_peak_budget,
-        max_linear_probe_runs_for_training_state_budget,
-        plan_parallel_probe_runs,
-        schedule_parallel_probe_execution_waves,
-    )
-except ImportError:
-    try:
-        from protify import probes as probes_package
-        from protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
-        from protify.probes.parallel_probe_plan import (
-            ParallelProbeExecutionPlan,
-            ParallelProbeGroup,
-            ParallelProbeGroupEstimate,
-            ParallelProbePlanEstimate,
-            ParallelProbeRunSpec,
-            ParallelProbeExecutionWave,
-            ParallelProbeWaveSchedule,
-            build_seed_run_specs,
-            estimate_parallel_probe_group,
-            estimate_parallel_probe_plan,
-            group_parallel_probe_runs,
-            linear_probe_batch_activation_count,
-            linear_probe_forward_flop_count,
-            linear_probe_parameter_count,
-            linear_probe_parameter_count_for_spec,
-            max_linear_probe_runs_for_estimated_peak_budget,
-            max_linear_probe_runs_for_training_state_budget,
-            plan_parallel_probe_runs,
-            schedule_parallel_probe_execution_waves,
-        )
-    except ImportError:
-        from .. import probes as probes_package
-        from ..probes.mlp_probe import MLPProbe, MLPProbeConfig
-        from ..probes.parallel_probe_plan import (
-            ParallelProbeExecutionPlan,
-            ParallelProbeGroup,
-            ParallelProbeGroupEstimate,
-            ParallelProbePlanEstimate,
-            ParallelProbeRunSpec,
-            ParallelProbeExecutionWave,
-            ParallelProbeWaveSchedule,
-            build_seed_run_specs,
-            estimate_parallel_probe_group,
-            estimate_parallel_probe_plan,
-            group_parallel_probe_runs,
-            linear_probe_batch_activation_count,
-            linear_probe_forward_flop_count,
-            linear_probe_parameter_count,
-            linear_probe_parameter_count_for_spec,
-            max_linear_probe_runs_for_estimated_peak_budget,
-            max_linear_probe_runs_for_training_state_budget,
-            plan_parallel_probe_runs,
-            schedule_parallel_probe_execution_waves,
-        )
+from protify import probes as probes_package
+from protify.probes.mlp_probe import MLPProbe, MLPProbeConfig
+from protify.probes.parallel_probe_plan import (
+    ParallelProbeExecutionPlan,
+    ParallelProbeGroup,
+    ParallelProbeGroupEstimate,
+    ParallelProbePlanEstimate,
+    ParallelProbeRunSpec,
+    ParallelProbeExecutionWave,
+    ParallelProbeWaveSchedule,
+    build_seed_run_specs,
+    estimate_parallel_probe_group,
+    estimate_parallel_probe_plan,
+    group_parallel_probe_runs,
+    linear_probe_batch_activation_count,
+    linear_probe_forward_flop_count,
+    linear_probe_parameter_count,
+    linear_probe_parameter_count_for_spec,
+    max_linear_probe_runs_for_estimated_peak_budget,
+    max_linear_probe_runs_for_training_state_budget,
+    plan_parallel_probe_runs,
+    schedule_parallel_probe_execution_waves,
+)
 
 
 def _run_spec(run_id: str = 'run-0', seed: int = 7) -> ParallelProbeRunSpec:

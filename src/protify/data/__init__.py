@@ -1,3 +1,5 @@
+from .dataset_descriptions import dataset_descriptions
+from .dataset_utils import get_dataset_info, list_supported_datasets
 from .supported_datasets import (
     dataset_aliases,
     get_dataset_source,
@@ -10,13 +12,6 @@ from .supported_datasets import (
     testing,
 )
 
-
-try:
-    from .dataset_descriptions import dataset_descriptions
-except ImportError:
-    dataset_descriptions = {}
-
-from .dataset_utils import get_dataset_info, list_supported_datasets
 
 __all__ = [
     "dataset_aliases",

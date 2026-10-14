@@ -5,15 +5,8 @@ from torch import nn
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import SequenceClassifierOutput
 
-
-try:
-    from ..model_components.mlp import intermediate_correction_fn
-except ImportError:
-    try:
-        from protify.model_components.mlp import intermediate_correction_fn
-    except ImportError:
-        from model_components.mlp import intermediate_correction_fn
 from .losses import compute_probe_loss, get_loss_fct
+from ..model_components.mlp import intermediate_correction_fn
 
 
 class MLPProbeConfig(PretrainedConfig):

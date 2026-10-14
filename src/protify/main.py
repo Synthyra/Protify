@@ -1,3 +1,9 @@
+from . import entrypoint_setup
+
+
+# Hugging Face reads its settings when it loads, so they are set before anything below imports it.
+entrypoint_setup.configure_process()
+
 import argparse
 import json
 import os
@@ -6,39 +12,23 @@ import time
 import yaml
 
 from collections.abc import Callable
-from contextlib import suppress
 from types import SimpleNamespace
 from typing import Any
 
+from foundry.secrets_env import load_secrets_env
 
-# Ensure src is in sys.path
-_current_dir = os.path.dirname(os.path.abspath(__file__))
-_src_dir = os.path.abspath(os.path.join(_current_dir, ".."))
-if _src_dir not in sys.path:
-    sys.path.insert(0, _src_dir)
-
-# Docker/Mount fallback: If the 'src/protify' folder was mounted directly
-# as the root (e.g. /workspace) and lost its 'protify' wrapper name.
-try:
-    import protify  # noqa: unused-import only whether the package imports matters
-except ImportError:
-    if os.path.exists(os.path.join(_current_dir, "__init__.py")):
-        import importlib.util
-        _spec = importlib.util.spec_from_file_location("protify", os.path.join(_current_dir, "__init__.py"))
-        if _spec is not None:
-            _protify_mod = importlib.util.module_from_spec(_spec)
-            sys.modules["protify"] = _protify_mod
-            _spec.loader.exec_module(_protify_mod)
-
-from protify.cloud_cli import _run_on_cloud, _should_auto_run_cloud
-from protify.data.pair_features import (
+from .cloud_cli import _run_on_cloud, _should_auto_run_cloud
+from .data.pair_features import (
     DEFAULT_PAIR_FEATURE_MODE,
     PAIR_FEATURE_MODES,
     check_pair_features_supported,
 )
-from protify.probes.estimator_probe import ESTIMATOR_PROBE_TYPES, check_task_type, is_estimator_probe
-from protify.secrets_env import load_secrets_env
+from .probes.estimator_probe import ESTIMATOR_PROBE_TYPES, check_task_type, is_estimator_probe
 
+
+# The credentials Protify reads: Hugging Face, W&B, and the Synthyra API for cloud runs. A
+# `.secrets.env` sets only these, so whatever else the file holds stays out of the process.
+CREDENTIAL_NAMES = ("HF_TOKEN", "WANDB_API_KEY", "SYNTHYRA_API_KEY")
 
 # Sweep defaults. A loss cannot be the shared default because the estimator probes report
 # only metrics, never eval_loss, so a sweep that mixed probe types would fail to read its
@@ -48,19 +38,10 @@ from protify.secrets_env import load_secrets_env
 DEFAULT_SWEEP_METRIC_CLS = "eval_mcc"
 DEFAULT_SWEEP_METRIC_REG = "eval_spearman_rho"
 DEFAULT_SWEEP_GOAL = "maximize"
-# The settings that choose a probe's head or its features. A run on an ESMC base that names none
-# of them, on the command line or in YAML, trains the default probe (docs/conventions/probes.md
-# in the research workspace): the depth-layer SAE max-pooled beside the final hidden state's
-# mean and variance, joined into a `projected` head. Naming any one keeps the run as written.
-PROBE_CHOICE_SETTINGS = ("probe_type", "embedding_pooling_types", "embedding_hidden_state_index")
-# Workflows other than a pooled probe over one model's cache, which the default never replaces.
-NON_DEFAULT_PROBE_WORKFLOWS = (
-    "matrix_embed", "full_finetuning", "hybrid_probe", "use_scikit", "use_wandb_hyperopt", "multi_column", "feature_selection",
-)
 
 
-def parse_arguments() -> argparse.Namespace | SimpleNamespace:  
-    raw_argv = sys.argv[1:]
+def build_parser() -> argparse.ArgumentParser:
+    """The command line. The GUI starts from its defaults, so the two agree on every setting the GUI does not show."""
     parser = argparse.ArgumentParser(description="Script with arguments mirroring the provided YAML settings.")
     # ----------------- ID ----------------- #
     parser.add_argument("--hf_username", default="Synthyra", help="Hugging Face username.")
@@ -122,7 +103,7 @@ def parse_arguments() -> argparse.Namespace | SimpleNamespace:
     parser.add_argument("--sae_codebook_dim", type=int, choices=[8192, 16384, 32768, 65536, 131072], default=None, help="Sparse autoencoder codebook width, which is the embedding dimension per pooling type. Defaults to 8192.")
 
     # ----------------- ProbeArguments ----------------- #
-    parser.add_argument("--probe_type", choices=["mlp", "linear", "transformer", "lyra", "projected", "sngp", "xgboost", "lightgbm", "random_forest"], default="mlp", help="Type of probe. 'mlp' is the pooled feed-forward probe ('linear' is its former name and still works). 'projected' fuses normalized branch projections, expands to 8192, and reduces to a class-aligned multiple of 256. 'sngp' uses a spectral-bounded residual trunk and Gaussian process output. 'xgboost', 'lightgbm', and 'random_forest' fit an estimator on pooled embeddings instead of a network.")
+    parser.add_argument("--probe_type", choices=["mlp", "linear", "transformer", "lyra", "xgboost", "lightgbm", "random_forest"], default="mlp", help="Type of probe. 'mlp' is the pooled feed-forward probe ('linear' is its former name and still works). 'transformer' and 'lyra' read per-residue embeddings. 'xgboost', 'lightgbm', and 'random_forest' fit an estimator on pooled embeddings instead of a network. A probe type another package registers through protify.probes.get_probe.register_probe_type is set on the arguments directly.")
     parser.add_argument("--probe_n_jobs", type=int, default=-1, help="Worker processes for estimator probes (xgboost, lightgbm, random_forest). -1 uses every core.")
     parser.add_argument("--estimator_device", choices=["auto", "cuda", "cpu"], default="auto", help="Where an xgboost probe fits. 'auto' uses the GPU when one is visible. A wide feature matrix can exceed GPU memory because the histogram is one buffer of max_bin entries per feature per node, and 'cpu' trades speed for the host's much larger memory.")
     parser.add_argument("--tune_estimator", action="store_true", help="Search estimator probe hyperparameters with Optuna against the validation split before the final fit. The defaults were selected on one 8192-wide task and do not carry to much wider feature matrices.")
@@ -162,10 +143,6 @@ def parse_arguments() -> argparse.Namespace | SimpleNamespace:
     parser.add_argument("--add_token_ids", action="store_true", help="Add learned token-type embeddings to distinguish protein A vs B in PPI tasks.")
     parser.add_argument("--feature_selection", action="store_true", help="Rank embedding columns by an L1 regularization path through a small MLP, then train the probe on the surviving columns only. Fit on train, chosen on validation, and worth its cost on wide sparse embeddings such as ESMC SAE features.")
     parser.add_argument("--feature_selection_min_size", type=int, default=256, help="Narrowest column count --feature_selection will consider.")
-    parser.add_argument("--no_default_probe", dest="default_probe", action="store_false", default=True, help="Keep --probe_type's default on an ESMC base. Without it, a run on ESMC-300, ESMC-600, or ESMC-6B that sets no --probe_type, --embedding_pooling_types, or --embedding_hidden_state_index trains the default probe: the Biohub SAE at the base's depth layer, max-pooled, beside the final hidden state's mean and variance, joined into a projected head.")
-    parser.add_argument("--projection_size", type=int, default=1024, help="Trunk width of the projected and sngp probes, split evenly across their input branches.")
-    parser.add_argument("--projected_hidden_size", type=int, default=None, help="Expanded MLP width of a projected probe; the default is 8192.")
-    parser.add_argument("--spectral_bound", type=float, default=0.95, help="Spectral norm bound on every projection and trunk Linear of the sngp probe.")
 
     # ----------------- ScikitArguments ----------------- #
     parser.add_argument("--scikit_n_iter", type=int, default=10, help="Number of iterations for scikit model.")
@@ -220,7 +197,6 @@ def parse_arguments() -> argparse.Namespace | SimpleNamespace:
     parser.add_argument("--adam_beta2", type=float, default=0.999)
     parser.add_argument("--adam_epsilon", type=float, default=1e-8)
     parser.add_argument("--eval_accumulation_steps", default="auto", help="Evaluation output batches to retain on device, or auto.")
-    parser.add_argument("--record_training_recipe", action="store_true", help="Bind uncertainty-cell resume and packages to the resolved fit recipe.")
     parser.add_argument("--patience", type=int, default=5, help="Patience for early stopping (probe phase, and base phase unless --base_patience is set).")
     parser.add_argument("--base_num_epochs", type=int, default=None,
                         help="Epoch count for the base-model phase of hybrid / full-finetuning training. If omitted, falls back to --num_epochs.")
@@ -307,7 +283,12 @@ def parse_arguments() -> argparse.Namespace | SimpleNamespace:
     parser.add_argument("--sweep_metric_reg",type=str,default=DEFAULT_SWEEP_METRIC_REG, help="Regression metric to optimize during sweep (e.g., eval_r_squared, eval_spearman_rho, eval_pearson_rho)")
     parser.add_argument("--sweep_goal", type=str, default=DEFAULT_SWEEP_GOAL, choices=['maximize', 'minimize'], help="Goal for the sweep metric (maximize/minimize)")
     parser.add_argument("--sweep_name", type=str, default=None, help="Display name for the W&B sweep. Overrides 'name' in the sweep YAML.")
-    args = parser.parse_args()
+    return parser
+
+
+def parse_arguments() -> argparse.Namespace | SimpleNamespace:
+    raw_argv = sys.argv[1:]
+    args = build_parser().parse_args()
 
     if args.pretrained_probe_path is not None:
         raise AssertionError("--pretrained_probe_path is no longer supported. Use --save_model outputs or packaged probe exports instead.")
@@ -344,17 +325,17 @@ def parse_arguments() -> argparse.Namespace | SimpleNamespace:
         args.model_names = ["ESM2-8"]
 
     # Only probes that consume a pooled vector can run without per-residue embeddings.
-    pooled_vector_probes = ("mlp", "linear", "projected", "sngp") + ESTIMATOR_PROBE_TYPES
+    pooled_vector_probes = ("mlp", "linear") + ESTIMATOR_PROBE_TYPES
     assert args.probe_type in pooled_vector_probes or args.matrix_embed, (
         f"--probe_type {args.probe_type} reads per-residue embeddings, so --matrix_embed must be set. "
         f"Probes that take a pooled vector are {pooled_vector_probes}."
     )
 
     # No credential comes from the command line or a YAML file. The gitignored `.secrets.env`
-    # supplies environment defaults, and already-exported variables win. Hugging Face then
-    # resolves its own, HF_TOKEN or the token `hf auth login` stored; a W&B run (foundry.logging)
-    # needs WANDB_API_KEY in the environment.
-    loaded_secrets = load_secrets_env()
+    # supplies environment defaults for CREDENTIAL_NAMES, and already-exported variables win.
+    # Hugging Face then resolves its own, HF_TOKEN or the token `hf auth login` stored; a W&B run
+    # (foundry.logging) needs WANDB_API_KEY in the environment, so `wandb login` is not enough.
+    loaded_secrets = load_secrets_env(names=CREDENTIAL_NAMES)
     if loaded_secrets:
         print(f"Loaded {len(loaded_secrets)} credential(s) from .secrets.env: {', '.join(loaded_secrets)}")
 
@@ -365,8 +346,8 @@ def parse_arguments() -> argparse.Namespace | SimpleNamespace:
         if embedded_credentials:
             raise SystemExit(
                 f"{args.yaml_path} holds {', '.join(embedded_credentials)}, and Protify reads no credential from YAML. "
-                "Remove them, then run `hf auth login` and `wandb login` once, or set HF_TOKEN, WANDB_API_KEY, "
-                "and SYNTHYRA_API_KEY in the environment."
+                "Remove them, then run `hf auth login` once or set HF_TOKEN, and set WANDB_API_KEY and "
+                "SYNTHYRA_API_KEY in the environment or in a .secrets.env at the repository root."
             )
         yaml_args = SimpleNamespace(**settings)
 
@@ -517,8 +498,6 @@ def parse_arguments() -> argparse.Namespace | SimpleNamespace:
             yaml_args.embedding_hidden_state_index = args.embedding_hidden_state_index
         if "--no_embedding_scaler" in raw_argv:
             yaml_args.embedding_scaler = False
-        if "--no_default_probe" in raw_argv:
-            yaml_args.default_probe = False
         elif "embedding_scaler" not in yaml_args.__dict__:
             yaml_args.embedding_scaler = args.embedding_scaler
         for key in [
@@ -541,24 +520,9 @@ def parse_arguments() -> argparse.Namespace | SimpleNamespace:
         for key, value in args.__dict__.items():
             if key not in yaml_args.__dict__:
                 setattr(yaml_args, key, value)
-        yaml_args.default_probe = _default_probe_allowed(yaml_args, _named_settings(raw_argv, settings))
         return yaml_args
     else:
-        args.default_probe = _default_probe_allowed(args, _named_settings(raw_argv))
         return args
-
-
-def _named_settings(raw_argv: list[str], yaml_settings: dict[str, Any] | None = None) -> set[str]:
-    """The settings a run names, on the command line or in its YAML file."""
-    named = {token[2:].split("=", 1)[0] for token in raw_argv if token.startswith("--")}
-    return named | set(yaml_settings or ())
-
-
-def _default_probe_allowed(args: argparse.Namespace | SimpleNamespace, named: set[str]) -> bool:
-    """Whether a run may train the default probe; MainProcess also requires every model be an ESMC base."""
-    if not args.default_probe or named & set(PROBE_CHOICE_SETTINGS):
-        return False
-    return not any(getattr(args, key, None) for key in NON_DEFAULT_PROBE_WORKFLOWS)
 
 
 if __name__ == "__main__":
@@ -596,50 +560,48 @@ if __name__ == "__main__":
     # Set global seed before doing anything else
     # If seed is None, set_global_seed will derive it from current time
     if args.deterministic:
-        from protify.seed_utils import set_determinism
+        from .seed_utils import set_determinism
         set_determinism()
     
-    import protify.entrypoint_setup  # noqa: unused-import imported for its environment setup, which has to follow set_determinism()
 
 
 import torch
 from datasets import Dataset
+from scipy import sparse
 from torchinfo import summary
 
-from protify.base_models.esmc_sae import ESMC_SAE_COVERAGE
-from protify.base_models.get_base_models import (
+from .base_models.get_base_models import (
     BaseModelArguments,
     get_base_model_for_training,
     get_tokenizer,
     resolve_data_max_length,
 )
-from protify.base_models.lora import wrap_lora
-from protify.benchmarks.proteingym.compare_scoring_methods import compare_scoring_methods
-from protify.benchmarks.proteingym.scorer import ProteinGymRunner
-from protify.data import branch_features
-from protify.data.data_mixin import DataArguments, DataMixin
-from protify.data.feature_matrix import FeatureMatrix, live_column_indices, take_columns
-from protify.embedder import Embedder, EmbeddingArguments
-from protify.feature_cache import has_feature
-from protify.hyperopt_utils import HyperoptModule
-from protify.logger import MetricsLogger, log_method_calls
-from protify.probes.estimator_probe import (
+from .base_models.lora import wrap_lora
+from .benchmarks.proteingym.compare_scoring_methods import compare_scoring_methods
+from .benchmarks.proteingym.scorer import ProteinGymRunner
+from .data.data_mixin import DataArguments, DataMixin
+from .data.feature_matrix import FeatureMatrix, live_column_indices, take_columns
+from .embedder import Embedder, EmbeddingArguments
+from .feature_cache import has_feature
+from .hyperopt_utils import HyperoptModule
+from .logger import MetricsLogger, log_method_calls
+from .probes.estimator_probe import (
     TEST_METRIC_PREFIX,
     VALID_METRIC_PREFIX,
     EstimatorProbeArguments,
     train_estimator_probe,
     with_split_metric_prefix,
 )
-from protify.probes.estimator_artifact import EstimatorProbeRecipe, save_estimator_probe
-from protify.probes.estimator_tuning import EstimatorSearchArguments, tune_estimator_probe
-from protify.probes.feature_path_selector import FeatureSelection
-from protify.probes.get_probe import ProbeArguments, get_probe
-from protify.probes.scikit_classes import ScikitArguments, ScikitProbe
-from protify.probes.trainers import TrainerArguments, TrainerMixin
-from protify.seed_utils import set_global_seed
-from protify.benchmarks.proteingym.dms_ids import expand_dms_ids_all
-from protify.console_output import print_message
-from protify.visualization.plot_result import create_plots
+from .probes.estimator_artifact import EstimatorProbeRecipe, save_estimator_probe
+from .probes.estimator_tuning import EstimatorSearchArguments, tune_estimator_probe
+from .probes.feature_path_selector import FeatureSelection
+from .probes.get_probe import ProbeArguments, get_probe
+from .probes.scikit_classes import ScikitArguments, ScikitProbe
+from .probes.trainers import TrainerArguments, TrainerMixin
+from .seed_utils import set_determinism, set_global_seed
+from .benchmarks.proteingym.dms_ids import expand_dms_ids_all
+from .console_output import print_message
+from .visualization.plot_result import create_plots
 
 
 class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
@@ -723,9 +685,6 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         self.data_args = DataArguments(**self.full_args.__dict__)
         self.embedding_args = EmbeddingArguments(**self.full_args.__dict__)
         self.model_args = BaseModelArguments(**self.full_args.__dict__)
-        if self.uses_default_probe():
-            # Before ProbeArguments, which keeps a projected head's settings only for one.
-            self.full_args.probe_type = 'projected'
         self.probe_args = ProbeArguments(**self.full_args.__dict__)
         self.trainer_args = TrainerArguments(**self.full_args.__dict__)
         self.logger_args = SimpleNamespace(**self.full_args.__dict__)
@@ -1154,84 +1113,6 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
                 )
                 torch.cuda.empty_cache()
 
-    def uses_default_probe(self) -> bool:
-        """Whether this run trains the default probe: allowed by its settings, on ESMC bases only.
-
-        `parse_arguments` sets `default_probe` when the run names no probe type, pooling, or
-        hidden state and no other workflow. The default is defined for ESMC-300, ESMC-600, and
-        ESMC-6B, so any other model keeps the ordinary probe for the whole run.
-        """
-        if not getattr(self.full_args, 'default_probe', False) or self.model_args._model_paths is not None:
-            return False
-        return all(name in ESMC_SAE_COVERAGE for name in self.model_args.model_names)
-
-    def _default_branches(self, backbone: str) -> list[branch_features.BranchSpec]:
-        return [branch_features.parse_branch_spec(token) for token in branch_features.default_branch_specs(backbone)]
-
-    @log_method_calls
-    def embed_default_branches(self) -> None:
-        """Fill each ESMC base's two branch caches with every sequence they lack."""
-        arguments = dict(vars(self.full_args))
-        for backbone in self.model_args.model_names:
-            branch_features.embed_missing_branches(self._default_branches(backbone), self.all_seqs, arguments)
-
-    @log_method_calls
-    def run_default_probes(self) -> None:
-        """Train the default probe for every ESMC base and dataset.
-
-        The base's depth-layer SAE, max-pooled, and its final hidden state's mean and variance are
-        read from their ordinary caches and joined per sequence, and a `projected` head reads
-        both through its own projection per branch. Seeds, metrics, and saving are
-        `trainer_probe`'s, as for any other probe.
-        """
-        assert self.probe_args.probe_type == 'projected', "apply_current_settings chooses the default probe's head."
-        arguments = dict(vars(self.full_args))
-        flip_pairs = self._augment_pair_order()
-        for backbone in self.model_args.model_names:
-            specs = self._default_branches(backbone)
-            model_name = branch_features.display_name(specs)
-            joined, widths = branch_features.join_branch_embeddings(specs, self.all_seqs, arguments)
-            self.logger.info(f"Default probe on {backbone}: {model_name}, branch widths {widths}")
-
-            for data_name, dataset in self.datasets.items():
-                train_set, valid_set, test_set, num_labels, label_type, ppi = dataset
-                standardizer = None
-                if self.embedding_args.embedding_scaler:
-                    standardizer = branch_features.fit_joined_standardizer(
-                        joined, train_set, ppi, self._pair_feature_mode, flip_pairs
-                    )
-                collator = branch_features.JoinedBranchCollator(joined, ppi, standardizer, self._pair_feature_mode)
-                probe_datasets = (
-                    branch_features.JoinedBranchDataset(train_set, joined, label_type, ppi, flip_pairs, train=True),
-                    branch_features.JoinedBranchDataset(valid_set, joined, label_type, ppi),
-                    branch_features.JoinedBranchDataset(test_set, joined, label_type, ppi),
-                    collator,
-                )
-
-                self.probe_args.input_size = joined.width * (2 if ppi else 1)
-                self.probe_args.branch_widths = list(widths)
-                self.probe_args.num_labels = num_labels
-                self.probe_args.task_type = label_type
-                self.trainer_args.task_type = label_type
-                self.logger.info(f'Training the default probe for {data_name} with {backbone}')
-                probe = get_probe(self.probe_args)
-                summary(probe)
-                _, valid_metrics, test_metrics, _, _ = self.trainer_probe(
-                    model=probe,
-                    tokenizer=None,
-                    model_name=model_name,
-                    data_name=data_name,
-                    train_dataset=train_set,
-                    valid_dataset=valid_set,
-                    test_dataset=test_set,
-                    ppi=ppi,
-                    log_id=self.random_id,
-                    probe_datasets=probe_datasets,
-                )
-                self.log_metrics(data_name, model_name, valid_metrics, split_name='valid')
-                self.log_metrics(data_name, model_name, test_metrics, split_name='test')
-                torch.cuda.empty_cache()
-
     @log_method_calls
     def run_estimator_probes(self) -> None:
         """Fit gradient-boosted or forest probes on pooled embeddings.
@@ -1346,6 +1227,7 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         if self.full_args.save_model and not sweep_mode:
             self._save_estimator_probe(
                 estimator, model_name, data_name, label_type, num_labels, ppi,
+                sparse.issparse(X_train),
                 feature_selection, overrides,
             )
         if not sweep_mode:
@@ -1367,7 +1249,7 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         return estimator, valid_metrics, test_metrics
 
     def _save_estimator_probe(
-            self, estimator: Any, model_name: str, data_name: str, label_type: str, num_labels: int, ppi: bool,
+            self, estimator: Any, model_name: str, data_name: str, label_type: str, num_labels: int, ppi: bool, sparse_layout: bool,
             feature_selection: FeatureSelection | None, overrides: dict[str, Any],
         ) -> None:
         """Write the last seed's fitted estimator with the recipe needed to reuse it.
@@ -1391,6 +1273,7 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
             ppi=ppi,
             pair_feature_mode=self._pair_feature_mode,
             hyperparameters=dict(overrides),
+            sparse_layout=sparse_layout,
         )
         save_estimator_probe(directory, estimator, recipe, feature_selection)
 
@@ -1550,6 +1433,18 @@ class MainProcess(MetricsLogger, DataMixin, TrainerMixin):
         # After all models are scored, run standardized performance benchmarking
         runner.run_benchmark(model_names, dms_ids, mode, scoring_method)
 
+def seed_replayed_run(replay_args: SimpleNamespace) -> None:
+    """Seed every generator from the replayed log, not from the command line that replays it.
+
+    A log without a seed gets a fresh one, recorded on the arguments like any other run's. A
+    run logged with deterministic kernels gets them again even if the replaying command
+    did not ask for them.
+    """
+    if getattr(replay_args, "deterministic", False):
+        set_determinism()
+    replay_args.seed = set_global_seed(getattr(replay_args, "seed", None))
+
+
 def main(args: SimpleNamespace) -> int | None:
     chosen_seed = set_global_seed(args.seed)
     args.seed = chosen_seed
@@ -1568,21 +1463,11 @@ def main(args: SimpleNamespace) -> int | None:
         return _run_on_cloud(args)
 
     if args.replay_path is not None:
-        from logger import LogReplayer
+        from .logger import LogReplayer
         replayer = LogReplayer(args.replay_path)
         replay_args = replayer.parse_log()
         replay_args.replay_path = args.replay_path
-        # Re-apply seed using the replayed settings to ensure exact reproducibility
-        # `set_global_seed` takes no `deterministic` argument, so the call below raises TypeError and the
-        # replay keeps the seed its log recorded; the handler keeps that outcome as it was.
-        with suppress(TypeError):
-            # If no seed is present in replay, fall back to time-based seed
-            if not hasattr(replay_args, 'seed') or replay_args.seed is None:
-                replay_args.seed = None
-            if not hasattr(replay_args, 'deterministic') or replay_args.deterministic is None:
-                replay_args.deterministic = getattr(args, 'deterministic', False)
-            chosen_seed = set_global_seed(replay_args.seed, deterministic=replay_args.deterministic)
-            replay_args.seed = chosen_seed
+        seed_replayed_run(replay_args)
         main = MainProcess(replay_args, GUI=False)
         for k, v in main.full_args.__dict__.items():
             print(f"{k}:\t{v}")
@@ -1641,12 +1526,6 @@ def main(args: SimpleNamespace) -> int | None:
           elif main.full_args.use_scikit:
               main.save_embeddings_to_disk()
               main.run_scikit_scheme()
-          elif main.uses_default_probe():
-              main.embed_default_branches()
-              if os.environ.get('_PROTIFY_EMBED_PHASE') == '1':
-                  print_message("Embed phase complete, proceeding to merge and train.")
-                  return
-              main.run_default_probes()
           else:
               main.save_embeddings_to_disk()
               if os.environ.get('_PROTIFY_EMBED_PHASE') == '1':
@@ -1677,13 +1556,6 @@ def main(args: SimpleNamespace) -> int | None:
                 elif main.full_args.use_scikit:
                     main.save_embeddings_to_disk()
                     main.run_scikit_scheme()
-
-                elif main.uses_default_probe():
-                    main.embed_default_branches()
-                    if os.environ.get('_PROTIFY_EMBED_PHASE') == '1':
-                        print_message("Embed phase complete, proceeding to merge and train.")
-                        return
-                    main.run_default_probes()
 
                 else:
                     main.save_embeddings_to_disk()

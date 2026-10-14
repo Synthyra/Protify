@@ -2,59 +2,31 @@
 
 import pytest
 
-
-try:
-    from src.protify.base_models.esmc_sae import (
-        ALL_LAYER_K,
-        DEFAULT_SAE_CODEBOOK_DIM,
-        DEFAULT_SAE_K,
-        ESMC_SAE_COVERAGE,
-        SPARSE_ACTIVE_FRACTION,
-        is_sae_model_name,
-        parse_sae_model_name,
-        resolve_sae_model_name,
-        resolve_sae_selection,
-    )
-    from src.protify.base_models.get_base_models import BaseModelArguments
-    from src.protify.base_models.supported_models import (
-        all_presets_with_paths,
-        currently_supported_models,
-    )
-    from src.protify.probes.estimator_probe import (
-        ESTIMATOR_DEFAULTS,
-        ESTIMATOR_PROBE_TYPES,
-        EstimatorProbeArguments,
-        build_estimator,
-        is_estimator_probe,
-    )
-    from src.protify.probes.get_probe import normalize_probe_type
-    from src.protify.base_models.get_base_models import get_base_model_for_training
-except ImportError:
-    from protify.base_models.esmc_sae import (
-        ALL_LAYER_K,
-        DEFAULT_SAE_CODEBOOK_DIM,
-        DEFAULT_SAE_K,
-        ESMC_SAE_COVERAGE,
-        SPARSE_ACTIVE_FRACTION,
-        is_sae_model_name,
-        parse_sae_model_name,
-        resolve_sae_model_name,
-        resolve_sae_selection,
-    )
-    from protify.base_models.get_base_models import BaseModelArguments
-    from protify.base_models.supported_models import (
-        all_presets_with_paths,
-        currently_supported_models,
-    )
-    from protify.probes.estimator_probe import (
-        ESTIMATOR_DEFAULTS,
-        ESTIMATOR_PROBE_TYPES,
-        EstimatorProbeArguments,
-        build_estimator,
-        is_estimator_probe,
-    )
-    from protify.probes.get_probe import normalize_probe_type
-    from protify.base_models.get_base_models import get_base_model_for_training
+from protify.base_models.esmc_sae import (
+    ALL_LAYER_K,
+    DEFAULT_SAE_CODEBOOK_DIM,
+    DEFAULT_SAE_K,
+    ESMC_SAE_COVERAGE,
+    SPARSE_ACTIVE_FRACTION,
+    is_sae_model_name,
+    parse_sae_model_name,
+    resolve_sae_model_name,
+    resolve_sae_selection,
+)
+from protify.base_models.get_base_models import BaseModelArguments
+from protify.base_models.get_base_models import get_base_model_for_training
+from protify.base_models.supported_models import (
+    all_presets_with_paths,
+    currently_supported_models,
+)
+from protify.probes.estimator_probe import (
+    ESTIMATOR_DEFAULTS,
+    ESTIMATOR_PROBE_TYPES,
+    EstimatorProbeArguments,
+    build_estimator,
+    is_estimator_probe,
+)
+from protify.probes.get_probe import normalize_probe_type
 
 
 SAE_ALIASES = ("ESMC-300-SAE", "ESMC-600-SAE", "ESMC-6B-SAE")
@@ -162,14 +134,9 @@ def test_sae_models_pool_inside_the_encoder() -> None:
     # Embedder reads `pools_internally` to skip building a Pooler over SAE outputs. That is
     # what lets 'sum' through: the generic Pooler owns a different name set and would reject
     # it before any embedding runs.
-    try:
-        from src.protify.base_models.esmc_sae import EsmcSaeForEmbedding
-        from src.protify.base_models.sae_pooling import SAE_POOLING_TYPES
-        from src.protify.pooler import Pooler
-    except ImportError:
-        from protify.base_models.esmc_sae import EsmcSaeForEmbedding
-        from protify.base_models.sae_pooling import SAE_POOLING_TYPES
-        from protify.pooler import Pooler
+    from protify.base_models.esmc_sae import EsmcSaeForEmbedding
+    from protify.base_models.sae_pooling import SAE_POOLING_TYPES
+    from protify.pooler import Pooler
 
     assert EsmcSaeForEmbedding.pools_internally
     assert set(SAE_POOLING_TYPES) - set(Pooler(['mean']).pooling_options) == {'sum'}
@@ -326,10 +293,7 @@ def test_sae_embedding_pools_every_token_of_each_sequence_special_tokens_include
 
     from types import SimpleNamespace
 
-    try:
-        from src.protify.base_models.esmc_sae import EsmcSaeForEmbedding
-    except ImportError:
-        from protify.base_models.esmc_sae import EsmcSaeForEmbedding
+    from protify.base_models.esmc_sae import EsmcSaeForEmbedding
 
     generator = torch.Generator().manual_seed(3)
     attention_mask = torch.tensor([[1, 1, 1, 1, 1, 0], [1, 1, 1, 0, 0, 0], [1, 1, 0, 0, 0, 0]])  # (b, l)

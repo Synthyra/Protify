@@ -10,7 +10,7 @@ Get your API key at [synthyra.com](https://synthyra.com) and put it in the `SYNT
 
 **CLI:**
 ```bash
-python -m main --cloud --model_names ESM2-8 --data_names EC
+python -m protify.main --cloud --model_names ESM2-8 --data_names EC
 ```
 
 **GUI:** Enter your API key in the **Info** tab under "Cloud API Key", configure your run in other tabs, then go to the **Cloud** tab and click **Submit Remote Run**.

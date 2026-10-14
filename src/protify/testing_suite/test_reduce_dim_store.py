@@ -10,17 +10,9 @@ import numpy as np
 import pytest
 import torch
 
-
-pytest.importorskip("umap")
-
-try:
-    from src.protify.testing_suite.embedding_store_builder import build_store
-    from src.protify.testing_suite.legacy_cache_writer import write_sqlite_cache
-    from src.protify.visualization.reduce_dim import PCA, VisualizationArguments
-except ImportError:
-    from protify.testing_suite.embedding_store_builder import build_store
-    from protify.testing_suite.legacy_cache_writer import write_sqlite_cache
-    from protify.visualization.reduce_dim import PCA, VisualizationArguments
+from protify.testing_suite.embedding_store_builder import build_store
+from protify.testing_suite.legacy_cache_writer import write_sqlite_cache
+from protify.visualization.reduce_dim import PCA, VisualizationArguments
 
 
 pytestmark = pytest.mark.filterwarnings("ignore:Downloading embeddings is recommended")

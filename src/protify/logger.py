@@ -16,11 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-
-try:
-    from console_output import print_message
-except ImportError:
-    from .console_output import print_message
+from .console_output import print_message
 
 
 # What a results row has to record about the probe for two rows to be comparable. Without

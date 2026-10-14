@@ -19,7 +19,7 @@ load_secrets_env()   # the nearest .secrets.env above foundry: the workspace roo
 
 | Name | Does |
 |---|---|
-| `load_secrets_env(start=None, *, path=None, names=None, override=False)` | Loads `path`, else the file `FOUNDRY_SECRETS` names, else the nearest `.secrets.env` at or above `start`, which defaults to this package. A named file that does not exist loads nothing. A variable already set to a non-empty value wins unless `override`. `names` limits what loads. Returns the names it set |
+| `load_secrets_env(start=None, *, path=None, names=None, override=False)` | Loads `path`, else the file `FOUNDRY_SECRETS` names, else the nearest `.secrets.env` at or above `start`, which defaults to this package; an installed copy, under `site-packages` or `dist-packages`, has no default start. A named file that does not exist loads nothing. A variable already set to a non-empty value wins unless `override`. `names` limits what loads. Returns the names it set |
 | `load_secrets(verbose=False)` | `load_secrets_env()` returning how many names it set, the form the Atlas entities, DatasetDev, and serving/api call. `verbose` prints the count and the file's path |
 | `find_secrets_file(start=None, *, path=None)` | The file `load_secrets_env` would load, or None |
 | `parse_secrets_file(path)` | The file's pairs, values included, so the parsing rules can be tested |

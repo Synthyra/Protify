@@ -16,20 +16,11 @@ import torch
 from pathlib import Path
 
 from fastplms.features import FeatureStore, RAGGED
-
-
-try:
-    from src.protify import embedder as embedder_module
-    from src.protify import feature_cache
-    from src.protify.embedder import Embedder, EmbeddingArguments
-    from src.protify.testing_suite.embedding_store_builder import build_store_for
-    from src.protify.testing_suite.legacy_cache_writer import write_sqlite_cache, write_torch_cache
-except ImportError:
-    from protify import embedder as embedder_module
-    from protify import feature_cache
-    from protify.embedder import Embedder, EmbeddingArguments
-    from protify.testing_suite.embedding_store_builder import build_store_for
-    from protify.testing_suite.legacy_cache_writer import write_sqlite_cache, write_torch_cache
+from protify import embedder as embedder_module
+from protify import feature_cache
+from protify.embedder import Embedder, EmbeddingArguments
+from protify.testing_suite.embedding_store_builder import build_store_for
+from protify.testing_suite.legacy_cache_writer import write_sqlite_cache, write_torch_cache
 
 
 pytestmark = [

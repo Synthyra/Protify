@@ -163,7 +163,8 @@ class Run:
         if mode == "online" and not os.environ.get("WANDB_API_KEY"):
             from foundry.secrets_env import load_secrets_env
 
-            load_secrets_env()
+            # Only the key W&B reads, so a run leaves the file's other credentials out of the process.
+            load_secrets_env(names=("WANDB_API_KEY",))
         if mode == "online" and not os.environ.get("WANDB_API_KEY"):
             raise RuntimeError("WANDB_API_KEY is required for an online run, and no secrets file set it (foundry.secrets_env).")
         revision = revision if revision is not None else revision_of(Path(sys._getframe(1).f_code.co_filename))

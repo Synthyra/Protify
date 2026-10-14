@@ -12,8 +12,8 @@ turned channel halves instead of adjacent pairs. With both fixed, the largest di
 published probability is 4.9e-7, inside the card's rounding of 5e-7; the bound, 1e-6, leaves twice
 that.
 
-These tests read only the Hugging Face cache, refuse every Hub request, and skip what is not
-cached. Allocations made while the backbone loads hold NaN, so a buffer the load leaves unfilled
+These tests read only the Hugging Face cache, refuse every Hub request, and fail on what is not
+cached, because the `checkpoint` marker runs them only when they are asked for. Allocations made while the backbone loads hold NaN, so a buffer the load leaves unfilled
 fails deterministically.
 """
 
@@ -30,18 +30,8 @@ from torch import Tensor
 from torch.nn import functional as F
 
 from foundry.checkpoint_loading import assert_unsaved_buffers_match, uninitialized_memory_as_nan
-
-
-try:
-    from src.protify.base_models.calm import DEFAULT_REVISIONS, CaLmModel, build_calm_model, presets
-    from src.protify.base_models.calm_utils import DnaTokenizer
-except ImportError:
-    try:
-        from protify.base_models.calm import DEFAULT_REVISIONS, CaLmModel, build_calm_model, presets
-        from protify.base_models.calm_utils import DnaTokenizer
-    except ImportError:
-        from ..base_models.calm import DEFAULT_REVISIONS, CaLmModel, build_calm_model, presets
-        from ..base_models.calm_utils import DnaTokenizer
+from protify.base_models.calm import DEFAULT_REVISIONS, CaLmModel, build_calm_model, presets
+from protify.base_models.calm_utils import DnaTokenizer
 
 
 pytestmark = pytest.mark.checkpoint
@@ -62,10 +52,12 @@ HEAD_TENSORS = (
 
 
 def _cached(filename: str) -> Path:
-    """The local path of a cached file of the pinned revision, or a skip when it is not cached."""
+    """The local path of a cached file of the pinned revision; a file that is not cached fails the test."""
     path = try_to_load_from_cache(REPOSITORY, filename, revision=REVISION)
-    if not isinstance(path, str):
-        pytest.skip(f"{REPOSITORY} {filename} at {REVISION} is not in the local Hugging Face cache")
+    assert isinstance(path, str), (
+        f"{REPOSITORY} {filename} at {REVISION} is not in the local Hugging Face cache; "
+        f"fetch it with `hf download {REPOSITORY} --revision {REVISION}` before running checkpoint tests"
+    )
     return Path(path)
 
 

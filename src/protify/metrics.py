@@ -22,7 +22,13 @@ from sklearn.metrics import (
 )
 from transformers import EvalPrediction
 
-from interpnet.losses import get_loss_fct
+from foundry.layers.losses import get_loss_fct
+
+
+# What a metric reports when the rows cannot define it, such as an AUC over a split that holds
+# one class. Results tables and logged runs have always carried this number rather than NaN, so
+# it stays, and every average leaves it out rather than counting it as a score.
+UNDEFINED_METRIC = -100.0
 
 
 def softmax(x: np.ndarray) -> np.ndarray:
@@ -208,28 +214,25 @@ def calculate_robust_roc_auc_multiclass(y_true: np.ndarray, probs: np.ndarray) -
         probs = np.nan_to_num(probs, nan=0.0)  # (n, c)
 
     n_classes = probs.shape[1]  # c
-    try:
-        if n_classes == 2:
-            if len(np.unique(y_true)) == 2:
-                # probs[:, 1]: (n,)
-                return roc_auc_score(y_true, probs[:, 1])
-            return -100.0
+    if n_classes == 2:
+        if len(np.unique(y_true)) == 2:
+            # probs[:, 1]: (n,)
+            return roc_auc_score(y_true, probs[:, 1])
+        return UNDEFINED_METRIC
 
-        y_true_onehot = np.eye(n_classes)[y_true]  # (n, c)
-        scores: list[float] = []
-        class_weights: list[float] = []
-        for i in range(n_classes):
-            if len(np.unique(y_true_onehot[:, i])) == 2:
-                # y_true_onehot[:, i]: (n,); probs[:, i]: (n,)
-                scores.append(roc_auc_score(y_true_onehot[:, i], probs[:, i]))
-                class_weights.append(np.sum(y_true_onehot[:, i]))
+    y_true_onehot = np.eye(n_classes)[y_true]  # (n, c)
+    scores: list[float] = []
+    class_weights: list[float] = []
+    for i in range(n_classes):
+        if len(np.unique(y_true_onehot[:, i])) == 2:
+            # y_true_onehot[:, i]: (n,); probs[:, i]: (n,)
+            scores.append(roc_auc_score(y_true_onehot[:, i], probs[:, i]))
+            class_weights.append(np.sum(y_true_onehot[:, i]))
 
-        if not scores:
-            return -100.0
+    if not scores:
+        return UNDEFINED_METRIC
 
-        return float(np.average(scores, weights=class_weights))
-    except Exception:  # noqa: broad-except -100.0 marks a metric that cannot be computed; sklearn raises several types for it
-        return -100.0
+    return float(np.average(scores, weights=class_weights))
 
 
 def calculate_robust_pr_auc_multiclass(y_true: np.ndarray, probs: np.ndarray) -> float:
@@ -241,32 +244,29 @@ def calculate_robust_pr_auc_multiclass(y_true: np.ndarray, probs: np.ndarray) ->
         probs = np.nan_to_num(probs, nan=0.0)  # (n, c)
 
     n_classes = probs.shape[1]  # c
-    try:
-        if n_classes == 2:
-            if len(np.unique(y_true)) == 2:
-                # probs[:, 1]: (n,)
-                precision, recall, _ = precision_recall_curve(y_true, probs[:, 1])
-                # precision: (q,); recall: (q,); _: (q - 1,); q = curve points
-                return auc(recall, precision)
-            return -100.0
+    if n_classes == 2:
+        if len(np.unique(y_true)) == 2:
+            # probs[:, 1]: (n,)
+            precision, recall, _ = precision_recall_curve(y_true, probs[:, 1])
+            # precision: (q,); recall: (q,); _: (q - 1,); q = curve points
+            return auc(recall, precision)
+        return UNDEFINED_METRIC
 
-        y_true_onehot = np.eye(n_classes)[y_true]  # (n, c)
-        scores: list[float] = []
-        class_weights: list[float] = []
-        for i in range(n_classes):
-            if len(np.unique(y_true_onehot[:, i])) == 2:
-                # y_true_onehot[:, i]: (n,); probs[:, i]: (n,)
-                precision, recall, _ = precision_recall_curve(y_true_onehot[:, i], probs[:, i])
-                # precision: (q,); recall: (q,); _: (q - 1,); q = curve points
-                scores.append(auc(recall, precision))
-                class_weights.append(np.sum(y_true_onehot[:, i]))
+    y_true_onehot = np.eye(n_classes)[y_true]  # (n, c)
+    scores: list[float] = []
+    class_weights: list[float] = []
+    for i in range(n_classes):
+        if len(np.unique(y_true_onehot[:, i])) == 2:
+            # y_true_onehot[:, i]: (n,); probs[:, i]: (n,)
+            precision, recall, _ = precision_recall_curve(y_true_onehot[:, i], probs[:, i])
+            # precision: (q,); recall: (q,); _: (q - 1,); q = curve points
+            scores.append(auc(recall, precision))
+            class_weights.append(np.sum(y_true_onehot[:, i]))
 
-        if not scores:
-            return -100.0
+    if not scores:
+        return UNDEFINED_METRIC
 
-        return float(np.average(scores, weights=class_weights))
-    except Exception:  # noqa: broad-except -100.0 marks a metric that cannot be computed; sklearn raises several types for it
-        return -100.0
+    return float(np.average(scores, weights=class_weights))
 
 
 def calculate_robust_roc_auc_multilabel(y_true: np.ndarray, probs: np.ndarray, label_mask: np.ndarray | None = None) -> float:
@@ -282,18 +282,15 @@ def calculate_robust_roc_auc_multilabel(y_true: np.ndarray, probs: np.ndarray, l
         probs = np.nan_to_num(probs, nan=0.0)  # (n, c)
 
     scores: list[float] = []
-    try:
-        for i in range(y_true.shape[1]):
-            observed = slice(None) if label_mask is None else label_mask[:, i]
-            if len(np.unique(y_true[observed, i])) == 2:
-                # y_true[:, i]: (n,); probs[:, i]: (n,)
-                scores.append(roc_auc_score(y_true[observed, i], probs[observed, i]))
+    for i in range(y_true.shape[1]):
+        observed = slice(None) if label_mask is None else label_mask[:, i]
+        if len(np.unique(y_true[observed, i])) == 2:
+            # y_true[:, i]: (n,); probs[:, i]: (n,)
+            scores.append(roc_auc_score(y_true[observed, i], probs[observed, i]))
 
-        if not scores:
-            return -100.0
-        return float(np.mean(scores))
-    except Exception:  # noqa: broad-except -100.0 marks a metric that cannot be computed; sklearn raises several types for it
-        return -100.0
+    if not scores:
+        return UNDEFINED_METRIC
+    return float(np.mean(scores))
 
 
 def calculate_robust_pr_auc_multilabel(y_true: np.ndarray, probs: np.ndarray, label_mask: np.ndarray | None = None) -> float:
@@ -309,20 +306,17 @@ def calculate_robust_pr_auc_multilabel(y_true: np.ndarray, probs: np.ndarray, la
         probs = np.nan_to_num(probs, nan=0.0)  # (n, c)
 
     scores: list[float] = []
-    try:
-        for i in range(y_true.shape[1]):
-            observed = slice(None) if label_mask is None else label_mask[:, i]
-            if len(np.unique(y_true[observed, i])) == 2:
-                # y_true[:, i]: (n,); probs[:, i]: (n,)
-                precision, recall, _ = precision_recall_curve(y_true[observed, i], probs[observed, i])
-                # precision: (q,); recall: (q,); _: (q - 1,); q = curve points
-                scores.append(auc(recall, precision))
+    for i in range(y_true.shape[1]):
+        observed = slice(None) if label_mask is None else label_mask[:, i]
+        if len(np.unique(y_true[observed, i])) == 2:
+            # y_true[:, i]: (n,); probs[:, i]: (n,)
+            precision, recall, _ = precision_recall_curve(y_true[observed, i], probs[observed, i])
+            # precision: (q,); recall: (q,); _: (q - 1,); q = curve points
+            scores.append(auc(recall, precision))
 
-        if not scores:
-            return -100.0
-        return float(np.mean(scores))
-    except Exception:  # noqa: broad-except -100.0 marks a metric that cannot be computed; sklearn raises several types for it
-        return -100.0
+    if not scores:
+        return UNDEFINED_METRIC
+    return float(np.mean(scores))
 
 
 def compute_single_label_classification_metrics(p: EvalPrediction) -> dict[str, float]:
@@ -521,6 +515,21 @@ def compute_multi_label_classification_metrics(p: EvalPrediction, label_mask: np
     }
 
 
+def _correlations(y_pred: np.ndarray, y_true: np.ndarray) -> tuple[float, float, float, float]:
+    """Spearman's and Pearson's coefficients with their p-values, which fewer than two rows leave undefined.
+
+    Constant predictions give NaN coefficients, with scipy's warning, rather than the sentinel:
+    that is a collapsed model, not a split too small to score.
+    """
+    # y_pred: (n,); y_true: (n,)
+    if y_true.size < 2:
+        return UNDEFINED_METRIC, UNDEFINED_METRIC, UNDEFINED_METRIC, UNDEFINED_METRIC
+
+    spearman_rho, spear_pval = spearmanr(y_pred, y_true)
+    pearson_rho, pear_pval = pearsonr(y_pred, y_true)
+    return spearman_rho, spear_pval, pearson_rho, pear_pval
+
+
 def compute_regression_metrics(p: EvalPrediction) -> dict[str, float]:
     """
     Compute comprehensive metrics for regression tasks.
@@ -560,15 +569,7 @@ def compute_regression_metrics(p: EvalPrediction) -> dict[str, float]:
         print("y_pred Nans were cast to 0")
         y_pred = np.where(np.isnan(y_pred), 0, y_pred)  # (n,)
 
-    try:
-        spearman_rho, spear_pval = spearmanr(y_pred, y_true)
-        pearson_rho, pear_pval = pearsonr(y_pred, y_true)
-    except Exception:  # noqa: broad-except -100.0 marks a correlation that cannot be computed; scipy raises several types for it
-        spearman_rho = -100.0
-        spear_pval = -100.0
-        pearson_rho = -100.0
-        pear_pval = -100.0
-
+    spearman_rho, spear_pval, pearson_rho, pear_pval = _correlations(y_pred, y_true)
     r2 = r2_score(y_true, y_pred)
     mse = mean_squared_error(y_true, y_pred)
     mae = mean_absolute_error(y_true, y_pred)
@@ -607,16 +608,8 @@ def compute_tokenwise_regression_metrics(p: EvalPrediction) -> dict[str, float]:
     y_pred = y_pred[valid_mask].astype(float)  # (n,)
 
     if y_true.size == 0:
-        return {
-            'r_squared': -100.0,
-            'spearman_rho': -100.0,
-            'spear_pval': -100.0,
-            'pearson_rho': -100.0,
-            'pear_pval': -100.0,
-            'mse': -100.0,
-            'mae': -100.0,
-            'rmse': -100.0,
-        }
+        names = ('r_squared', 'spearman_rho', 'spear_pval', 'pearson_rho', 'pear_pval', 'mse', 'mae', 'rmse')
+        return dict.fromkeys(names, UNDEFINED_METRIC)
 
     if np.isnan(y_true).any():
         print("y_true Nans were cast to 0")
@@ -625,15 +618,7 @@ def compute_tokenwise_regression_metrics(p: EvalPrediction) -> dict[str, float]:
         print("y_pred Nans were cast to 0")
         y_pred = np.where(np.isnan(y_pred), 0, y_pred)  # (n,)
 
-    try:
-        spearman_rho, spear_pval = spearmanr(y_pred, y_true)
-        pearson_rho, pear_pval = pearsonr(y_pred, y_true)
-    except Exception:  # noqa: broad-except -100.0 marks a correlation that cannot be computed; scipy raises several types for it
-        spearman_rho = -100.0
-        spear_pval = -100.0
-        pearson_rho = -100.0
-        pear_pval = -100.0
-
+    spearman_rho, spear_pval, pearson_rho, pear_pval = _correlations(y_pred, y_true)
     r2 = r2_score(y_true, y_pred)
     mse = mean_squared_error(y_true, y_pred)
     mae = mean_absolute_error(y_true, y_pred)
@@ -772,10 +757,7 @@ def get_compute_metrics_with_balanced(
     (EpHod-style). Appends `balanced_*` keys. Assumes flattened predictions (after
     dropping -100 positions) align in length with `weights`.
     """
-    try:
-        from metrics_balanced import compute_balanced_regression_metrics
-    except ImportError:
-        from .metrics_balanced import compute_balanced_regression_metrics
+    from .metrics_balanced import compute_balanced_regression_metrics
 
     # weights: (...)
     weights_arr = np.asarray(weights, dtype=np.float64).flatten()  # (n,)

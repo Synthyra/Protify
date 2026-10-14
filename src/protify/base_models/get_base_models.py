@@ -277,7 +277,7 @@ if __name__ == '__main__':
         
     if args.list:
         try:
-            from resource_info import model_descriptions
+            from ..resource_info import model_descriptions
             print("\n=== Currently Supported Models ===\n")
             
             max_name_len = max(len(name) for name in currently_supported_models)

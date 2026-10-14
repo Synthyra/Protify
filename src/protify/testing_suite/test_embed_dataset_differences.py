@@ -12,12 +12,7 @@ import pytest
 import torch
 
 from fastplms.embeddings.runner import embed_dataset
-
-
-try:
-    from src.protify.embedder import Embedder, EmbeddingArguments
-except ImportError:
-    from protify.embedder import Embedder, EmbeddingArguments
+from protify.embedder import Embedder, EmbeddingArguments
 
 
 pytestmark = [

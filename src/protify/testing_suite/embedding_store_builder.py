@@ -22,10 +22,7 @@ from fastplms.features import FeatureStore
 if TYPE_CHECKING:
     from protify.embedder import EmbeddingArguments
 
-try:
-    from src.protify import feature_cache
-except ImportError:
-    from protify import feature_cache
+from protify import feature_cache
 
 
 def cache_descriptor(

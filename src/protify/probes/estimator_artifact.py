@@ -27,18 +27,12 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from scipy import sparse
 
-
-try:
-    from data.pair_features import pair_vector_halves
-    from probes.estimator_probe import REGRESSION_TASK_TYPES, _positive_probability
-    from probes.feature_path_selector import FeatureSelection
-    from console_output import print_message
-except ImportError:
-    from ..data.pair_features import pair_vector_halves
-    from .estimator_probe import REGRESSION_TASK_TYPES, _positive_probability
-    from .feature_path_selector import FeatureSelection
-    from ..console_output import print_message
+from .estimator_probe import REGRESSION_TASK_TYPES, _positive_probability
+from .feature_path_selector import FeatureSelection
+from ..console_output import print_message
+from ..data.pair_features import pair_vector_halves
 
 
 PROBE_CONFIG_NAME = "probe.json"
@@ -64,6 +58,11 @@ class EstimatorProbeRecipe:
     ppi: bool
     pair_feature_mode: str
     hyperparameters: dict[str, Any]
+    # Whether the estimator was fit on a CSR matrix. XGBoost reads an entry a CSR does not
+    # store as missing and a stored zero as zero, so scoring must rebuild the same layout or a
+    # saved probe scores different inputs than it was fit on. False in recipes saved before
+    # this was recorded, which were scored dense.
+    sparse_layout: bool = False
 
 
 def save_estimator_probe(
@@ -151,10 +150,7 @@ def embed_proteins(
     Imported inside the function because a sparse autoencoder recipe loads the vendored
     FastPLMs package, and reading a saved probe's configuration must not require it.
     """
-    try:
-        from embedder import Embedder, EmbeddingArguments
-    except ImportError:
-        from ..embedder import Embedder, EmbeddingArguments
+    from ..embedder import Embedder, EmbeddingArguments
 
     unique = list(dict.fromkeys(sequences))
     embedding_args = EmbeddingArguments(
@@ -221,4 +217,7 @@ def score_proteins(
         feature_selection,
         None if partners is None else rows(partners),
     )  # (n, s)
+    if recipe.sparse_layout:
+        # Built as training built its CSR blocks, from dense rows, so the same zeros go unstored.
+        features = sparse.csr_matrix(features)  # (n, s)
     return predict_features(estimator, features, recipe.task_type)  # (n,) or (n, c)

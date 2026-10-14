@@ -76,7 +76,7 @@ All under `outdir / tsv.stem`:
 To generate the six comparison plots from an existing TSV without running a full pipeline:
 
 ```bash
-py -m src.protify.visualization.plot_result --input path/to/results.tsv --output_dir plots --no_std
+python -m protify.visualization.plot_result --input path/to/results.tsv --output_dir plots --no_std
 ```
 
 `--no_std` omits standard deviation from heatmap annotations.
@@ -92,7 +92,7 @@ Plots are generated automatically when `main()` finishes (if results TSV exists)
 ### Standalone from TSV
 
 ```bash
-py -m src.protify.visualization.plot_result --input results/my_id.tsv --output_dir plots
+python -m protify.visualization.plot_result --input results/my_id.tsv --output_dir plots
 ```
 
 ---

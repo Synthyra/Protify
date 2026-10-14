@@ -1,4 +1,5 @@
 import importlib
+import warnings
 import torch
 
 from typing import Any
@@ -11,6 +12,7 @@ from ..base_models.sae_pooling import pool_sae_outputs
 from ..base_models.supported_models import all_presets_with_paths
 from ..data.pair_features import pair_vector_halves
 from ..pooler import Pooler
+from ..version import PROTIFY_VERSION
 
 
 class PackagedProbeConfig(PretrainedConfig):
@@ -31,11 +33,14 @@ class PackagedProbeConfig(PretrainedConfig):
         add_token_ids: bool = False,
         sep_token_id: int | None = None,
         sae_repository: str | None = None,
+        sae_revision: str | None = None,
         sae_layer: int | None = None,
         sae_codebook_dim: int | None = None,
         sae_k: int | None = None,
         feature_indices: list[int] | None = None,
         feature_input_size: int | None = None,
+        standardized_width: int | None = None,
+        protify_version: str | None = None,
         **kwargs: Any,
     ) -> None:
         # Transformers 5 saves the label count only as `id2label`, which `super().__init__` restores
@@ -60,6 +65,8 @@ class PackagedProbeConfig(PretrainedConfig):
         # A sparse autoencoder replaces dense pooling: the backbone emits codebook
         # features and `pooling_types` reduces those instead of the hidden states.
         self.sae_repository = sae_repository
+        # The commit the codebook loads at; None in a repository exported before it was recorded.
+        self.sae_revision = sae_revision
         self.sae_layer = sae_layer
         # The codebook's shape contract. Needed to rebuild the layer's structure when the
         # weights come from this checkpoint rather than from a fresh Hub download.
@@ -69,6 +76,12 @@ class PackagedProbeConfig(PretrainedConfig):
         # Both are needed: applying an index array to the wrong width silently reindexes.
         self.feature_indices = feature_indices
         self.feature_input_size = feature_input_size
+        # The width of the pooled row the probe's training standardizer was fit on, after any
+        # feature selection; None when the probe read raw embeddings. Repositories exported
+        # before this field existed carry no standardizer and keep reading raw embeddings.
+        self.standardized_width = standardized_width
+        # The Protify that trained and exported the probe; None for repositories that predate it.
+        self.protify_version = protify_version
 
 
 class PackagedProbeModel(PreTrainedModel):
@@ -81,12 +94,21 @@ class PackagedProbeModel(PreTrainedModel):
         config: PackagedProbeConfig,
         base_model: nn.Module | None = None,
         probe: nn.Module | None = None,
+        standardizer: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> None:
         super().__init__(config)
         self.config = config
         self.backbone = self._load_base_model() if base_model is None else base_model
         self.probe = self._load_probe() if probe is None else probe
         self.pooler = Pooler(self.config.pooling_types)
+        if self.config.standardized_width is not None:
+            # Persistent buffers, so the checkpoint carries the training split's statistics and
+            # from_pretrained fills them; the placeholders below are overwritten on load.
+            width = self.config.standardized_width  # s
+            mean, scale = standardizer if standardizer is not None else (torch.zeros(width), torch.ones(width))
+            assert mean.shape == (width,) and scale.shape == (width,), "standardizer width must match standardized_width"
+            self.register_buffer("feature_mean", mean.detach().float().clone())  # (s,)
+            self.register_buffer("feature_scale", scale.detach().float().clone())  # (s,)
 
     def _load_base_model(self) -> nn.Module:
         model_path = all_presets_with_paths.get(self.config.base_model_name, self.config.base_model_name)
@@ -109,7 +131,7 @@ class PackagedProbeModel(PreTrainedModel):
                 # here and the outer load fills it, exactly as it fills the backbone.
                 model.add_sae_models([self._build_sae_structure(model.config.hidden_size)])
             else:
-                model.load_sae_models(self.config.sae_repository, [self.config.sae_layer])
+                model.load_sae_models(self.config.sae_repository, [self.config.sae_layer], revision=self.config.sae_revision)
         model.eval()
         return model
 
@@ -175,6 +197,19 @@ class PackagedProbeModel(PreTrainedModel):
         )  # (s,)
         return embeddings.index_select(-1, index)  # (b, s)
 
+    def _standardize(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Scale pooled rows as training did: the training split's mean and standard deviation, after selection."""
+        # embeddings: (b, s)
+        if self.config.standardized_width is None:
+            return embeddings  # (b, s)
+        if embeddings.shape[-1] != self.config.standardized_width:
+            raise ValueError(
+                f"The probe's standardizer was fit on width {self.config.standardized_width}, but "
+                f"this embedding is {embeddings.shape[-1]} wide."
+            )
+        standardized = (embeddings.float() - self.feature_mean) / self.feature_scale  # (b, s)
+        return standardized.to(embeddings.dtype)  # (b, s)
+
     @classmethod
     def from_pretrained(cls, *args: Any, **kwargs: Any) -> Any:
         """Refresh the backbone's non-persistent buffers after the checkpoint load.
@@ -187,6 +222,13 @@ class PackagedProbeModel(PreTrainedModel):
         """
         loaded = super().from_pretrained(*args, **kwargs)
         model = loaded[0] if isinstance(loaded, tuple) else loaded
+        trained_with = model.config.protify_version
+        if trained_with is not None and trained_with != PROTIFY_VERSION:
+            warnings.warn(
+                f"This probe was exported by Protify {trained_with} and is running on Protify {PROTIFY_VERSION}; "
+                f"install protify=={trained_with} to reproduce its training-time predictions exactly.",
+                stacklevel=2,
+            )
         refresh = getattr(model.backbone, "_reset_rotary_embeddings", None)
         if callable(refresh):
             refresh()
@@ -350,6 +392,9 @@ class PackagedProbeModel(PreTrainedModel):
             )  # (b, d_probe) or (b, l, d); mask is (b, l) or None
 
         probe_embeddings = self._select_features(probe_embeddings)
+        if probe_attention_mask is None:
+            # A pooled row; per-token inputs were never standardized.
+            probe_embeddings = self._standardize(probe_embeddings)
 
         # Exported repositories predating the rename still carry "linear".
         if self.config.probe_type in ("mlp", "linear"):

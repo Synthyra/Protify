@@ -222,7 +222,7 @@ def _positive_probability(block: np.ndarray, classes: np.ndarray) -> np.ndarray:
     return block[:, np.flatnonzero(classes == 1)[0]].astype(np.float64)  # (n,)
 
 
-def _predictions(estimator: Any, X: np.ndarray, task_type: str) -> np.ndarray:
+def _predictions(estimator: Any, X: np.ndarray, task_type: str, num_labels: int = 2) -> np.ndarray:
     """Scores in the layout the shared metric functions expect.
 
     Those functions were written for neural probes, so they read their input as raw logits:
@@ -248,26 +248,23 @@ def _predictions(estimator: Any, X: np.ndarray, task_type: str) -> np.ndarray:
         probabilities = np.clip(probabilities, _PROBABILITY_EPSILON, 1.0 - _PROBABILITY_EPSILON)
         return np.log(probabilities / (1.0 - probabilities))  # (n, c)
 
-    probabilities = estimator.predict_proba(X)  # (n, c)
-    if probabilities.shape[1] == 1:
-        probabilities = np.concatenate([1.0 - probabilities, probabilities], axis=1)  # (n, 2)
+    # predict_proba has one column per class the training split held, in `classes_` order, so a
+    # class training never saw has no column: a forest fit on class 0 alone returns (n, 1) of
+    # ones, which is P(class 0). Each column goes to its class's index among `num_labels`.
+    fitted = estimator.predict_proba(X)  # (n, u), u = len(classes_)
+    classes = np.asarray(estimator.classes_).astype(np.int64)  # (u,)
+    probabilities = np.zeros((fitted.shape[0], max(num_labels, 2, int(classes.max()) + 1)))  # (n, c)
+    probabilities[:, classes] = fitted
 
     return np.log(np.clip(probabilities, _PROBABILITY_EPSILON, None))  # (n, c)
 
 
 def _metric_function(task_type: str) -> Callable[[Any], dict[str, float]]:
-    try:
-        from metrics import (
-            compute_multi_label_classification_metrics,
-            compute_regression_metrics,
-            compute_single_label_classification_metrics,
-        )
-    except ImportError:
-        from ..metrics import (
-            compute_multi_label_classification_metrics,
-            compute_regression_metrics,
-            compute_single_label_classification_metrics,
-        )
+    from ..metrics import (
+        compute_multi_label_classification_metrics,
+        compute_regression_metrics,
+        compute_single_label_classification_metrics,
+    )
 
     if task_type in REGRESSION_TASK_TYPES:
         return compute_regression_metrics
@@ -277,14 +274,14 @@ def _metric_function(task_type: str) -> Callable[[Any], dict[str, float]]:
     return compute_single_label_classification_metrics
 
 
-def score_split(estimator: Any, X: Any, y: np.ndarray, task_type: str) -> dict[str, float]:
+def score_split(estimator: Any, X: Any, y: np.ndarray, task_type: str, num_labels: int = 2) -> dict[str, float]:
     """Metrics for one already-fitted estimator on one split."""
     # X: (n, d); y: (n,) or (n, c)
     from transformers import EvalPrediction
 
     compute_metrics = _metric_function(task_type)
     return compute_metrics(
-        EvalPrediction(predictions=_predictions(estimator, X, task_type), label_ids=y)
+        EvalPrediction(predictions=_predictions(estimator, X, task_type, num_labels), label_ids=y)
     )
 
 
@@ -302,12 +299,8 @@ def fit_and_score_valid(
     """
     # X_*: (n_split, d), dense or CSR; y_*: (n_split,) or (n_split, c)
     # y_train: (n_train,) or (n_train, c), y_valid: (n_valid,) or (n_valid, c)
-    try:
-        from data.feature_matrix import matrix_density
-        from console_output import print_message
-    except ImportError:
-        from ..data.feature_matrix import matrix_density
-        from ..console_output import print_message
+    from ..data.feature_matrix import matrix_density
+    from ..console_output import print_message
 
     estimator = build_estimator(args)
     print_message(
@@ -317,7 +310,7 @@ def fit_and_score_valid(
     )
     estimator = _fit(estimator, X_train, y_train, X_valid, y_valid)
 
-    return estimator, score_split(estimator, X_valid, y_valid, args.task_type)
+    return estimator, score_split(estimator, X_valid, y_valid, args.task_type, args.num_labels)
 
 
 def train_estimator_probe(
@@ -333,6 +326,6 @@ def train_estimator_probe(
     # X_*: (n_split, d), dense or CSR; y_*: (n_split,) or (n_split, c)
     # y_train: (n_train,) or (n_train, c), y_valid: (n_valid,) or (n_valid, c), y_test: (n_test,) or (n_test, c)
     estimator, valid_metrics = fit_and_score_valid(args, X_train, y_train, X_valid, y_valid)
-    test_metrics = score_split(estimator, X_test, y_test, args.task_type)
+    test_metrics = score_split(estimator, X_test, y_test, args.task_type, args.num_labels)
 
     return estimator, valid_metrics, test_metrics

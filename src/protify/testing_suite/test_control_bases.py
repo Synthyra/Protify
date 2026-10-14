@@ -14,33 +14,12 @@ import numpy as np
 import pytest
 import torch
 
-from pathlib import Path
-
-
-try:
-    from src.protify import embedder as embedder_module
-    from src.protify import feature_cache
-    from src.protify.base_models import control_bases
-    from src.protify.base_models.get_base_models import get_base_model
-    from src.protify.data.branch_features import (
-        join_branch_embeddings,
-        parse_branch_spec,
-        require_cached_branches,
-    )
-    from src.protify.embedder import Embedder, EmbeddingArguments
-    from src.protify.testing_suite.embedding_store_builder import cache_descriptor
-except ImportError:
-    from protify import embedder as embedder_module
-    from protify import feature_cache
-    from protify.base_models import control_bases
-    from protify.base_models.get_base_models import get_base_model
-    from protify.data.branch_features import (
-        join_branch_embeddings,
-        parse_branch_spec,
-        require_cached_branches,
-    )
-    from protify.embedder import Embedder, EmbeddingArguments
-    from protify.testing_suite.embedding_store_builder import cache_descriptor
+from protify import embedder as embedder_module
+from protify import feature_cache
+from protify.base_models import control_bases
+from protify.base_models.get_base_models import get_base_model
+from protify.embedder import Embedder, EmbeddingArguments
+from protify.testing_suite.embedding_store_builder import cache_descriptor
 
 
 SEQUENCES = ["MKTAYIAKQR", "MKTAYIAKQRQISFVKSHFSRQ", "GGGGSGGGGS", "ACDEFGHIKL", "WWWWWWWWWWWWWW"]
@@ -266,30 +245,3 @@ def test_a_control_has_no_base_model_to_build():
     for model in (ONE_HOT, RANDOM):
         with pytest.raises(ValueError, match="generated where they are read"):
             get_base_model(model)
-
-
-# The branch path every Oracle cell reads.
-
-
-def test_control_branch_specs_parse_and_refuse_what_a_control_lacks():
-    spec = parse_branch_spec(f"{ONE_HOT}:mean")
-
-    assert (spec.model_name, spec.pooling_types, spec.sparse) == (ONE_HOT, ("mean",), False)
-    assert parse_branch_spec(f"{RANDOM}:mean,var").pooling_types == ("mean", "var")
-    for token in (f"{RANDOM}:max", f"{ONE_HOT}:mean@3", f"{RANDOM}:median"):
-        with pytest.raises(ValueError):
-            parse_branch_spec(token)
-
-
-@pytest.mark.parametrize("model", [ONE_HOT, RANDOM])
-def test_a_control_branch_joins_with_no_cache_and_no_embedding(tmp_path, model):
-    specs = [parse_branch_spec(f"{model}:mean")]
-    arguments = {"embedding_save_dir": str(tmp_path), "sql": True, "max_length": 64}
-
-    require_cached_branches(specs, SEQUENCES, arguments)  # refuses an incomplete cache; a control has none to lack
-    joined, widths = join_branch_embeddings(specs, SEQUENCES, arguments)
-
-    assert widths == (control_bases.control_width(model),)
-    rows = joined.block(np.arange(len(SEQUENCES)))  # (5, w)
-    assert np.array_equal(rows, control_bases.control_rows(model, SEQUENCES, ("mean",), 64).numpy())
-    assert list(Path(tmp_path).iterdir()) == []

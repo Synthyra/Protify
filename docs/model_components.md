@@ -17,7 +17,7 @@ Probes that use these components:
 - **Transformer probe:** Uses `Transformer`, `LayerNorm`, and `intermediate_correction_fn` (from mlp).
 - **Linear probe:** Uses only `intermediate_correction_fn` from mlp (for classifier sizing).
 
-The attention, rotary, transformer-stack, and SwiGLU code is the `interpnet` package's, the InterpNet model family. These modules import it under the paths below, so Protify's probes and InterpNet's run one implementation, and a fix belongs in `interpnet`. Protify's own code here is `TransformerConfig`, `TransformerPreTrainedModel`, and `TransformerForMaskedLM`.
+The attention, rotary, transformer-stack, and SwiGLU code is `foundry.layers`' (`probe_attention`, `attention_backends`, `probe_transformer`, `feedforward`). These modules re-export it under the paths below, so every probe built on them runs one implementation, and a fix belongs in `foundry.layers`. Protify's own code here is `TransformerConfig`, `TransformerPreTrainedModel`, and `TransformerForMaskedLM`.
 
 ---
 
@@ -27,7 +27,6 @@ The attention, rotary, transformer-stack, and SwiGLU code is the `interpnet` pac
 - **apply_rotary_emb_torch(x, cos, sin, interleaved):** Applies rotary embeddings to a tensor.
 - **RotaryEmbedding(dim, base, interleaved, scaling_factor):** Module that caches cos/sin for a max sequence length.
 - **MultiHeadAttention(hidden_size, n_heads, rotary, attention_backend, use_bias):** Multi-head attention with optional rotary. Dispatches to flex_attention_func, kernels_attention_func, or sdpa_attention_func from attention_utils. Supports 2D and 4D attention masks and optional BlockMask for flex. Can return attention weights and s_max. (Note: configs that wrap this module now expose `head_size` as the primary knob and derive `n_heads = hidden_size // head_size`. Passing `n_heads` to the *configs* is deprecated; the primitive itself still accepts `n_heads` directly.)
-- **AttentionLogitsSequence,** **AttentionLogitsToken:** Cross-attention modules for sequence-level and token-level classification from attention over learned parameters. With `sim_type="euclidean"`, each residue's logit for a label is its negative distance to that label's parameters. No Protify probe builds either module.
 - **Linear,** **LayerNorm:** Re-exports of `nn.Linear` and `nn.LayerNorm` for use across probes.
 
 ---
@@ -43,7 +42,7 @@ The attention, rotary, transformer-stack, and SwiGLU code is the `interpnet` pac
 - **pad_input:** Returns unpadded rows to the padded batch for the kernel path.
 - **IndexFirstAxis,** **IndexPutFirstAxis:** Helpers for indexing in attention kernels.
 
-These are used by `MultiHeadAttention` and by the transformer block when calling the chosen attention function. The kernels backend keeps the kernel it loads in `interpnet.attention_utils` (`FLASH_KERNEL` and its variant and dtypes), so read or reset it there.
+These are used by `MultiHeadAttention` and by the transformer block when calling the chosen attention function. The kernels backend keeps the kernel it loads in `foundry.layers.attention_backends` (`FLASH_KERNEL` and its variant and dtypes), so read or reset it there.
 
 ---
 

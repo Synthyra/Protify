@@ -97,7 +97,7 @@ def _save_cloud_artifacts(
 
 def _run_on_cloud(args: Any) -> int:
     """Main entry point for cloud execution. Returns exit code (0=success, 1=failure)."""
-    from cloud_backend import get_or_create_cloud_backend
+    from .cloud_backend import get_or_create_cloud_backend
 
     api_key = os.environ.get("SYNTHYRA_API_KEY")
     base_url = getattr(args, "cloud_url", None)

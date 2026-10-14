@@ -7,10 +7,10 @@ import torch
 
 from sklearn.datasets import make_blobs
 
-from src.protify.testing_suite.embedding_store_builder import build_store
-from src.protify.testing_suite.legacy_cache_writer import write_sqlite_cache
-from src.protify.visualization import clustering
-from src.protify.visualization.clustering import (
+from protify.testing_suite.embedding_store_builder import build_store
+from protify.testing_suite.legacy_cache_writer import write_sqlite_cache
+from protify.visualization import clustering
+from protify.visualization.clustering import (
     SUPPORTED_ALGORITHMS,
     ClusteringConfig,
     fit_clusterer,

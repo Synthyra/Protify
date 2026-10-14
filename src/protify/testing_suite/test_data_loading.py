@@ -4,14 +4,7 @@ import pytest
 from pathlib import Path
 from datasets import Dataset, DatasetDict
 
-
-try:
-    from src.protify.data.data_mixin import DataArguments, DataMixin
-except ImportError:
-    try:
-        from protify.data.data_mixin import DataArguments, DataMixin
-    except ImportError:
-        from ..data.data_mixin import DataArguments, DataMixin
+from protify.data.data_mixin import DataArguments, DataMixin
 
 
 AA_SUFFIXES = "LMNPQRSTVWY"

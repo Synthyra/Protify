@@ -7,18 +7,8 @@ from torch import nn
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import SequenceClassifierOutput
 
-
-try:
-    from .mlp_probe import MLPProbe, MLPProbeConfig
-except ImportError:
-    from probes.mlp_probe import MLPProbe, MLPProbeConfig
-try:
-    from ..model_components.mlp import intermediate_correction_fn
-except ImportError:
-    try:
-        from protify.model_components.mlp import intermediate_correction_fn
-    except ImportError:
-        from model_components.mlp import intermediate_correction_fn
+from .mlp_probe import MLPProbe, MLPProbeConfig
+from ..model_components.mlp import intermediate_correction_fn
 
 
 class ParallelLinearProbeConfig(PretrainedConfig):
