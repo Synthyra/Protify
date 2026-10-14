@@ -20,7 +20,7 @@ try:
     from src.protify.interpretability.capture import capture_states, model_dims
     from src.protify.interpretability import figures
     from src.protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, interval_tasks, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
-    from src.protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, protein_draws, ranking_metrics, threshold_mcc, weighted_ranking_metrics
+    from src.protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, protein_draws, ranking_metrics, standardized, threshold_mcc, weighted_ranking_metrics
     from src.protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from src.protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -42,7 +42,7 @@ except ImportError:
     from protify.interpretability.capture import capture_states, model_dims
     from protify.interpretability import figures
     from protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, interval_tasks, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
-    from protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, protein_draws, ranking_metrics, threshold_mcc, weighted_ranking_metrics
+    from protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, protein_draws, ranking_metrics, standardized, threshold_mcc, weighted_ranking_metrics
     from protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -940,6 +940,23 @@ def test_weighted_rankings_match_sklearn_with_sample_weights() -> None:
     assert all(metric.isnan().all() for metric in weighted_ranking_metrics(untied, torch.tensor(labels), positives_only))
     counts = protein_draws(7, draws=5, seed=1)
     assert counts.shape == (5, 7) and (counts.sum(dim=1) == 7).all() and torch.equal(counts, protein_draws(7, draws=5, seed=1))
+
+
+def test_pair_rows_standardize_in_blocks_as_a_whole() -> None:
+    generator = torch.Generator().manual_seed(4)
+    pooled = torch.randn(7, 3, 8, generator=generator).to(torch.bfloat16)  # (u, L, 2 w)
+
+    class Store:
+        def rows_for(self, sequences: list[str]) -> np.ndarray:
+            return np.arange(len(sequences))
+
+        def load(self, site: str, rows: np.ndarray, device: torch.device, slots: slice) -> torch.Tensor:
+            return pooled[torch.from_numpy(rows), slots].to(device)
+
+    moments = (torch.randn(3, 8, generator=generator), torch.rand(3, 8, generator=generator) + 0.5)
+    whole, before = ((pooled.to(torch.float32) - moments[0]) * moments[1]).to(torch.bfloat16), pooled.clone()
+    assert torch.equal(standardized(Store(), "site", list("abcdefg"), CPU, slice(0, 3), moments, block=2), whole)
+    assert torch.equal(pooled, before)  # the store's rows are left as they were
 
 
 def test_pair_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:

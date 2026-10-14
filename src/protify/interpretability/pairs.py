@@ -69,6 +69,7 @@ PAIR_SPLITS = {"train": "train", "validation": "valid", "test": "test"}
 # ESMC's context of 2,048 tokens, less CLS and EOS: longer proteins are cut to their first 2,046 residues.
 MAX_PAIR_RESIDUES = 2046
 STANDARDIZE_FLOOR = 1e-6
+STANDARDIZE_ROWS = 1024  # proteins standardized at once
 BALANCED_VIEWS = 10  # class-balanced views of an unbalanced split, for balanced MCC
 METRIC_CHUNK = 32  # probes whose rankings are computed at once
 INTERVAL_DRAWS = 1000  # bootstrap draws of the test proteins, for intervals
@@ -348,11 +349,23 @@ class PairInputs:
         return PairRows(view(self.proteins[split]), first, second)
 
 
-def standardized(store: PooledTapStore, site: str, sequences: list[str], device: torch.device, slots: slice, moments: tuple[Tensor, Tensor]) -> Tensor:
-    """Pooled rows of `sequences` at one site's layer slots, standardized with the training proteins' moments."""
+def standardized(
+    store: PooledTapStore,
+    site: str,
+    sequences: list[str],
+    device: torch.device,
+    slots: slice,
+    moments: tuple[Tensor, Tensor],
+    block: int = STANDARDIZE_ROWS,
+) -> Tensor:
+    """Pooled rows of `sequences` at one site's layer slots, standardized with the training proteins' moments in place,
+    `block` proteins at a time, so no float32 copy of the whole chunk is ever held."""
     mean, scale = moments
-    loaded = store.load(site, store.rows_for(sequences), device, slots)  # (u, L_c, 2 w)
-    return ((loaded.to(torch.float32) - mean) * scale).to(torch.bfloat16)
+    loaded = store.load(site, store.rows_for(sequences), device, slots)  # (u, L_c, 2 w), a copy of its own
+    for start in range(0, loaded.shape[0], block):
+        rows = loaded[start: start + block]  # (b, L_c, 2 w), a view
+        rows.copy_(((rows.to(torch.float32) - mean) * scale).to(torch.bfloat16))
+    return loaded
 
 
 def pair_inputs(data: PairData, store: PooledTapStore, site: str, slots: slice, device: torch.device, splits: tuple[str, ...]) -> tuple[PairInputs, tuple[Tensor, Tensor]]:
