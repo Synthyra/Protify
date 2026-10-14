@@ -4,6 +4,9 @@
     python -m protify.interpretability sweep  --root RUN --label B256 --lr 1e-4 1e-3 1e-2 --wd 0 0.1 --batch-size 256
     python -m protify.interpretability select --root RUN --labels B256 B1024
     python -m protify.interpretability train  --root RUN [--tasks all] [--lr 1e-3 ...] [--probe linear]
+    python -m protify.interpretability phospho --root RUN [--proteins 1000]
+    python -m protify.interpretability pca    --root RUN --tasks interpro_family --sites resid_post --layers 0,5,10,15,20
+    python -m protify.interpretability figures --root RUN --label linear --out FIGURES
     python -m protify.interpretability tokens --sequences FILE --out DIR --sites resid_post
 
 `embed` writes the pooled stores the protein tasks read: every protein-task sequence through the trained model,
@@ -12,6 +15,8 @@ every probe under every grid setting and scores each on the validation split, an
 that costs the probes least validation score, preferring the fastest batch when several are close. `train` trains
 and scores every probe of each task: protein tasks from the stores, residue tasks by streaming from the model.
 Results go to `RUN/results/<label>/<task>/` as parquet tables and a safetensors file of the selected probe weights.
+`phospho` runs the phosphomimetic scanning test, `pca` writes principal coordinates of pooled states by label set,
+and `figures` draws every figure and summary table the run's tables support.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ from safetensors.torch import save_file
 from .concepts import ALL_TASKS, DEFAULT_REPO, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, load_concept, scramble, scramble_seed
 from .capture import model_dims
 from .interventions import paired_tests, run_phospho_interventions
+from .latent import label_sets, project_layers
 from .pooled_store import PooledTapStore, embed_pooled
 from .probe_bank import ProbeSettings
 from .protein_probing import ControlStores, sweep_protein_task, train_protein_task
@@ -69,11 +75,26 @@ def parse_blocks(value: str) -> tuple[int, ...] | None:
     return None if value == "all" else tuple(int(part) for part in value.split(","))
 
 
-def load_model(model_name: str, device: torch.device, dtype: torch.dtype = torch.bfloat16) -> tuple[torch.nn.Module, object]:
+def load_model(
+    model_name: str,
+    device: torch.device,
+    dtype: torch.dtype = torch.bfloat16,
+    random_init: bool = False,
+    seed: int = 0,
+) -> tuple[torch.nn.Module, object]:
+    """The model and its tokenizer; with `random_init`, every module reset to PyTorch's default initialization, as the
+    untrained-model control is (`untrained_copy` with the same seed gives the same weights)."""
     from ..base_models.get_base_models import get_base_model
 
     model, tokenizer = get_base_model(model_name, dtype=dtype)
+    if random_init:
+        model = untrained_copy(model, seed)
     return model.to(device, dtype).eval(), tokenizer
+
+
+def model_label(args: argparse.Namespace) -> str:
+    """The model's name as stores and records give it: a randomly initialized model says so."""
+    return f"{args.model} random init (seed {args.seed})" if args.random_init else args.model
 
 
 def load_tasks(tasks: Sequence[str], args: argparse.Namespace) -> dict[str, ConceptData]:
@@ -163,11 +184,11 @@ def write_stores(
         print(f"{variant}: {len(sequences)} sequences in {time.time() - started:.0f} s")
 
 
-def make_pilot(folder: Path, name: str, item_unit: str, items: Callable[[TokenBatch], int]) -> object:
+def make_pilot(folder: Path, name: str, item_unit: str, items: Callable[[TokenBatch], int] | int, **options: object) -> object:
     from foundry.pilot import Pilot
 
     folder.mkdir(parents=True, exist_ok=True)
-    return Pilot(items=items, item_unit=item_unit, receipt=folder / f"pilot_{name}.json")
+    return Pilot(items=items, item_unit=item_unit, receipt=folder / f"pilot_{name}.json", **options)
 
 
 def command_embed(args: argparse.Namespace) -> None:
@@ -178,8 +199,8 @@ def command_embed(args: argparse.Namespace) -> None:
     spec = TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=not args.no_heads)
     tasks = [name for name in parse_tasks(args.tasks) if name in PROTEIN_TASKS]
     datasets = load_tasks(tasks, args)
-    model, tokenizer = load_model(args.model, device)
-    write_stores(model, tokenizer, args.model, datasets, Path(args.root), spec, args.controls, args.seed, args.max_tokens, device, pilot)
+    model, tokenizer = load_model(args.model, device, random_init=args.random_init, seed=args.seed)
+    write_stores(model, tokenizer, model_label(args), datasets, Path(args.root), spec, args.controls, args.seed, args.max_tokens, device, pilot)
 
 
 def training_settings(args: argparse.Namespace) -> TrainingSettings:
@@ -299,9 +320,9 @@ def command_train(args: argparse.Namespace) -> None:
         training_settings(args),
         device,
         read_task=lambda name: load_concept(name, repo=args.repo, revision=args.revision, local_dir=args.local_data),
-        read_model=lambda: load_model(args.model, device),
+        read_model=lambda: load_model(args.model, device, random_init=args.random_init, seed=args.seed),
         overwrite=args.overwrite,
-        meta={"model": args.model, "repo": args.repo, "revision": args.revision, "local_data": args.local_data},
+        meta={"model": model_label(args), "random_init": args.random_init, "repo": args.repo, "revision": args.revision, "local_data": args.local_data},
         pilot=pilot,
         sweep=args.command == "sweep",
     )
@@ -324,29 +345,83 @@ def command_select(args: argparse.Namespace) -> None:
 
 
 def command_phospho(args: argparse.Namespace) -> None:
+    pilot = None
+    if args.pilot:
+        # a protein is a step: two forward passes over its mutants and the regressions of every site and layer
+        pilot = make_pilot(Path(args.root), "phospho", "proteins", 1, steps=4, warmup=1, total_steps=args.proteins)
     device = torch.device(args.device)
-    torch.backends.cuda.matmul.allow_tf32 = True
+    # float32 weights and activations: mutants of one protein differ by about a part in a thousand in their pooled
+    # states. TF32 products (--tf32) round each state by about 5e-4, which pooling over the tokens shrinks below the
+    # one-residue difference by about a hundredfold, at twice the speed.
+    torch.backends.cuda.matmul.allow_tf32 = args.tf32
+    torch.backends.cudnn.allow_tf32 = args.tf32
     spec = TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=False)
     data = load_concept("phosphorylation", repo=args.repo, revision=args.revision, local_dir=args.local_data)
-    # float32 weights: mutants of one protein differ by about a part in a thousand in their pooled states
-    model, tokenizer = load_model(args.model, device, torch.float32)
+    model, tokenizer = load_model(args.model, device, torch.float32, random_init=args.random_init, seed=args.seed)
     untrained = untrained_copy(model, args.seed)
     folder = Path(args.root) / "interventions" / args.label
     scores = run_phospho_interventions(
         model, untrained, tokenizer, data, spec, folder / "proteins", device,
         proteins=args.proteins, seed=args.data_seed, iterations=args.iterations, max_tokens=args.max_tokens,
+        watch=pilot.watch if pilot is not None else None,
     )
+    if pilot is not None:
+        return
     scores.to_parquet(folder / "scores.parquet", index=False)
     paired_tests(scores).to_parquet(folder / "tests.parquet", index=False)
     print(f"{scores['protein'].nunique()} proteins -> {folder}")
+
+
+def command_pca(args: argparse.Namespace) -> None:
+    root = Path(args.root)
+    store = PooledTapStore(store_path(root, "trained", "original"))
+    scrambled_path = store_path(root, "trained", "scrambled")
+    scrambled = PooledTapStore(scrambled_path) if (scrambled_path / "manifest.json").exists() else None
+    folder = root / "latent" / args.label
+    folder.mkdir(parents=True, exist_ok=True)
+    for name in parse_tasks(args.tasks):
+        data = load_concept(name, repo=args.repo, revision=args.revision, local_dir=args.local_data)
+        groups = label_sets(data, args.top)
+        tested = data.splits["test"].sequences if scrambled is not None else []
+        frames = [
+            project_layers(store, groups, site, [layer for layer in parse_blocks(args.layers) or store.layers(site) if layer in store.layers(site)], scrambled, tested)
+            for site in parse_sites(args.sites)
+        ]
+        table = pd.concat(frames, ignore_index=True)
+        table.insert(0, "task", name)
+        table.to_parquet(folder / f"{name}.parquet", index=False)
+        print(f"{name}: {len(groups)} proteins, {table['group'].nunique()} groups -> {folder / f'{name}.parquet'}")
+
+
+def command_figures(args: argparse.Namespace) -> None:
+    from . import figures
+
+    root, out = Path(args.root), Path(args.out)
+    written = []
+    if (root / "results" / args.label).exists():
+        names = {path.parent.name: json.loads(path.read_text(encoding="utf-8"))["task"] for path in (root / "results" / args.label).glob("*/run.json")}
+        written += figures.all_figures(root, args.label, out, args.blocks, names)
+    for regime, labels in (("protein", args.protein_sweeps), ("residue", args.residue_sweeps)):
+        if labels:
+            ranked = rank_settings(read_sweeps(root, labels))
+            written.append(figures.sweep_curves({regime: ranked}, out / f"sweeps_{regime}.png"))
+    tests = root / "interventions" / args.interventions / "tests.parquet"
+    if tests.exists():
+        written.append(figures.phospho_figure(pd.read_parquet(tests), args.blocks, out / "phospho.png"))
+    for path in sorted((root / "latent" / args.latent).glob("*.parquet")):
+        frame = pd.read_parquet(path)
+        for site, block in frame.groupby("site"):
+            written.append(figures.pca_panels(block, out / f"pca_{path.stem}_{site}.png"))
+    for path in written:
+        print(path)
 
 
 def command_tokens(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
     spec = TapSpec(sites=parse_sites(args.sites), blocks=parse_blocks(args.blocks), per_head=False)
     sequences = [line.strip() for line in Path(args.sequences).read_text(encoding="utf-8").splitlines() if line.strip()]
-    model, tokenizer = load_model(args.model, device)
-    embed_tokens(model, tokenizer, sequences, spec, args.out, args.model, max_tokens=args.max_tokens, device=device)
+    model, tokenizer = load_model(args.model, device, random_init=args.random_init, seed=args.seed)
+    embed_tokens(model, tokenizer, sequences, spec, args.out, model_label(args), max_tokens=args.max_tokens, device=device)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -362,6 +437,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--seed", type=int, default=24895)
         sub.add_argument("--max-tokens", type=int, default=65536, help="padded tokens per embedding batch")
         sub.add_argument("--pilot", action="store_true", help="time the first steps (foundry.pilot), write the report under --root, and stop")
+        sub.add_argument("--random-init", action="store_true", help="reset every module to PyTorch's default initialization (seeded by --seed): the random-weights control")
 
     embed = commands.add_parser("embed", help="write the pooled tap stores of the protein tasks")
     common(embed)
@@ -415,8 +491,32 @@ def build_parser() -> argparse.ArgumentParser:
     phospho.add_argument("--local-data", default=None)
     phospho.add_argument("--proteins", type=int, default=1000, help="phosphoproteins drawn at random")
     phospho.add_argument("--data-seed", type=int, default=184502, help="seed of the protein draw and each protein's split")
-    phospho.add_argument("--iterations", type=int, default=350, help="L-BFGS iterations of the logistic regressions")
+    phospho.add_argument("--iterations", type=int, default=100, help="most Newton steps of a logistic regression")
+    phospho.add_argument("--tf32", action="store_true", help="TF32 matrix products in the float32 forward passes")
     phospho.set_defaults(handler=command_phospho)
+
+    pca = commands.add_parser("pca", help="principal coordinates of pooled states, proteins grouped by label set")
+    pca.add_argument("--root", required=True)
+    pca.add_argument("--label", default="pca")
+    pca.add_argument("--tasks", default="interpro_family")
+    pca.add_argument("--sites", default="resid_post")
+    pca.add_argument("--layers", default="0,5,10,15,20", help="'all' or comma-separated layers of each site")
+    pca.add_argument("--top", type=int, default=5, help="label sets named; the rest are 'other'")
+    pca.add_argument("--repo", default=DEFAULT_REPO)
+    pca.add_argument("--revision", default=None)
+    pca.add_argument("--local-data", default=None)
+    pca.set_defaults(handler=command_pca)
+
+    drawn = commands.add_parser("figures", help="draw the figures and summary tables of a run")
+    drawn.add_argument("--root", required=True)
+    drawn.add_argument("--out", required=True)
+    drawn.add_argument("--label", default="linear", help="results label")
+    drawn.add_argument("--blocks", type=int, default=30, help="blocks of the model, for the depth axis")
+    drawn.add_argument("--protein-sweeps", nargs="*", default=[], help="protein sweep labels to plot")
+    drawn.add_argument("--residue-sweeps", nargs="*", default=[], help="residue sweep labels to plot")
+    drawn.add_argument("--interventions", default="phospho", help="interventions label")
+    drawn.add_argument("--latent", default="pca", help="principal coordinates label")
+    drawn.set_defaults(handler=command_figures)
 
     tokens = commands.add_parser("tokens", help="write token-wise taps of chosen sites for a list of sequences")
     common(tokens)

@@ -40,6 +40,7 @@ class ResidueBatch:
     positions: Tensor  # (n,) token column of each residue row
     proteins: Tensor  # (n,) index of each row's protein in its split
     targets: Tensor  # (n,) class of each residue
+    protein_index: tuple[Tensor, Tensor]  # torch.unique(proteins, return_inverse=True): (p,), (n,)
 
 
 def residue_batch(
@@ -63,13 +64,16 @@ def residue_batch(
         positions.append(columns)
         owners.append(np.full(residues, index))
         classes.append(label)
+    proteins = torch.from_numpy(np.concatenate(owners))  # (n,)
+    local, inverse = torch.unique(proteins, return_inverse=True)  # on the host, so scoring never waits on the device
     return ResidueBatch(
         input_ids=encoded["input_ids"].to(device, non_blocking=True),
         attention_mask=encoded["attention_mask"].to(device, non_blocking=True),
         flat_index=torch.from_numpy(np.concatenate(flat)).to(device, non_blocking=True),
         positions=torch.from_numpy(np.concatenate(positions)).to(device, non_blocking=True),
-        proteins=torch.from_numpy(np.concatenate(owners)).to(device, non_blocking=True),
+        proteins=proteins.to(device, non_blocking=True),
         targets=torch.from_numpy(np.concatenate(classes)).to(device, non_blocking=True),
+        protein_index=(local.to(device, non_blocking=True), inverse.to(device, non_blocking=True)),
     )
 
 
@@ -350,14 +354,14 @@ def score_validation_settings(
         if not site_banks.shared:
             for bank, start, stop, heads in spans:
                 Z = bank.logits(_grouped(rows, heads), start, stop, "best")  # (n, heads, C)
-                accumulators[id(bank)].add(Z, batch.targets, batch.proteins, start)
+                accumulators[id(bank)].add(Z, batch.targets, batch.proteins, start, batch.protein_index)
             return
         centered = site_banks.center(rows, layer)  # (n, w) bf16
         for bank, index, heads in site_banks.groups(layer):
             Z = bank.shared_logits(centered, index, heads, "best", centered=True)  # (n, K * heads, C), setting-major
             starts = [start for owner, start, _, _ in spans if owner is bank]
             for setting, start in enumerate(starts):
-                accumulators[id(bank)].add(Z[:, setting * heads: (setting + 1) * heads], batch.targets, batch.proteins, start)
+                accumulators[id(bank)].add(Z[:, setting * heads: (setting + 1) * heads], batch.targets, batch.proteins, start, batch.protein_index)
 
     for token_batch in token_batches(split.sequences, settings.max_tokens):
         batch = residue_batch(tokenizer, token_batch, split.labels, device)
@@ -434,11 +438,12 @@ def score_residue_task(
     if settings.controls:
         variants += [("trained", True), ("untrained", False), ("untrained", True)]
     untrained = untrained_copy(model, settings.seed) if settings.controls else None
+    # the mean control averages batches of MEAN_CONTROL_BATCH proteins; without controls, batches fill the token budget
     batches = [
         TokenBatch(tuple(range(start, min(start + MEAN_CONTROL_BATCH, len(split.sequences)))),
                    tuple(split.sequences[start: start + MEAN_CONTROL_BATCH]))
         for start in range(0, len(split.sequences), MEAN_CONTROL_BATCH)
-    ]
+    ] if settings.controls else token_batches(split.sequences, settings.max_tokens)
     for plm, is_scrambled in variants:
         network = model if plm == "trained" else untrained
         labels = scrambled_labels if is_scrambled else split.labels
@@ -456,7 +461,7 @@ def score_residue_task(
                     if family == "head" or not settings.controls:
                         if plm == "trained" and not is_scrambled:
                             Z = _layer_logits(bank, rows, start, heads, "best")  # (n, g, C)
-                            accumulator(site, family, plm, "trained", "original").add(Z, batch.targets, batch.proteins, start)
+                            accumulator(site, family, plm, "trained", "original").add(Z, batch.targets, batch.proteins, start, batch.protein_index)
                         continue
                     if is_scrambled:
                         inputs = {"scrambled": (rows, batch.targets)}
@@ -472,7 +477,7 @@ def score_residue_task(
                     for probe, which in (("trained", "best"), ("untrained", "initial")):
                         for control, (states, targets) in inputs.items():
                             Z = _layer_logits(bank, states, start, heads, which)  # (n, g, C)
-                            accumulator(site, family, plm, probe, control).add(Z, targets, batch.proteins, start)
+                            accumulator(site, family, plm, probe, control).add(Z, targets, batch.proteins, start, batch.protein_index)
 
             _run(network, spec, score, batch)
     for (site, family, plm, probe, control), scores in accumulators.items():

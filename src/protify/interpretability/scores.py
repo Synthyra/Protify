@@ -88,21 +88,33 @@ class ScoreAccumulator:
         else:
             raise ValueError(f"Unknown task kind {kind!r}.")
 
-    def add(self, Z: Tensor, targets: Tensor, proteins: Tensor, start: int = 0) -> None:
+    def add(
+        self,
+        Z: Tensor,
+        targets: Tensor,
+        proteins: Tensor,
+        start: int = 0,
+        index: tuple[Tensor, Tensor] | None = None,
+    ) -> None:
         """Add the outputs of groups start.. for rows that belong to test proteins `proteins`.
 
         Z holds logits; targets are class indices (multiclass) or values; `proteins` gives each row's test index.
+        `index` is `torch.unique(proteins, return_inverse=True)`, which a caller adding many groups of the same rows
+        computes once: `unique` on a device waits for the device, and many small waits are slow on a shared GPU.
         """
         # Z: (n, g, C); targets: (n,) or (n, C); proteins: (n,) long
         g = Z.shape[1]
-        local, inverse = torch.unique(proteins, return_inverse=True)  # (p,), (n,)
+        local, inverse = index if index is not None else torch.unique(proteins, return_inverse=True)  # (p,), (n,)
         weights = self.plan.membership[:, local].to(torch.float64)  # (R + 1, p)
         stop = start + g
         if self.kind == "multiclass":
             C = self.outputs
             predicted = Z.argmax(dim=-1)  # (n, g)
             cells = (inverse.unsqueeze(1) * g + torch.arange(g, device=Z.device)) * (C * C) + targets.unsqueeze(1) * C + predicted  # (n, g)
-            per_protein = torch.bincount(cells.reshape(-1), minlength=len(local) * g * C * C).to(torch.float64)  # (p * g * C * C,)
+            # index_add_ rather than bincount, which waits for the device to size its output
+            per_protein = torch.zeros(len(local) * g * C * C, dtype=torch.float64, device=Z.device).index_add_(
+                0, cells.reshape(-1), torch.ones(cells.numel(), dtype=torch.float64, device=Z.device)
+            )  # (p * g * C * C,)
             folded = weights @ per_protein.view(len(local), g * C * C)  # (R + 1, g * C * C)
             self.confusion[:, start:stop] += folded.view(-1, g, C, C)
             return

@@ -9,13 +9,15 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from dataclasses import replace
 from pathlib import Path
 from safetensors.torch import load_file
 
 try:
     from src.protify.base_models.esmc import get_esmc_tokenizer
     from src.protify.interpretability.capture import capture_states, model_dims
-    from src.protify.interpretability.cli import STORE_VARIANTS, store_path, train_tasks, write_stores
+    from src.protify.interpretability import figures
+    from src.protify.interpretability.cli import STORE_VARIANTS, main, store_path, train_tasks, write_stores
     from src.protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from src.protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -32,7 +34,8 @@ try:
 except ImportError:
     from protify.base_models.esmc import get_esmc_tokenizer
     from protify.interpretability.capture import capture_states, model_dims
-    from protify.interpretability.cli import STORE_VARIANTS, store_path, train_tasks, write_stores
+    from protify.interpretability import figures
+    from protify.interpretability.cli import STORE_VARIANTS, main, store_path, train_tasks, write_stores
     from protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -424,9 +427,14 @@ def test_score_accumulator_resamples_match_direct_scores() -> None:
     Z = torch.randn(len(owners), groups, classes, generator=generator)
     Z[:120, :, :] += 4.0 * F.one_hot(targets[:120], classes).unsqueeze(1)
     accumulator = ScoreAccumulator("multiclass", groups, classes, plan)
+    indexed = ScoreAccumulator("multiclass", groups, classes, plan)
     for start in range(0, len(owners), 37):  # batches that split proteins arbitrarily
         accumulator.add(Z[start: start + 37], targets[start: start + 37], owners[start: start + 37])
+        index = torch.unique(owners[start: start + 37], return_inverse=True)
+        for group in range(groups):  # one group at a time, the batch's protein index computed once
+            indexed.add(Z[start: start + 37, group: group + 1], targets[start: start + 37], owners[start: start + 37], group, index)
     scores = accumulator.scores()  # (4, 2)
+    assert torch.equal(indexed.confusion, accumulator.confusion)
     for row in range(plan.rows):
         kept = plan.membership[row, owners].bool()
         for group in range(groups):
@@ -610,6 +618,12 @@ def test_residue_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object
     weights = load_file(str(folder / "probes.safetensors"))
     assert weights["mlp_gate.full.best.weight"].shape == (3, 256, 3)
     assert weights["k_rot.head.best.weight"].shape == (12, 16, 3)
+    # without controls the test split is scored in token-budget batches; the probes and their scores are the same
+    plain = replace(settings, controls=False)
+    train_tasks(["ssp_q3"], root, "plain", spec, plain, CPU, read_task=lambda name: data, read_model=lambda: (tiny_model, tokenizer))
+    alone = pd.read_parquet(root / "results" / "plain" / "ssp_q3" / "scores.parquet")
+    assert conditions_of(alone) == {("trained", "trained", "original")}
+    pd.testing.assert_series_equal(headline_scores(alone[alone["family"] == "full"]).sort_index(), headline_scores(full).sort_index(), atol=1e-3)
 
 
 # -- interventions and latent views --------------------------------------------------------------------------------
@@ -668,12 +682,23 @@ def test_fit_logistic_matches_sklearn() -> None:
     X = rng.normal(size=(60, 5))
     y = rng.integers(0, 3, size=60)
     X[:, 0] += y  # a weak signal, so the penalty matters
-    reference = LogisticRegression(C=1.0, max_iter=2000, tol=1e-10).fit(X, y)
+    reference = LogisticRegression(C=1.0, max_iter=5000, tol=1e-12).fit(X, y)
     X_groups = torch.tensor(X, dtype=torch.float32).unsqueeze(0).repeat(2, 1, 1)  # two identical probes
-    weight, bias = fit_logistic(X_groups, torch.from_numpy(y), classes=3, iterations=500)
+    weight, bias = fit_logistic(X_groups, torch.from_numpy(y), classes=3)
     probabilities = torch.softmax(torch.baddbmm(bias, X_groups, weight), dim=-1)  # (2, 60, 3)
     for group in range(2):
-        np.testing.assert_allclose(probabilities[group].numpy(), reference.predict_proba(X), atol=2e-3)
+        np.testing.assert_allclose(probabilities[group].numpy(), reference.predict_proba(X), atol=1e-4)
+    # fewer mutants than columns, the regime of a protein's scan: separable, so the penalty sets the solution
+    wide = rng.normal(size=(30, 80))
+    labels = rng.integers(0, 3, size=30)
+    wide[:, :3] += np.eye(3)[labels]
+    reference = LogisticRegression(C=1.0, max_iter=5000, tol=1e-12).fit(wide, labels)
+    groups = torch.tensor(np.stack([wide, wide[:, ::-1].copy()]), dtype=torch.float32)  # (2, 30, 80), columns reversed
+    weight, bias = fit_logistic(groups, torch.from_numpy(labels), classes=3, budget=2**20)  # one probe per chunk
+    probabilities = torch.softmax(torch.baddbmm(bias, groups, weight), dim=-1)
+    np.testing.assert_allclose(probabilities[0].numpy(), reference.predict_proba(wide), atol=1e-4)
+    np.testing.assert_allclose(probabilities[1].numpy(), probabilities[0].numpy(), atol=1e-5)
+    np.testing.assert_allclose(weight[1].flip(0).numpy(), weight[0].numpy(), atol=1e-4)
 
 
 def test_phospho_interventions_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
@@ -690,15 +715,16 @@ def test_phospho_interventions_end_to_end(tiny_model: ESMplusplusModel, tokenize
     spec = TapSpec(sites=("embedding", "mlp_act", "resid_post"), per_head=False)
     untrained = untrained_copy(tiny_model, seed=0)
     out = tmp_path / "phospho"
-    scores = run_phospho_interventions(tiny_model, untrained, tokenizer, data, spec, out, CPU, proteins=2, iterations=40, max_tokens=512)
+    scores = run_phospho_interventions(tiny_model, untrained, tokenizer, data, spec, out, CPU, proteins=2, max_tokens=512)
     assert scores["protein"].nunique() == 2 and len(list(out.glob("*.parquet"))) == 2
     assert set(zip(scores["plm"], scores["labels"])) == {("trained", "true"), ("trained", "shuffled"), ("untrained", "true")}
-    assert len(scores) == 2 * 3 * (1 + 3 + 3)  # proteins, conditions, site layers
+    assert set(scores["inputs"]) == {"raw", "standardized"}
+    assert len(scores) == 2 * 3 * 2 * (1 + 3 + 3)  # proteins, conditions, input treatments, site layers
     assert scores["mcc"].between(-1.0, 1.0).all()
     tests = paired_tests(scores)
-    assert len(tests) == 1 + 3 + 3 and tests["p_bonferroni"].between(0.0, 1.0).all()
+    assert len(tests) == 2 * (1 + 3 + 3) and tests["p_bonferroni"].between(0.0, 1.0).all()
     written = {path.name: path.stat().st_mtime_ns for path in out.glob("*.parquet")}
-    again = run_phospho_interventions(tiny_model, untrained, tokenizer, data, spec, out, CPU, proteins=2, iterations=40)
+    again = run_phospho_interventions(tiny_model, untrained, tokenizer, data, spec, out, CPU, proteins=2)
     assert {path.name: path.stat().st_mtime_ns for path in out.glob("*.parquet")} == written  # resumed, nothing refit
     pd.testing.assert_frame_equal(again, scores)
 
@@ -724,3 +750,61 @@ def test_principal_components_and_layer_projections(tiny_model: ESMplusplusModel
     assert len(frame) == 2 * (len(groups) + len(test_sequences))
     assert (frame["group"] == SCRAMBLED).sum() == 2 * len(test_sequences)
     assert np.isfinite(frame[["pc1", "pc2", "explained_1", "explained_2"]].to_numpy()).all()
+    main(["pca", "--root", str(root), "--tasks", "go_cc", "--layers", "0,2", "--top", "2", "--local-data", str(tmp_path / "data")])
+    written = pd.read_parquet(root / "latent" / "pca" / "go_cc.parquet")
+    pd.testing.assert_frame_equal(written.drop(columns="task"), frame)
+    main(["figures", "--root", str(root), "--out", str(tmp_path / "figures")])
+    assert (tmp_path / "figures" / "pca_go_cc_resid_post.png").exists()
+
+
+def synthetic_scores(task: str, sites: tuple[str, ...], layers: int, heads: int, resamples: int, seed: int) -> pd.DataFrame:
+    """A scores table shaped like a run's: every condition of every full-width probe, and the heads of `q`."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for site in sites:
+        for layer in [0] if site in ("embedding", "final_norm") else range(layers):
+            for plm in PLM_STATES:
+                for probe in PROBE_STATES:
+                    for control in CONTROLS:
+                        rows += [(task, "full", f"{site}:{layer}", resample, plm, probe, control, rng.uniform()) for resample in range(resamples + 1)]
+            if site == "q":
+                for head in range(heads):
+                    rows += [(task, "head", f"q:{layer}:h{head}", resample, "trained", "trained", "original", rng.uniform()) for resample in range(resamples + 1)]
+    return pd.DataFrame(rows, columns=["task", "family", "probe_name", "resample", "plm", "probe", "control", "score"])
+
+
+def test_figures_from_result_tables(tmp_path: Path) -> None:
+    root, out = tmp_path / "run", tmp_path / "figures"
+    sites = ("embedding", "q", "mlp_act", "resid_post", "final_norm")
+    for index, task in enumerate(("localization", "prot_param")):
+        folder = root / "results" / "linear" / task
+        folder.mkdir(parents=True)
+        scores = synthetic_scores(task, sites, layers=3, heads=4, resamples=3, seed=index)
+        scores.to_parquet(folder / "scores.parquet", index=False)
+        (folder / "run.json").write_text(json.dumps({"task": {"name": task, "label_names": ["length", "mass"]}}), encoding="utf-8")
+    elementwise = synthetic_scores("prot_param", ("embedding", "resid_post"), layers=3, heads=0, resamples=3, seed=2)
+    elementwise = elementwise[(elementwise["plm"] == "trained") & (elementwise["probe"] == "trained") & (elementwise["control"] == "original")]
+    pd.concat([elementwise.assign(label_index=0), elementwise.assign(label_index=1)]).drop(columns=["plm", "probe", "control"]).to_parquet(
+        root / "results" / "linear" / "prot_param" / "elementwise.parquet", index=False)
+    tests = pd.DataFrame([
+        {"inputs": inputs, "site": site, "layer": layer, "trained_true": 0.5, "trained_true_std": 0.1, "trained_shuffled": 0.0,
+         "trained_shuffled_std": 0.05, "untrained_true": 0.1, "untrained_true_std": 0.05}
+        for inputs in ("raw", "standardized") for site in sites for layer in ([0] if site in ("embedding", "final_norm") else range(3))
+    ])
+    (root / "interventions" / "phospho").mkdir(parents=True)
+    tests.to_parquet(root / "interventions" / "phospho" / "tests.parquet", index=False)
+    main(["figures", "--root", str(root), "--out", str(out), "--blocks", "3"])
+    for name in ("depth_curves", "site_maps", "best_states", "peak_layers", "controls", "heads", "prot_param_targets", "phospho"):
+        assert (out / f"{name}.png").stat().st_size > 10_000, name
+    table = pd.read_csv(out / "best_states.csv")
+    assert list(table["task"]) == ["prot_param", "localization"]
+    summary = pd.read_parquet(out / "summary.parquet")
+    trained = figures.headline(summary)
+    assert len(trained[trained["family"] == "full"]) == 2 * (2 + 3 * 3)
+    best = trained[(trained["task"] == "localization") & (trained["family"] == "full")]["full"].max()
+    assert table.set_index("task").loc["localization", "any_score"] == pytest.approx(best, abs=1e-4)
+    ranked = pd.DataFrame([
+        {"label": label, "learning_rate": rate, "weight_decay": decay, "mean_shortfall": rate * decay, "batch_size": batch, "max_tokens": 0}
+        for label, batch in (("b64", 64), ("b256", 256)) for rate in (1e-3, 1e-2) for decay in (0.0, 0.1)
+    ])
+    assert figures.sweep_curves({"protein": ranked}, out / "sweeps.png").exists()
