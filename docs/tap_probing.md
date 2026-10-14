@@ -173,20 +173,29 @@ python -m protify.interpretability train --root ONEHOT --model OneHot-Protein --
 
 ## Protein-protein interaction
 
-`--tasks ppi` adds a protein-protein interaction task, apart from the 22 concepts: the Bernett gold-standard pairs
-(`--pair-repo`, by default `Synthyra/bernett_gold_ppi`; human pairs, half interacting, no protein in two splits, and
-each protein's count of negative pairs close to its count of positive ones). Proteins are cut to their first 2,046
-residues, ESMC's context less CLS and EOS. `embed --tasks ppi` writes their stores (`stores/ppi_*`, controls included),
-and a pair probe reads one row per pair from the two partners' pooled states, each standardized with the training
-proteins' moments: [z_a + z_b | z_a * z_b], which a swap of the partners leaves unchanged. The sum lets a linear probe
-score each partner on its own, and the product lets it weigh the columns both partners share. Rows are built batch by
-batch, so no pair-by-layer tensor is ever held. Everything else follows the protein tasks, with each pair keeping its
-label under scrambled partners, and `ranking.parquet` adds each probe's ROC AUC and average precision on the test pairs.
+Two protein-protein interaction tasks are probed apart from the 22 concepts, each with stores of its own
+(`stores/<task>_*`, controls included):
+
+| Task | Pairs | Held-out splits |
+|---|---|---|
+| `ppi` | the 2024 Bernett gold standard (`Synthyra/bernett_gold_ppi`): human pairs, half interacting, no protein in two splits, each protein's count of negative pairs close to its count of positive ones | `test` |
+| `ppi2` | its 2026 successor (`Synthyra/bernett_gold_ppi_2`): HIPPIE pairs under an integer-program split, no held-out protein within 40% identity of a training one, negatives matched to the positives on degree, self-interactions, taxa and GO similarity | `test` (1:1) and `test_realistic` (the same positives with ten uniform negatives each) |
+
+Proteins are cut to their first 2,046 residues, ESMC's context less CLS and EOS. `embed --tasks ppi2` writes a task's
+stores, and a pair probe reads one row per pair from the two partners' pooled states, each standardized with the
+training proteins' moments: [z_a + z_b | z_a * z_b], which a swap of the partners leaves unchanged. The sum lets a
+linear probe score each partner on its own, and the product lets it weigh the columns both partners share. Rows are
+built batch by batch, so no pair-by-layer tensor is ever held. Everything else follows the protein tasks, with each
+pair keeping its label under scrambled partners. `ranking.parquet` adds each probe's ROC AUC, average precision, MCC at
+probability 0.5 and balanced MCC on the test pairs, and the full-width probes' on every extra test split. Balanced MCC
+is the MCC at the one threshold that maximizes its mean over ten class-balanced views of the split (the majority class
+downsampled to the minority's size, view i from seed 11 (i + 1)); a balanced split is its own single view.
+`--pair-local-data DIR` reads `DIR/<task>/<split>.parquet` in place of the Hub.
 
 ```bash
-python -m protify.interpretability embed --root RUN --tasks ppi --controls
-python -m protify.interpretability sweep --root RUN --label ppi_b1024 --tasks ppi --batch-size 1024 --lr 1e-4 1e-3 1e-2 --wd 0 0.1
-python -m protify.interpretability train --root RUN --label linear --tasks ppi --batch-size 1024 --lr 1e-3 --wd 0
+python -m protify.interpretability embed --root RUN --tasks ppi2 --controls
+python -m protify.interpretability sweep --root RUN --label ppi2_b1024 --tasks ppi2 --batch-size 1024 --lr 1e-4 1e-3 1e-2 --wd 0 0.1
+python -m protify.interpretability train --root RUN --label linear --tasks ppi2 --batch-size 1024 --lr 1e-3 --wd 0
 ```
 
 ## Seed replicates
@@ -203,7 +212,8 @@ Two options change what the probes read, and each variant runs under its own `--
 
 - `--normalize` on `embed` and `train` scales every token state to unit L2 norm along its width before pooling
   (protein tasks) or probing (residue tasks), the controls included; `train` refuses a store whose manifest disagrees.
-  The `l2_normalized` control then repeats the original condition.
+  The `l2_normalized` control then repeats the original condition, so it gets no store of its own and reads the
+  `original` store.
 - `--pooling mean` on `train` makes protein probes read the pooled mean alone (width w, or d_h per head) instead of the
   mean and variance (2w).
 
@@ -266,7 +276,7 @@ secondary structure, sorting and topology, InterPro membership, function, residu
 | `state_rankings.png` | each site's best state minus the best residual-stream state, median and quartiles over tasks, per model |
 | `controls_summary.png` | each task's best residual-stream score for every model, the random-init model and the baselines, with the first model's controls |
 | `model_size.png` | each task's best score and the relative depth of its best stream state, joined across models |
-| `ppi.png` | the pair task along relative depth (MCC and ROC AUC) for every model and control, and by site |
+| `ppi.png`, `ppi2.png` | each pair task along relative depth (MCC; ROC AUC, dashed on an extra test split) for every model and control, and by site |
 
 `stream_profiles.csv`, `category_profiles.csv`, `site_rankings.csv`, `best_states_by_model.csv`,
 `pair_best_states.csv` and `pair_ranking.csv` hold the numbers behind them.

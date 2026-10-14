@@ -1,6 +1,6 @@
 """Trends across models: where each kind of concept becomes linearly readable, which states read it best, what
 training adds over the controls and the baseline encodings, how the answers change with model size, and where
-protein-protein interaction becomes readable.
+protein-protein interaction becomes readable, on each pair task (`ppi`, `ppi2`).
 
 A model is a set of replicate roots (one per seed) sharing a results label, read as `figures` reads one model. Depth
 is put on a relative axis, 0 at the token embedding and 1 at the final norm, so models of 30, 36 and 80 blocks share
@@ -25,7 +25,10 @@ from . import figures
 from .figures import BLOCK_SITES, GRID, INK, INK_SECONDARY, MUTED, PALETTE, RESIDUAL, SITE_LABELS
 
 
-PAIR_TASK = "ppi"
+# The pair tasks of `pairs`, named here so that the trends read their tables without torch.
+PAIR_TASKS = ("ppi", "ppi2")
+PAIR_TASK = PAIR_TASKS[0]
+RANKING_METRICS = ("roc_auc", "average_precision", "mcc", "balanced_mcc")
 # The concept categories the trend figures group tasks by, in drawing order.
 CATEGORIES = (
     ("composition", ("prot_param",)),
@@ -55,7 +58,7 @@ class ModelRuns:
     def blocks(self) -> int | None:
         """The model's blocks from a store manifest (0 for a baseline encoding), or None when no root holds a store."""
         for root in self.roots:
-            for store in ("trained_original", f"{PAIR_TASK}_trained_original"):
+            for store in ("trained_original",) + tuple(f"{task}_trained_original" for task in PAIR_TASKS):
                 manifest = Path(root) / "stores" / store / "manifest.json"
                 if manifest.exists():
                     return int(json.loads(manifest.read_text(encoding="utf-8"))["dims"]["blocks"])
@@ -89,12 +92,15 @@ def model_summary(runs: ModelRuns) -> pd.DataFrame:
 
 
 def model_ranking(runs: ModelRuns, blocks: int) -> pd.DataFrame | None:
-    """The pair task's test ROC AUC and average precision per probe, averaged over replicates; None without any."""
-    tables = [pd.read_parquet(path) for root in runs.roots if (path := Path(root) / "results" / runs.label / PAIR_TASK / "ranking.parquet").exists()]
+    """The pair tasks' ranking metrics per probe and held-out split (ROC AUC, average precision, and, where recorded,
+    MCC at probability 0.5 and balanced MCC), averaged over replicates; None without any."""
+    tables = [pd.read_parquet(path) for root in runs.roots for task in PAIR_TASKS
+              if (path := Path(root) / "results" / runs.label / task / "ranking.parquet").exists()]
     if not tables:
         return None
     ranking = pd.concat(tables, ignore_index=True)
-    ranking = ranking[ranking["split"] == "test"].groupby(["task", "family", "probe_name"])[["roc_auc", "average_precision"]].mean().reset_index()
+    metrics = [column for column in RANKING_METRICS if column in ranking]
+    ranking = ranking.groupby(["task", "family", "probe_name", "split"])[metrics].mean().reset_index()
     return _with_relative_depth(figures.with_probe_parts(ranking), blocks).assign(model=runs.name)
 
 
@@ -365,11 +371,18 @@ def model_size(best: pd.DataFrame, path: Path) -> Path:
     return figures._save(figure, path)
 
 
-def pair_figure(summaries: dict[str, pd.DataFrame], kinds: dict[str, str], rankings: dict[str, pd.DataFrame], gaps: pd.DataFrame, path: Path) -> Path:
-    """A: the pair task's MCC along the relative depth of the residual stream, for every trained model, the randomly
-    initialized model and the baseline encodings (levels), with the first trained model's probes on scrambled partners
-    and on an untrained model's states. B: ROC AUC along the same axis. C: each site's best state minus the best
-    residual-stream state, per model."""
+def pair_figure(
+    task: str,
+    summaries: dict[str, pd.DataFrame],
+    kinds: dict[str, str],
+    rankings: dict[str, pd.DataFrame],
+    gaps: pd.DataFrame,
+    path: Path,
+) -> Path:
+    """A: one pair task's MCC on its test pairs along the relative depth of the residual stream, for every trained
+    model, the randomly initialized model and the baseline encodings (levels), with the first trained model's probes on
+    scrambled partners and on an untrained model's states. B: ROC AUC along the same axis, dashed on an extra test
+    split. C: each site's best state minus the best residual-stream state, per model."""
     plt = figures._pyplot()
     trained = _ordered_models([model for model in summaries if kinds[model] == "trained"])
     colors = _model_colors(trained)
@@ -378,7 +391,7 @@ def pair_figure(summaries: dict[str, pd.DataFrame], kinds: dict[str, str], ranki
         figures._letter(axis, letter)
 
     def curve(summary: pd.DataFrame, plm: str = "trained", control: str = "original") -> pd.DataFrame:
-        rows = summary[(summary["task"] == PAIR_TASK) & (summary["family"] == "full") & summary["site"].isin(RESIDUAL)
+        rows = summary[(summary["task"] == task) & (summary["family"] == "full") & summary["site"].isin(RESIDUAL)
                        & (summary["plm"] == plm) & (summary["probe"] == "trained") & (summary["control"] == control)]
         return rows.sort_values("depth")
 
@@ -387,24 +400,32 @@ def pair_figure(summaries: dict[str, pd.DataFrame], kinds: dict[str, str], ranki
         axis.axhline(value, color=INK_SECONDARY, lw=0.8, ls=":")
         axis.text(1.0, value, f" {model}", fontsize=5, color=INK_SECONDARY, va="center", ha="left", transform=axis.get_yaxis_transform())
 
+    extra = False
     for model in trained + [model for model in summaries if model not in trained]:
         line = curve(summaries[model])
         if line.empty:
             continue
         ranking = rankings.get(model)
-        auc = pd.DataFrame()
+        stream = pd.DataFrame(columns=["split", "relative_depth", "roc_auc"])
         if ranking is not None:
-            auc = ranking[(ranking["family"] == "full") & ranking["site"].isin(RESIDUAL)].sort_values("relative_depth")
+            stream = ranking[(ranking["task"] == task) & (ranking["family"] == "full") & ranking["site"].isin(RESIDUAL)].sort_values("relative_depth")
+        auc, others = stream[stream["split"] == "test"], stream[stream["split"] != "test"]
         if kinds[model] == "trained":
             axes[0].plot(line["relative_depth"], line["full"], color=colors[model], lw=1.3, label=model)
-            axes[1].plot(auc.get("relative_depth", []), auc.get("roc_auc", []), color=colors[model], lw=1.3)
+            axes[1].plot(auc["relative_depth"], auc["roc_auc"], color=colors[model], lw=1.3)
+            for _, split in others.groupby("split"):
+                axes[1].plot(split["relative_depth"], split["roc_auc"], color=colors[model], lw=1.0, ls="--")
+                extra = True
         elif kinds[model] == "random-init":
             axes[0].plot(line["relative_depth"], line["full"], color=MUTED, lw=1.1, ls="--", label=model)
-            axes[1].plot(auc.get("relative_depth", []), auc.get("roc_auc", []), color=MUTED, lw=1.1, ls="--")
+            axes[1].plot(auc["relative_depth"], auc["roc_auc"], color=MUTED, lw=1.1, ls="--")
         else:
             level(axes[0], float(line["full"].iloc[0]), model)
             if not auc.empty:
                 level(axes[1], float(auc["roc_auc"].iloc[0]), model)
+    if extra:
+        axes[1].plot([], [], color=INK_SECONDARY, lw=1.0, ls="--", label="realistic test (1:10)")
+        axes[1].legend(loc="lower right", frameon=False, fontsize=5)
     if trained:
         reference = summaries[trained[0]]
         for plm, control, legend, color in (("trained", "scrambled", "scrambled partners", PALETTE[3]), ("untrained", "original", "untrained model's states", PALETTE[4])):
@@ -450,7 +471,7 @@ def trends(
     every = list(models) + list(random) + list(baselines)
     summaries = {runs.name: model_summary(runs) for runs in every}
     rankings = {runs.name: ranking for runs in every if (ranking := model_ranking(runs, int(summaries[runs.name]["blocks"].iloc[0]))) is not None}
-    concepts = {name: summary[summary["task"] != PAIR_TASK] for name, summary in summaries.items()}
+    concepts = {name: summary[~summary["task"].isin(PAIR_TASKS)] for name, summary in summaries.items()}
     trained = {name: summary for name, summary in concepts.items() if kinds[name] == "trained"}
     written = []
     profiles = stream_profiles(pd.concat([concepts[name] for name in trained], ignore_index=True)) if trained else pd.DataFrame()
@@ -469,13 +490,15 @@ def trends(
         written.append(controls_summary(best, out / "controls_summary.png"))
         if best[best["kind"] == "trained"]["model"].nunique() > 1:
             written.append(model_size(best, out / "model_size.png"))
-    pairs = {name: summary[summary["task"] == PAIR_TASK] for name, summary in summaries.items() if (summary["task"] == PAIR_TASK).any()}
+    pairs = {name: summary[summary["task"].isin(PAIR_TASKS)] for name, summary in summaries.items() if summary["task"].isin(PAIR_TASKS).any()}
     if pairs:
-        pair_gaps = site_rankings({name: summary for name, summary in pairs.items() if int(summary["blocks"].iloc[0]) > 0}, (PAIR_TASK,))
-        pair_best = best_table(pairs, kinds)
-        ranked = pd.concat(list(rankings.values()), ignore_index=True) if rankings else pd.DataFrame()
-        written.append(figures.write_summary(pair_best, out / "pair_best_states.csv"))
-        if not ranked.empty:
-            written.append(figures.write_summary(ranked, out / "pair_ranking.csv"))
-        written.append(pair_figure(pairs, kinds, rankings, pair_gaps, out / "ppi.png"))
+        written.append(figures.write_summary(best_table(pairs, kinds), out / "pair_best_states.csv"))
+        if rankings:
+            written.append(figures.write_summary(pd.concat(list(rankings.values()), ignore_index=True), out / "pair_ranking.csv"))
+        for task in PAIR_TASKS:
+            present = {name: summary for name, summary in pairs.items() if (summary["task"] == task).any()}
+            if present:
+                blocked = {name: summary for name, summary in present.items() if int(summary["blocks"].iloc[0]) > 0}
+                gaps = site_rankings(blocked, (task,)) if blocked else pd.DataFrame()
+                written.append(pair_figure(task, present, kinds, rankings, gaps, out / f"{task}.png"))
     return written

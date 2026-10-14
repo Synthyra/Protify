@@ -20,7 +20,7 @@ try:
     from src.protify.interpretability.capture import capture_states, model_dims
     from src.protify.interpretability import figures
     from src.protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
-    from src.protify.interpretability.pairs import MeanRows, PairRows, load_pairs, mean_targets, ranking_metrics
+    from src.protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, ranking_metrics, threshold_mcc
     from src.protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from src.protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -42,7 +42,7 @@ except ImportError:
     from protify.interpretability.capture import capture_states, model_dims
     from protify.interpretability import figures
     from protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
-    from protify.interpretability.pairs import MeanRows, PairRows, load_pairs, mean_targets, ranking_metrics
+    from protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, ranking_metrics, threshold_mcc
     from protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -713,10 +713,12 @@ def test_normalized_inputs_and_mean_pooling(tiny_model: ESMplusplusModel, tokeni
     root = tmp_path / "normalized"
     passes = store_passes(protein, root, controls=True, seed=0, normalize=True)
     assert all(set(roots) == {True} for _, _, roots, _ in passes)
-    assert sorted(str(path) for _, _, roots, _ in passes for path in roots.values()) == sorted(str(store_path(root, *key)) for key in STORE_VARIANTS)
+    own = [key for key in STORE_VARIANTS if key[1] != "l2_normalized"]  # the L2 control would repeat the original stores
+    assert sorted(str(path) for _, _, roots, _ in passes for path in roots.values()) == sorted(str(store_path(root, *key)) for key in own)
     spec = TapSpec(sites=("embedding", "q", "resid_post"))
     write_stores(tiny_model, tokenizer, "tiny", protein, root, spec, controls=True, seed=0, max_tokens=256, device=CPU, normalize=True)
-    assert all(PooledTapStore(store_path(root, *key)).manifest.normalized for key in STORE_VARIANTS)
+    assert all(PooledTapStore(store_path(root, *key)).manifest.normalized for key in own)
+    assert not any(store_path(root, *key).exists() for key in STORE_VARIANTS if key not in own)
     settings = TrainingSettings(learning_rates=(3e-2,), weight_decays=(0.0,), batch_size=16, max_tokens=300, max_epochs=12, patience=4,
                                 resamples=3, normalize=True)
     train_tasks(names, root, "linear", spec, settings, CPU, read_task=datasets.__getitem__, read_model=lambda: (tiny_model, tokenizer))
@@ -849,9 +851,10 @@ def test_pair_rows_are_symmetric_and_ranked_as_sklearn_ranks() -> None:
         assert average_precision[column].item() == pytest.approx(average_precision_score(truth.numpy(), scores[:, column].numpy()), abs=1e-12)
 
 
-def synthetic_pairs(root: Path) -> None:
+def synthetic_pairs(root: Path, realistic: bool = False) -> None:
     """Pairs of the synthetic proteins, interacting when both partners favor the same residue, with no protein in two
-    splits and half the pairs of each split interacting."""
+    splits and half the pairs of each split interacting; with `realistic`, also the test positives with ten negatives
+    of the test proteins per positive."""
     sequences, classes = synthetic_proteins(150, seed=9)
     rng = np.random.default_rng(1)
     root.mkdir(parents=True, exist_ok=True)
@@ -863,6 +866,56 @@ def synthetic_pairs(root: Path) -> None:
             if a != b and same == (len(rows) % 2 == 0):
                 rows.append((sequences[a], sequences[b], int(same)))
         pd.DataFrame(rows, columns=["SeqA", "SeqB", "labels"]).to_parquet(root / f"{split}.parquet", index=False)
+    if realistic:
+        test = pd.read_parquet(root / "test.parquet")
+        negatives = []
+        while len(negatives) < 10 * int(test["labels"].sum()):
+            a, b = rng.integers(120, 150, size=2)
+            if classes[a] != classes[b]:
+                negatives.append((sequences[a], sequences[b], 0))
+        pd.concat([test[test["labels"] == 1], pd.DataFrame(negatives, columns=["SeqA", "SeqB", "labels"])], ignore_index=True).to_parquet(
+            root / "test_realistic.parquet", index=False)
+
+
+def reference_balanced_mcc(labels: np.ndarray, scores: np.ndarray, seed: int = 0, subsamples: int = 10) -> float:
+    """Atlas's balanced MCC, written out: the majority class downsampled to the minority's size in each view (view i
+    from seed `seed + 11 * (i + 1)`, a balanced input its own one view), then the MCC at the threshold, among every
+    distinct score of the views, that maximizes its mean over the views."""
+    positive, negative = np.flatnonzero(labels == 1), np.flatnonzero(labels == 0)
+    if len(positive) == len(negative):
+        views = [np.arange(len(labels))]
+    else:
+        majority, minority = (negative, positive) if len(negative) > len(positive) else (positive, negative)
+        views = [np.concatenate([minority, np.random.default_rng(seed + 11 * (view + 1)).choice(majority, size=len(minority), replace=False)])
+                 for view in range(subsamples)]
+    best = -np.inf
+    for threshold in np.unique(np.concatenate([scores[view] for view in views])):
+        values = []
+        for view in views:
+            predicted, truth = scores[view] >= threshold, labels[view] == 1
+            tp, fp = float(np.sum(predicted & truth)), float(np.sum(predicted & ~truth))
+            fn, tn = float(np.sum(~predicted & truth)), float(np.sum(~predicted & ~truth))
+            denominator = math.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+            values.append((tp * tn - fp * fn) / denominator if denominator > 0 else 0.0)
+        best = max(best, float(np.mean(values)))
+    return best
+
+
+def test_pair_metrics_match_their_definitions() -> None:
+    rng = np.random.default_rng(3)
+    for positives, negatives in ((60, 60), (40, 400), (90, 30)):
+        labels = np.array([1] * positives + [0] * negatives)
+        scores = np.stack([rng.normal(labels * shift, 1.0) for shift in (0.0, 0.5, 2.0)], axis=1)
+        scores[:20, 2] = scores[20, 2]  # ties
+        balanced = balanced_mcc(torch.tensor(scores), torch.tensor(labels))
+        for column in range(scores.shape[1]):
+            assert balanced[column].item() == pytest.approx(reference_balanced_mcc(labels, scores[:, column]), abs=1e-9)
+        predicted, truth = scores >= 0, (labels == 1)[:, None]
+        counts = np.stack([np.sum(predicted & truth, 0), np.sum(predicted & ~truth, 0), np.sum(~predicted & truth, 0), np.sum(~predicted & ~truth, 0)], axis=-1)
+        expected = [(tp * tn - fp * fn) / math.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn)) for tp, fp, fn, tn in counts.astype(float)]
+        assert threshold_mcc(torch.tensor(scores), torch.tensor(labels)).numpy() == pytest.approx(expected, abs=1e-9)
+    constant = torch.zeros(50, 1)  # one score predicts every pair positive
+    assert balanced_mcc(constant, torch.tensor([1] * 10 + [0] * 40)).item() == 0.0
 
 
 def test_pair_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
@@ -885,8 +938,12 @@ def test_pair_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object, t
     assert set(scores[scores["family"] == "head"]["probe_name"]) == {f"q:{layer}:h{head}" for layer in range(3) for head in range(4)}
     assert headline_scores(full)["embedding:0"] > 0.5  # the product of the partners' rows reads a shared favored residue
     ranking = pd.read_parquet(folder / "ranking.parquet")
-    assert len(ranking) == len(scores[(scores["resample"] == 0) & (scores["plm"] == "trained") & (scores["probe"] == "trained") & (scores["control"] == "original")])
+    headline = scores[(scores["resample"] == 0) & (scores["plm"] == "trained") & (scores["probe"] == "trained") & (scores["control"] == "original")]
+    assert len(ranking) == len(headline) and set(ranking["split"]) == {"test"}
     assert ranking.set_index("probe_name").loc["embedding:0", "roc_auc"] > 0.8 and ranking["average_precision"].between(0, 1).all()
+    # the MCC at probability 0.5 is the full-test score; the balanced MCC takes the best threshold, so it is no lower
+    joined = ranking.merge(headline, on=["family", "probe_name"])
+    assert np.allclose(joined["mcc"], joined["score"], atol=1e-6) and (joined["balanced_mcc"] >= joined["mcc"] - 1e-9).all()
     weights = load_file(str(folder / "probes.safetensors"))
     assert weights["embedding.full.best.weight"].shape == (1, 256, 1)  # [a + b | a * b] of 128 pooled columns
     assert weights["q.head.best.weight"].shape == (12, 64, 1)
@@ -896,6 +953,28 @@ def test_pair_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object, t
     validation = pd.read_parquet(folder / "validation.parquet")
     validate_tasks(root, "linear", ["ppi"], CPU, read_task=lambda name: data, read_model=lambda random_init, seed: pytest.fail("loaded a model"), overwrite=True)
     pd.testing.assert_frame_equal(pd.read_parquet(folder / "validation.parquet"), validation, atol=1e-4, rtol=1e-3)
+
+
+def test_second_pair_task_ranks_its_realistic_split(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    assert PAIR_TASKS == ("ppi", "ppi2") and parse_tasks("ppi2,ppi") == ("ppi2", "ppi")
+    synthetic_pairs(tmp_path / "pairs" / "ppi2", realistic=True)
+    data = load_pairs("ppi2", local_dir=tmp_path / "pairs" / "ppi2")
+    assert data.task.name == "ppi2" and data.extra_tests == ("test_realistic",)
+    realistic = data.splits["test_realistic"]
+    assert set(realistic.sequences) <= set(data.splits["test"].sequences) and realistic.labels.sum() * 11 == len(realistic.labels)
+    spec = TapSpec(sites=("embedding", "resid_post"))
+    root = tmp_path / "run"
+    write_stores(tiny_model, tokenizer, "tiny", {"ppi2": data}, root, spec, controls=False, seed=0, max_tokens=256, device=CPU, prefix=pair_prefix("ppi2"))
+    assert (store_path(root, "trained", "original", "ppi2_") / "manifest.json").exists()
+    settings = TrainingSettings(learning_rates=(3e-2,), weight_decays=(0.0,), batch_size=32, max_epochs=20, patience=5, resamples=3, controls=False)
+    train_tasks(["ppi2"], root, "linear", spec, settings, CPU, read_task=lambda name: data, read_model=lambda: pytest.fail("loaded a model"))
+    ranking = pd.read_parquet(root / "results" / "linear" / "ppi2" / "ranking.parquet")
+    full = ranking[ranking["family"] == "full"]
+    assert set(full["split"]) == {"test", "test_realistic"} and set(ranking[ranking["family"] == "head"]["split"]) <= {"test"}
+    assert len(full[full["split"] == "test_realistic"]) == 1 + 3  # the embedding and three blocks
+    both = full.pivot_table(index="probe_name", columns="split", values="roc_auc")
+    assert (both["test_realistic"] > 0.7).all()  # the same proteins, ranked against more negatives
+    assert full[["roc_auc", "average_precision", "mcc", "balanced_mcc"]].notna().all().all()
 
 
 # -- interventions and latent views --------------------------------------------------------------------------------

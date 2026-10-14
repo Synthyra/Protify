@@ -1,17 +1,26 @@
 """Protein-protein interaction as a probe task: pairs of proteins, read through a symmetric row of their pooled states.
 
-The pairs are the Bernett gold standard (`Synthyra/bernett_gold_ppi`): human protein pairs, half of them interacting,
-split so that no protein appears in two splits, with negatives drawn so that each protein's count of negative pairs
-stays close to its count of positive ones. A probe reads one row per pair built from the two partners' pooled states,
-each standardized with the moments of the training proteins: [z_a + z_b | z_a * z_b], the two symmetric functions of
-each column pair, so a pair reads the same in either order. On the sum alone a linear probe can only score each
-partner on its own; the product lets it weigh columns that both partners share. Pair rows are built batch by batch
-from the proteins' rows, so no (pairs, layers, columns) tensor is ever held.
+Two pair tasks share the code, each with its own stores (`stores/<task>_*`):
+
+- `ppi`, the 2024 Bernett gold standard (`Synthyra/bernett_gold_ppi`): human protein pairs, half of them interacting,
+  split so that no protein appears in two splits, with negatives drawn so that each protein's count of negative pairs
+  stays close to its count of positive ones.
+- `ppi2`, its 2026 successor (`Synthyra/bernett_gold_ppi_2`): HIPPIE pairs under an integer-program split, no
+  protein in two splits and no held-out protein within 40% identity of a training one, with negatives matched to the
+  positives on per-protein degree, self-interactions, taxa and GO similarity. Beside its balanced test split it holds
+  `test_realistic`, the same positives and proteins with ten uniformly drawn negatives per positive.
+
+A probe reads one row per pair built from the two partners' pooled states, each standardized with the moments of the
+training proteins: [z_a + z_b | z_a * z_b], the two symmetric functions of each column pair, so a pair reads the same in
+either order. On the sum alone a linear probe can only score each partner on its own; the product lets it weigh columns
+that both partners share. Pair rows are built batch by batch from the proteins' rows, so no (pairs, layers, columns)
+tensor is ever held.
 
 Everything else follows the protein-level probes (`protein_probing`): one bank per site and family, early stopping on
 validation loss, MCC on the full test split and its random halves, validation scores for choosing best states, layer
 chunks for wide sites, and the controls, with each pair's label kept for scrambled partners. Each kept probe also gets
-its ROC AUC and average precision on the test pairs.
+its ROC AUC, average precision, MCC at probability 0.5 and balanced MCC on the test pairs (`ranking.parquet`), and the
+full-width probes the same on every extra test split.
 
 Symbols: n pairs; u proteins of a split; P probes of a family; w columns a probe reads of one protein; G groups.
 """
@@ -31,18 +40,40 @@ from .concepts import ConceptTask
 from .pooled_store import PooledTapStore
 from .probe_bank import ProbeBank
 from .protein_probing import ControlStores, _flat, _shared, families, family_offset, feature_moments, fit_family, keep_state, layer_chunks, score_bank, validation_loss
-from .scores import ResamplePlan, ScoreAccumulator
+from .scores import ResamplePlan, ScoreAccumulator, binary_mcc
 from .sites import SiteLayout
 from .training import MEAN_CONTROL_BATCH, TaskResults, TrainingSettings
 
 
+@dataclass(frozen=True)
+class PairSource:
+    """A pair dataset: its task name, its Hub repository, and the held-out splits it adds beside test, which pair the
+    test proteins differently."""
+
+    name: str
+    repo: str
+    extra_tests: tuple[str, ...] = ()
+
+
+PAIR_SOURCES = {
+    "ppi": PairSource("ppi", "Synthyra/bernett_gold_ppi"),
+    "ppi2": PairSource("ppi2", "Synthyra/bernett_gold_ppi_2", ("test_realistic",)),
+}
+PAIR_TASKS = tuple(PAIR_SOURCES)
 PAIR_TASK = "ppi"
-PAIR_REPO = "Synthyra/bernett_gold_ppi"
-# Our split names, and the dataset's.
+PAIR_REPO = PAIR_SOURCES[PAIR_TASK].repo
+# Our split names, and the datasets'; an extra test split keeps its own name.
 PAIR_SPLITS = {"train": "train", "validation": "valid", "test": "test"}
 # ESMC's context of 2,048 tokens, less CLS and EOS: longer proteins are cut to their first 2,046 residues.
 MAX_PAIR_RESIDUES = 2046
 STANDARDIZE_FLOOR = 1e-6
+BALANCED_VIEWS = 10  # class-balanced views of an unbalanced split, for balanced MCC
+METRIC_CHUNK = 32  # probes whose rankings are computed at once
+
+
+def pair_prefix(task: str) -> str:
+    """The prefix of a pair task's own stores."""
+    return f"{task}_"
 
 
 @dataclass
@@ -68,36 +99,46 @@ class PairData:
     task: ConceptTask
     splits: dict[str, PairSplit]
 
+    @property
+    def extra_tests(self) -> tuple[str, ...]:
+        """The held-out splits beside test."""
+        return tuple(split for split in self.splits if split not in PAIR_SPLITS)
+
     def pair_targets(self, split: str) -> Tensor:
         return torch.tensor(self.splits[split].labels, dtype=torch.float32).unsqueeze(1)  # (n, 1)
 
 
-def pair_task() -> ConceptTask:
-    return ConceptTask(PAIR_TASK, "pair", "binary", 1, ("interaction",))
+def pair_task(name: str = PAIR_TASK) -> ConceptTask:
+    return ConceptTask(name, "pair", "binary", 1, ("interaction",))
 
 
 def load_pairs(
-    repo: str = PAIR_REPO,
+    task: str = PAIR_TASK,
     revision: str | None = None,
     local_dir: str | Path | None = None,
     max_residues: int = MAX_PAIR_RESIDUES,
 ) -> PairData:
-    """The three splits of a pair dataset (`SeqA`, `SeqB`, `labels`) from the Hub, or from `local_dir/<split>.parquet`
-    under our split names, with every sequence cut to `max_residues`."""
+    """The splits of a pair task (`SeqA`, `SeqB`, `labels`): train, validation, test and its extra test splits, from
+    its Hub repository or from `local_dir/<split>.parquet` under our split names, with every sequence cut to
+    `max_residues`. A local folder may leave the extra test splits out."""
+    source = PAIR_SOURCES[task]
+    wanted = {**PAIR_SPLITS, **{split: split for split in source.extra_tests}}
     if local_dir is not None:
-        frames = {split: pd.read_parquet(Path(local_dir) / f"{split}.parquet") for split in PAIR_SPLITS}
+        frames = {split: pd.read_parquet(Path(local_dir) / f"{split}.parquet") for split in wanted
+                  if split in PAIR_SPLITS or (Path(local_dir) / f"{split}.parquet").exists()}
     else:
         from huggingface_hub import HfApi, hf_hub_download
 
-        files = HfApi().list_repo_files(repo, repo_type="dataset", revision=revision)
+        files = HfApi().list_repo_files(source.repo, repo_type="dataset", revision=revision)
 
         def fetch(theirs: str) -> pd.DataFrame:
             parts = sorted(name for name in files if name.startswith(f"data/{theirs}-") and name.endswith(".parquet"))
             if not parts:
-                raise FileNotFoundError(f"{repo} has no data/{theirs}-*.parquet.")
-            return pd.concat([pd.read_parquet(hf_hub_download(repo, name, repo_type="dataset", revision=revision)) for name in parts], ignore_index=True)
+                raise FileNotFoundError(f"{source.repo} has no data/{theirs}-*.parquet.")
+            return pd.concat([pd.read_parquet(hf_hub_download(source.repo, name, repo_type="dataset", revision=revision)) for name in parts],
+                             ignore_index=True)
 
-        frames = {split: fetch(theirs) for split, theirs in PAIR_SPLITS.items()}
+        frames = {split: fetch(theirs) for split, theirs in wanted.items()}
     splits = {
         split: PairSplit(
             first=[sequence[:max_residues] for sequence in frame["SeqA"]],
@@ -106,7 +147,7 @@ def load_pairs(
         )
         for split, frame in frames.items()
     }
-    return PairData(pair_task(), splits)
+    return PairData(pair_task(task), splits)
 
 
 class PairRows:
@@ -172,20 +213,76 @@ def mean_targets(targets: Tensor, group: int = MEAN_CONTROL_BATCH) -> Tensor:
                       for start in range(0, targets.shape[0], group)])
 
 
-def ranking_metrics(scores: Tensor, labels: Tensor) -> tuple[Tensor, Tensor]:
+def ranking_metrics(scores: Tensor, labels: Tensor, chunk: int = METRIC_CHUNK) -> tuple[Tensor, Tensor]:
     """ROC AUC and average precision of each column of `scores` against binary `labels`, as scikit-learn computes them
-    for untied scores."""
+    for untied scores, `chunk` columns at a time."""
     # scores: (n, G); labels: (n,) 0 or 1
-    order = scores.argsort(dim=0, descending=True)  # (n, G)
-    hits = labels.to(torch.float64)[order]  # (n, G), 1 where the k-th highest score belongs to a positive
-    positives = hits.sum(dim=0)  # (G,)
-    negatives = scores.shape[0] - positives
-    true_positives = hits.cumsum(dim=0)  # (n, G)
+    roc_aucs, precisions = [], []
     ranks = torch.arange(1, scores.shape[0] + 1, dtype=torch.float64, device=scores.device).unsqueeze(1)  # (n, 1)
-    average_precision = (true_positives / ranks * hits).sum(dim=0) / positives.clamp_min(1)
-    negatives_above = (1.0 - hits).cumsum(dim=0)  # (n, G), negatives ranked at or above each row
-    roc_auc = ((negatives - negatives_above) * hits).sum(dim=0) / (positives * negatives).clamp_min(1)
-    return roc_auc, average_precision
+    for start in range(0, scores.shape[1], chunk):
+        order = scores[:, start: start + chunk].argsort(dim=0, descending=True)  # (n, g)
+        hits = labels.to(torch.float64)[order]  # (n, g), 1 where the k-th highest score belongs to a positive
+        positives = hits.sum(dim=0)  # (g,)
+        negatives = scores.shape[0] - positives
+        true_positives = hits.cumsum(dim=0)  # (n, g)
+        precisions.append((true_positives / ranks * hits).sum(dim=0) / positives.clamp_min(1))
+        negatives_above = (1.0 - hits).cumsum(dim=0)  # (n, g), negatives ranked at or above each row
+        roc_aucs.append(((negatives - negatives_above) * hits).sum(dim=0) / (positives * negatives).clamp_min(1))
+    return torch.cat(roc_aucs), torch.cat(precisions)
+
+
+def threshold_mcc(scores: Tensor, labels: Tensor) -> Tensor:
+    """MCC of each column of logits `scores` at probability 0.5 (a logit of 0 or more predicts a positive)."""
+    # scores: (n, G); labels: (n,) 0 or 1
+    predicted, positive = scores >= 0, labels.to(torch.bool).unsqueeze(1)  # (n, G), (n, 1)
+    masks = (predicted & positive, predicted & ~positive, ~predicted & positive, ~predicted & ~positive)
+    return binary_mcc(torch.stack([mask.sum(dim=0, dtype=torch.float64) for mask in masks], dim=-1))  # (G,)
+
+
+def balanced_views(labels: np.ndarray, seed: int = 0, subsamples: int = BALANCED_VIEWS) -> list[np.ndarray]:
+    """Index sets of class-balanced views, drawn as Atlas draws them: the majority class downsampled without
+    replacement to the minority's size, view i from seed `seed + 11 * (i + 1)`; a balanced split is its own one view."""
+    # labels: (n,) 0 or 1
+    positive, negative = np.flatnonzero(labels == 1), np.flatnonzero(labels == 0)
+    if len(positive) == len(negative):
+        return [np.arange(len(labels))]
+    majority, minority = (negative, positive) if len(negative) > len(positive) else (positive, negative)
+    return [np.concatenate([minority, np.random.default_rng(seed + 11 * (view + 1)).choice(majority, size=len(minority), replace=False)])
+            for view in range(subsamples)]
+
+
+def balanced_mcc(scores: Tensor, labels: Tensor, seed: int = 0, subsamples: int = BALANCED_VIEWS, chunk: int = METRIC_CHUNK) -> Tensor:
+    """Balanced MCC of each column of `scores`, as Atlas defines it: the MCC at the one threshold that maximizes its mean
+    over the class-balanced views (`balanced_views`), a score at or above the threshold predicting a positive. Every
+    score is a candidate threshold, which reaches every count any view can show."""
+    # scores: (n, G); labels: (n,) 0 or 1
+    views = balanced_views(labels.cpu().numpy(), seed, subsamples)
+    member = torch.zeros((len(views), scores.shape[0]), dtype=torch.bool, device=scores.device)  # (V, n)
+    for row, view in enumerate(views):
+        member[row, torch.as_tensor(view, device=scores.device)] = True
+    positive = labels.to(torch.bool)  # (n,)
+    out = []
+    for start in range(0, scores.shape[1], chunk):
+        ordered, order = scores[:, start: start + chunk].sort(dim=0, descending=True)  # (n, g)
+        cut = torch.ones_like(ordered, dtype=torch.bool)  # (n, g), the last row of each run of equal scores
+        cut[:-1] = ordered[:-1] != ordered[1:]
+        hit = positive[order]  # (n, g)
+        mean = torch.zeros(ordered.shape, dtype=torch.float64, device=scores.device)  # (n, g)
+        for inside in member:
+            kept = inside[order]  # (n, g)
+            tp = (hit & kept).cumsum(dim=0, dtype=torch.float64)  # (n, g), the view's positives at or above each cut
+            fp = (~hit & kept).cumsum(dim=0, dtype=torch.float64)
+            counts = torch.stack([tp, fp, float((positive & inside).sum()) - tp, float((~positive & inside).sum()) - fp], dim=-1)  # (n, g, 4)
+            mean += binary_mcc(counts) / len(member)
+        out.append(mean.masked_fill(~cut, -torch.inf).max(dim=0).values)
+    return torch.cat(out)  # (G,)
+
+
+def pair_metrics(scores: Tensor, labels: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """ROC AUC, average precision, MCC at probability 0.5 and balanced MCC (Atlas's views, seed 0) of each column of
+    logits `scores`."""
+    roc_auc, average_precision = ranking_metrics(scores, labels)
+    return roc_auc, average_precision, threshold_mcc(scores, labels), balanced_mcc(scores, labels)
 
 
 @torch.no_grad()
@@ -247,18 +344,20 @@ def train_pair_task(
     results: TaskResults | None = None,
     save_weights: dict[str, dict[str, Tensor]] | None = None,
 ) -> TaskResults:
-    """Train and score every probe of a pair task on a pooled store of its proteins."""
+    """Train and score every probe of a pair task on a pooled store of its proteins; the full-width probes are also
+    ranked on each extra test split."""
     task = data.task
     results = results or TaskResults()
-    targets = {split: data.pair_targets(split).to(device) for split in PAIR_SPLITS}
+    splits = tuple(PAIR_SPLITS) + data.extra_tests
+    targets = {split: data.pair_targets(split).to(device) for split in splits}
     plan = ResamplePlan.draw(len(data.splits["test"].labels), settings.resamples, settings.resample_fraction, settings.seed, device)
     validation_plan = ResamplePlan.draw(len(data.splits["validation"].labels), 0, settings.resample_fraction, settings.seed, device)
-    proteins_held = sum(len(data.splits[split].sequences) for split in PAIR_SPLITS)
+    proteins_held = sum(len(data.splits[split].sequences) for split in splits)
     for site, layout in layouts.items():
         for part, slots in layer_chunks(layout, proteins_held, settings.site_budget_gb):
-            inputs, moments = pair_inputs(data, store, site, slots, device, tuple(PAIR_SPLITS))
+            inputs, moments = pair_inputs(data, store, site, slots, device, splits)
             for family, names, view in families(part, settings.pooling):
-                rows = {split: inputs.rows(view, split) for split in PAIR_SPLITS}
+                rows = {split: inputs.rows(view, split) for split in splits}
                 bank, epochs = fit_family(names, rows, targets, data, settings, device, f"{task.name} {site} {family}", family_offset(layout, slots, family))
                 selected, chosen = bank.select_settings(len(settings.grid()))
                 results.add_training(task.name, family, selected, chosen, settings, epochs)
@@ -268,8 +367,9 @@ def train_pair_task(
                 accumulator = ScoreAccumulator(task.kind, selected.groups, task.outputs, plan)
                 score_bank(selected, "best", rows["test"], targets["test"], accumulator)
                 results.add_scores(task.name, family, selected.names, accumulator, "trained", "trained", "original", True)
-                roc_auc, average_precision = ranking_metrics(bank_scores(selected, "best", rows["test"]), targets["test"][:, 0])
-                results.add_ranking(task.name, family, selected.names, "test", roc_auc, average_precision)
+                for split in ("test",) + (data.extra_tests if family == "full" else ()):
+                    metrics = pair_metrics(bank_scores(selected, "best", rows[split]), targets[split][:, 0])
+                    results.add_ranking(task.name, family, selected.names, split, *metrics)
                 if controls is not None and family == "full":
                     _score_pair_controls(selected, site, slots, view, data, controls, moments, rows["test"], targets["test"], plan, settings, results, device)
             del inputs

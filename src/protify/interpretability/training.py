@@ -223,16 +223,31 @@ class TaskResults:
             "validation_loss": losses.detach().cpu().numpy(),
         }))
 
-    def add_ranking(self, task: str, family: str, names: list[str], split: str, roc_auc: Tensor, average_precision: Tensor) -> None:
-        """One row per probe: ROC AUC and average precision of its kept weights on one split."""
-        self.ranking.append(pd.DataFrame({
+    def add_ranking(
+        self,
+        task: str,
+        family: str,
+        names: list[str],
+        split: str,
+        roc_auc: Tensor,
+        average_precision: Tensor,
+        mcc: Tensor | None = None,
+        balanced_mcc: Tensor | None = None,
+    ) -> None:
+        """One row per probe: ROC AUC, average precision, and, when given, MCC at probability 0.5 and balanced MCC of its
+        kept weights on one split."""
+        frame = pd.DataFrame({
             "task": task,
             "family": family,
             "probe_name": [name.split("|")[0] for name in names],
             "split": split,
             "roc_auc": roc_auc.detach().cpu().numpy(),
             "average_precision": average_precision.detach().cpu().numpy(),
-        }))
+        })
+        for column, values in (("mcc", mcc), ("balanced_mcc", balanced_mcc)):
+            if values is not None:
+                frame[column] = values.detach().cpu().numpy()
+        self.ranking.append(frame)
 
     def frames(self) -> dict[str, pd.DataFrame]:
         tables = {

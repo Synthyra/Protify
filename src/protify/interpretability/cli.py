@@ -28,10 +28,11 @@ axis, with the randomly initialized model and the baseline encodings beside them
 means alone.
 
 `--model` takes any ESMC (ESMC-300, ESMC-600, ESMC-6B) or one of Protify's baseline encodings, `OneHot-Protein` and
-`Random`, whose token rows are their one state. `--tasks ppi` adds the protein-protein interaction task (the Bernett
-gold-standard pairs, `--pair-repo`), whose proteins get stores of their own (`stores/ppi_*`) and whose probes read a
-symmetric row of the two partners' pooled states (`pairs`). `--no-untrained` leaves the untrained model out of the
-controls, and `--site-budget-gb` bounds the pooled rows a protein or pair probe holds on the device at once.
+`Random`, whose token rows are their one state. `--tasks ppi` and `--tasks ppi2` add the protein-protein interaction
+tasks (the 2024 and 2026 Bernett gold-standard pairs), whose proteins get stores of their own (`stores/ppi_*`,
+`stores/ppi2_*`) and whose probes read a symmetric row of the two partners' pooled states (`pairs`). `--no-untrained`
+leaves the untrained model out of the controls, and `--site-budget-gb` bounds the pooled rows a protein or pair probe
+holds on the device at once.
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ from .concepts import ALL_TASKS, DEFAULT_REPO, PROTEIN_TASKS, RESIDUE_TASKS, Con
 from .capture import model_dims
 from .interventions import paired_tests, run_phospho_interventions
 from .latent import label_sets, project_layers
-from .pairs import PAIR_REPO, PAIR_TASK, PairData, load_pairs, sweep_pair_task, train_pair_task, validate_pair_task
+from .pairs import PAIR_SOURCES, PAIR_TASK, PAIR_TASKS, PairData, load_pairs, pair_prefix, sweep_pair_task, train_pair_task, validate_pair_task
 from .pooled_store import PooledTapStore, embed_pooled
 from .probe_bank import ProbeBank, ProbeSettings
 from .protein_probing import ControlStores, sweep_protein_task, train_protein_task, validate_protein_task
@@ -73,7 +74,7 @@ STORE_VARIANTS = (
     ("untrained", "scrambled"),
 )
 # The pair task's proteins have stores of their own, named with this prefix.
-PAIR_PREFIX = f"{PAIR_TASK}_"
+PAIR_PREFIX = pair_prefix(PAIR_TASK)
 
 
 TASK_GROUPS = {"all": ALL_TASKS, "protein": PROTEIN_TASKS, "residue": RESIDUE_TASKS}
@@ -81,12 +82,12 @@ TASK_GROUPS = {"all": ALL_TASKS, "protein": PROTEIN_TASKS, "residue": RESIDUE_TA
 
 def parse_tasks(value: str) -> tuple[str, ...]:
     """Task names from a CLI value: comma-separated task names or groups ('all' for the 22 concepts, 'protein',
-    'residue'), among them the protein-protein interaction task 'ppi', which no group includes."""
+    'residue'), among them the protein-protein interaction tasks 'ppi' and 'ppi2', which no group includes."""
     parts = (name.strip() for name in value.split(","))
     names = tuple(dict.fromkeys(name for part in parts if part for name in TASK_GROUPS.get(part, (part,))))
-    unknown = sorted(set(names) - set(ALL_TASKS) - {PAIR_TASK})
+    unknown = sorted(set(names) - set(ALL_TASKS) - set(PAIR_TASKS))
     if unknown:
-        raise SystemExit(f"Unknown tasks {unknown}; known tasks are {list(ALL_TASKS) + [PAIR_TASK]}.")
+        raise SystemExit(f"Unknown tasks {unknown}; known tasks are {list(ALL_TASKS) + list(PAIR_TASKS)}.")
     return names
 
 
@@ -132,9 +133,9 @@ def tap_spec(args: argparse.Namespace, per_head: bool = True) -> TapSpec:
 
 
 def load_task(name: str, args: argparse.Namespace) -> ConceptData | PairData:
-    """One concept task, or the protein-protein interaction pairs."""
-    if name == PAIR_TASK:
-        return load_pairs(repo=args.pair_repo, local_dir=args.pair_local_data)
+    """One concept task, or the pairs of a protein-protein interaction task."""
+    if name in PAIR_SOURCES:
+        return load_pairs(name, local_dir=Path(args.pair_local_data) / name if args.pair_local_data else None)
     return load_concept(name, repo=args.repo, revision=args.revision, local_dir=args.local_data)
 
 
@@ -154,12 +155,23 @@ def stored_layouts(store: PooledTapStore, spec: TapSpec) -> dict[str, SiteLayout
 
 
 def control_stores(root: Path, prefix: str = "", untrained: bool = True) -> ControlStores:
-    """The stores the controls read; without `untrained`, the trained model's alone."""
+    """The stores the controls read; without `untrained`, the trained model's alone. A normalized model state's
+    `l2_normalized` control is its `original` store when no store of its own was written, since the two pool the same
+    states."""
     keys = [key for key in STORE_VARIANTS if untrained or key[0] == "trained"]
-    missing = [str(store_path(root, *key, prefix)) for key in keys if not (store_path(root, *key, prefix) / "manifest.json").exists()]
+
+    def path(plm: str, view: str) -> Path:
+        own = store_path(root, plm, view, prefix)
+        original = store_path(root, plm, "original", prefix)
+        if view == "l2_normalized" and not (own / "manifest.json").exists() and (original / "manifest.json").exists():
+            if json.loads((original / "manifest.json").read_text(encoding="utf-8")).get("normalized"):
+                return original
+        return own
+
+    missing = [str(path(*key)) for key in keys if not (path(*key) / "manifest.json").exists()]
     if missing:
         raise SystemExit(f"Control stores are missing ({', '.join(missing)}); run `embed --controls` or train with --no-controls.")
-    return ControlStores({key: PooledTapStore(store_path(root, *key, prefix)) for key in keys})
+    return ControlStores({key: PooledTapStore(path(*key)) for key in keys})
 
 
 StorePass = tuple[str, list[str], dict[bool, Path], Callable[[str], str] | None]
@@ -177,8 +189,9 @@ def store_passes(
     """(model state, sequences, store roots, input transform) of each forward pass the stores need.
 
     With `normalize`, every store pools L2-normalized token states, so the `original` and `scrambled` stores are the
-    normalized variant's inputs and the `l2_normalized` control equals `original`. Without `untrained`, the control
-    stores are the trained model's alone. `prefix` names a task family's own stores, such as the pair task's."""
+    normalized variant's inputs and the `l2_normalized` control would equal `original`: it gets no store of its own, and
+    `control_stores` reads `original` for it. Without `untrained`, the control stores are the trained model's alone.
+    `prefix` names a task family's own stores, such as a pair task's."""
     every = sorted({sequence for data in datasets.values() for split in data.splits.values() for sequence in split.sequences})
     tested = sorted({sequence for data in datasets.values() for sequence in data.splits["test"].sequences})
 
@@ -190,17 +203,13 @@ def store_passes(
 
     passes: list[StorePass] = [("trained", every, {normalize: path("trained", "original")}, None)]
     if controls:
-        passes += [
-            ("trained", tested, {True: path("trained", "l2_normalized")}, None),
-            ("trained", tested, {normalize: path("trained", "scrambled")}, scrambled),
-        ]
+        if not normalize:
+            passes.append(("trained", tested, {True: path("trained", "l2_normalized")}, None))
+        passes.append(("trained", tested, {normalize: path("trained", "scrambled")}, scrambled))
         if not untrained:
             return passes
-        if normalize:  # both untrained stores are normalized, so they take two passes
-            passes += [
-                ("untrained", tested, {True: path("untrained", "original")}, None),
-                ("untrained", tested, {True: path("untrained", "l2_normalized")}, None),
-            ]
+        if normalize:
+            passes.append(("untrained", tested, {True: path("untrained", "original")}, None))
         else:
             passes.append(("untrained", tested, {False: path("untrained", "original"), True: path("untrained", "l2_normalized")}, None))
         passes.append(("untrained", tested, {normalize: path("untrained", "scrambled")}, scrambled))
@@ -271,9 +280,9 @@ def command_embed(args: argparse.Namespace) -> None:
     if protein:
         write_stores(model, tokenizer, model_label(args), load_tasks(protein, args), Path(args.root), spec, args.controls, args.seed,
                      args.max_tokens, device, pilot, args.normalize, untrained)
-    if PAIR_TASK in tasks and pilot is None:
-        write_stores(model, tokenizer, model_label(args), load_tasks([PAIR_TASK], args), Path(args.root), spec, args.controls, args.seed,
-                     args.max_tokens, device, None, args.normalize, untrained, PAIR_PREFIX)
+    for name in (name for name in tasks if name in PAIR_SOURCES and pilot is None):
+        write_stores(model, tokenizer, model_label(args), load_tasks([name], args), Path(args.root), spec, args.controls, args.seed,
+                     args.max_tokens, device, None, args.normalize, untrained, pair_prefix(name))
 
 
 def training_settings(args: argparse.Namespace) -> TrainingSettings:
@@ -344,7 +353,7 @@ def train_tasks(
         weights: dict[str, dict[str, torch.Tensor]] = {}
         started = time.time()
         if data.task.level in ("protein", "pair"):
-            prefix = PAIR_PREFIX if data.task.level == "pair" else ""
+            prefix = pair_prefix(name) if data.task.level == "pair" else ""
             store = PooledTapStore(store_path(root, "trained", "original", prefix))
             if store.manifest.normalized != settings.normalize:
                 state = "normalized" if store.manifest.normalized else "raw"
@@ -445,7 +454,7 @@ def validate_tasks(
         weights = load_file(str(folder / "probes.safetensors"))
         started = time.time()
         if data.task.level in ("protein", "pair"):
-            store = PooledTapStore(store_path(root, "trained", "original", PAIR_PREFIX if data.task.level == "pair" else ""))
+            store = PooledTapStore(store_path(root, "trained", "original", pair_prefix(name) if data.task.level == "pair" else ""))
             if store.manifest.normalized != settings.normalize:
                 raise SystemExit(f"{store.root} does not pool the token states {folder} was trained on (normalize={settings.normalize}).")
             layouts = stored_layouts(store, spec)
@@ -494,7 +503,8 @@ def command_train(args: argparse.Namespace) -> None:
         read_model=lambda: load_model(args.model, device, random_init=args.random_init, seed=args.seed),
         overwrite=args.overwrite,
         meta={"model": model_label(args), "random_init": args.random_init, "normalize": args.normalize, "pooling": args.pooling,
-              "repo": args.repo, "revision": args.revision, "local_data": args.local_data, "pair_repo": args.pair_repo},
+              "repo": args.repo, "revision": args.revision, "local_data": args.local_data,
+              "pair_repos": {name: PAIR_SOURCES[name].repo for name in PAIR_SOURCES}},
         pilot=pilot,
         sweep=args.command == "sweep",
     )
@@ -658,10 +668,10 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--repo", default=DEFAULT_REPO)
         sub.add_argument("--revision", default=None)
         sub.add_argument("--local-data", default=None)
-        sub.add_argument("--pair-repo", default=PAIR_REPO, help="the pairs of the protein-protein interaction task 'ppi'")
-        sub.add_argument("--pair-local-data", default=None, help="a folder holding the pair task's train, validation and test parquet files")
+        sub.add_argument("--pair-local-data", default=None,
+                         help="a folder with one folder per pair task ('ppi', 'ppi2') of its train, validation and test parquet files")
 
-    embed = commands.add_parser("embed", help="write the pooled tap stores of the protein tasks, and of the pair task's proteins with --tasks ppi")
+    embed = commands.add_parser("embed", help="write the pooled tap stores of the protein tasks, and of a pair task's proteins with --tasks ppi or ppi2")
     common(embed)
     normalizing(embed)
     data_sources(embed)
