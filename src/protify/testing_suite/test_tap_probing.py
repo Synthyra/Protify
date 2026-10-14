@@ -17,7 +17,7 @@ try:
     from src.protify.base_models.esmc import get_esmc_tokenizer
     from src.protify.interpretability.capture import capture_states, model_dims
     from src.protify.interpretability import figures
-    from src.protify.interpretability.cli import STORE_VARIANTS, main, store_passes, store_path, train_tasks, write_stores
+    from src.protify.interpretability.cli import STORE_VARIANTS, main, store_passes, store_path, train_tasks, validate_tasks, write_stores
     from src.protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from src.protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -35,7 +35,7 @@ except ImportError:
     from protify.base_models.esmc import get_esmc_tokenizer
     from protify.interpretability.capture import capture_states, model_dims
     from protify.interpretability import figures
-    from protify.interpretability.cli import STORE_VARIANTS, main, store_passes, store_path, train_tasks, write_stores
+    from protify.interpretability.cli import STORE_VARIANTS, main, store_passes, store_path, train_tasks, validate_tasks, write_stores
     from protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
@@ -537,11 +537,22 @@ def test_protein_tasks_end_to_end(tiny_model: ESMplusplusModel, tokenizer: objec
         assert weights["q.head.best.weight"].shape == (12, 32, outputs)
         record = json.loads((folder / "run.json").read_text(encoding="utf-8"))
         assert record["rows"] == {"train": 90, "validation": 30, "test": 30}
+        # every kept probe is scored on validation, and its loss there is the one early stopping recorded
+        validation = pd.read_parquet(folder / "validation.parquet").set_index(["family", "probe_name"])
+        recorded = training.set_index(["family", "probe_name"])["best_validation_loss"]
+        assert len(validation) == len(recorded) and validation["validation_score"].between(-1.0, 1.0).all()
+        np.testing.assert_allclose(validation.loc[recorded.index, "validation_loss"], recorded, rtol=2e-2)
     for name in ("prot_param", "go_cc"):
         elementwise = pd.read_parquet(root / "results" / "linear" / name / "elementwise.parquet")
         assert set(elementwise["label_index"]) == set(range(datasets[name].task.outputs))
     # A second call finds every task finished and trains nothing.
     train_tasks(names, root, "linear", spec, settings, CPU, read_task=lambda name: pytest.fail("retrained"), read_model=lambda: pytest.fail("reloaded"))
+    # `validate` rebuilds the kept probes from their saved weights and scores them again
+    before = {name: pd.read_parquet(root / "results" / "linear" / name / "validation.parquet") for name in names}
+    written = validate_tasks(root, "linear", names, CPU, read_task=datasets.__getitem__, read_model=lambda random_init, seed: pytest.fail("loaded a model"), overwrite=True)
+    assert len(written) == len(names)
+    for name in names:
+        pd.testing.assert_frame_equal(pd.read_parquet(root / "results" / "linear" / name / "validation.parquet"), before[name], atol=1e-4, rtol=1e-3)
 
 
 def test_protein_shared_path_matches_the_per_group_path() -> None:
@@ -628,6 +639,12 @@ def test_residue_task_end_to_end(tiny_model: ESMplusplusModel, tokenizer: object
     weights = load_file(str(folder / "probes.safetensors"))
     assert weights["mlp_gate.full.best.weight"].shape == (3, 256, 3)
     assert weights["k_rot.head.best.weight"].shape == (12, 16, 3)
+    validation = pd.read_parquet(folder / "validation.parquet")
+    recorded = pd.read_parquet(folder / "training.parquet").set_index(["family", "probe_name"])["best_validation_loss"]
+    np.testing.assert_allclose(validation.set_index(["family", "probe_name"]).loc[recorded.index, "validation_loss"], recorded, rtol=2e-2)
+    assert validation.set_index("probe_name").loc["embedding:0", "validation_score"] > 0.9
+    validate_tasks(root, "linear", ["ssp_q3"], CPU, read_task=lambda name: data, read_model=lambda random_init, seed: (tiny_model, tokenizer), overwrite=True)
+    pd.testing.assert_frame_equal(pd.read_parquet(folder / "validation.parquet"), validation, atol=1e-4, rtol=1e-3)
     # without controls the test split is scored in token-budget batches; the probes and their scores are the same
     plain = replace(settings, controls=False)
     train_tasks(["ssp_q3"], root, "plain", spec, plain, CPU, read_task=lambda name: data, read_model=lambda: (tiny_model, tokenizer))
@@ -818,11 +835,17 @@ def synthetic_scores(task: str, sites: tuple[str, ...], layers: int, heads: int,
 
 
 def write_synthetic_run(root: Path, seed: int, sites: tuple[str, ...]) -> None:
-    """The results of one synthetic replicate: two tasks' scores and run records, and ProtParam's per-target scores."""
+    """The results of one synthetic replicate: two tasks' scores, training records and run records, and ProtParam's
+    per-target scores."""
     for index, task in enumerate(("localization", "prot_param")):
         folder = root / "results" / "linear" / task
         folder.mkdir(parents=True)
-        synthetic_scores(task, sites, layers=3, heads=4, resamples=3, seed=10 * seed + index).to_parquet(folder / "scores.parquet", index=False)
+        scores = synthetic_scores(task, sites, layers=3, heads=4, resamples=3, seed=10 * seed + index)
+        scores.to_parquet(folder / "scores.parquet", index=False)
+        probes = scores[["task", "family", "probe_name"]].drop_duplicates()
+        rng = np.random.default_rng(10 * seed + index + 5)
+        probes.assign(validation_score=rng.uniform(0.0, 1.0, len(probes)), validation_loss=rng.uniform(0.1, 1.0, len(probes))).to_parquet(
+            folder / "validation.parquet", index=False)
         (folder / "run.json").write_text(json.dumps({"task": {"name": task, "label_names": ["length", "mass"]}}), encoding="utf-8")
     elementwise = synthetic_scores("prot_param", ("embedding", "resid_post"), layers=3, heads=0, resamples=3, seed=10 * seed + 2)
     elementwise = elementwise[(elementwise["plm"] == "trained") & (elementwise["probe"] == "trained") & (elementwise["control"] == "original")]
@@ -859,8 +882,13 @@ def test_figures_from_result_tables(tmp_path: Path) -> None:
                   & (scores["probe"] == "trained") & (scores["control"] == "original")]["score"]
     row = trained[(trained["task"] == "localization") & (trained["probe_name"] == "q:1")].iloc[0]
     assert len(full) == 2 and row["full"] == pytest.approx(full.mean()) and row["full_std"] == pytest.approx(full.std())
-    best = trained[(trained["task"] == "localization") & (trained["family"] == "full")]["full"].max()
-    assert table.set_index("task").loc["localization", "any_score"] == pytest.approx(best, abs=1e-4)
+    validation = figures.read_validation([(root, "linear") for root in roots])
+    values = validation[(validation["task"] == "localization") & (validation["probe_name"] == "q:1")]["validation_score"]
+    assert len(values) == 2 and row["validation_score"] == pytest.approx(values.mean())
+    full_width = trained[(trained["task"] == "localization") & (trained["family"] == "full")]
+    chosen = full_width.loc[full_width["validation_score"].idxmax()]  # chosen on validation, not on the test score
+    assert table.set_index("task").loc["localization", "any_score"] == pytest.approx(chosen["full"], abs=1e-4)
+    assert table.set_index("task").loc["localization", "any_site"] == chosen["site"]
     margins = pd.read_csv(out / "random_init.csv").set_index("task").loc["localization"]
     assert margins["any_margin"] == pytest.approx(margins["any_score_trained"] - margins["any_score_random"], abs=2e-4)
     tests = pd.read_parquet(out / "phospho_tests.parquet")

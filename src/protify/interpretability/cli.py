@@ -4,6 +4,7 @@
     python -m protify.interpretability sweep  --root RUN --label B256 --lr 1e-4 1e-3 1e-2 --wd 0 0.1 --batch-size 256
     python -m protify.interpretability select --root RUN --labels B256 B1024
     python -m protify.interpretability train  --root RUN [--tasks all] [--lr 1e-3 ...] [--probe linear]
+    python -m protify.interpretability validate --root RUN [--label linear]
     python -m protify.interpretability phospho --root RUN [--proteins 1000]
     python -m protify.interpretability pca    --root RUN --tasks interpro_family --sites resid_post --layers 0,5,10,15,20
     python -m protify.interpretability figures --roots RUN [RUN_2 ...] [--random-roots RANDOM ...] --out FIGURES
@@ -15,7 +16,9 @@ and, with `--controls`, the test proteins under the untrained model, scrambled, 
 every probe under every grid setting and scores each on the validation split, and `select` picks the one setting
 that costs the probes least validation score, preferring the fastest batch when several are close. `train` trains
 and scores every probe of each task: protein tasks from the stores, residue tasks by streaming from the model.
-Results go to `RUN/results/<label>/<task>/` as parquet tables and a safetensors file of the selected probe weights.
+Results go to `RUN/results/<label>/<task>/` as parquet tables and a safetensors file of the selected probe weights;
+`validation.parquet` holds each probe's validation score, which best states are chosen by, and `validate` adds it to
+runs trained before `train` wrote it.
 `phospho` runs the phosphomimetic scanning test, `pca` writes principal coordinates of pooled states by label set,
 `figures` draws every figure and summary table the runs' tables support, and `compare` sets variants of the analysis
 (normalized inputs, mean-only pooling) against a reference. `--normalize` on `embed` and `train` L2-normalizes every
@@ -33,21 +36,21 @@ import torch
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, replace
 from pathlib import Path
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 from .concepts import ALL_TASKS, DEFAULT_REPO, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, load_concept, scramble, scramble_seed
 from .capture import model_dims
 from .interventions import paired_tests, run_phospho_interventions
 from .latent import label_sets, project_layers
 from .pooled_store import PooledTapStore, embed_pooled
-from .probe_bank import ProbeSettings
-from .protein_probing import ControlStores, sweep_protein_task, train_protein_task
-from .residue_probing import sweep_residue_task, train_residue_task, untrained_copy
+from .probe_bank import ProbeBank, ProbeSettings
+from .protein_probing import ControlStores, sweep_protein_task, train_protein_task, validate_protein_task
+from .residue_probing import sweep_residue_task, train_residue_task, untrained_copy, validate_residue_task
 from .selection import choose_setting, rank_settings, read_sweeps, task_optima
 from .sites import ModelDims, SiteLayout, TapSpec, parse_sites, site_layouts
 from .token_batches import TokenBatch, token_batches
 from .token_store import embed_tokens
-from .training import TaskResults, TrainingSettings
+from .training import TaskResults, TrainingSettings, restore_bank
 
 
 STORE_VARIANTS = (
@@ -316,6 +319,93 @@ def train_tasks(
         print(f"{name}: {elapsed:.0f} s -> {folder}")
 
 
+def recorded_settings(record: dict[str, object]) -> TrainingSettings:
+    """The training settings a task's run.json records (runs from before `normalize` and `pooling` used neither)."""
+    saved = dict(record["settings"])
+    probe = dict(saved.pop("probe"))
+    probe["betas"] = tuple(probe["betas"])
+    saved["learning_rates"], saved["weight_decays"] = tuple(saved["learning_rates"]), tuple(saved["weight_decays"])
+    return TrainingSettings(**saved, probe=ProbeSettings(**probe))
+
+
+def recorded_spec(record: dict[str, object]) -> TapSpec:
+    spec = record["spec"]
+    return TapSpec(sites=tuple(spec["sites"]), blocks=tuple(spec["blocks"]) if spec["blocks"] else None, per_head=spec["per_head"])
+
+
+def restore_selected(
+    weights: dict[str, torch.Tensor],
+    layouts: dict[str, SiteLayout],
+    data: ConceptData,
+    settings: TrainingSettings,
+    device: torch.device,
+) -> dict[str, dict[str, ProbeBank]]:
+    """Every site's trained banks from a results folder's `probes.safetensors`, named as the trainers name them."""
+    task = data.task
+    loss = task.loss if task.level == "protein" else "multiclass"  # a residue bank scores one class per residue
+    selected: dict[str, dict[str, ProbeBank]] = {}
+    for site, layout in layouts.items():
+        selected[site] = {}
+        for family, names in (("full", layout.full_names()), ("head", layout.head_names() if layout.heads else None)):
+            if names is None:
+                continue
+            prefix = f"{site}.{family}."
+            saved = {key.removeprefix(prefix): value for key, value in weights.items() if key.startswith(prefix)}
+            selected[site][family] = restore_bank(names, saved, task.outputs, loss, settings, device)
+    return selected
+
+
+def validate_tasks(
+    root: Path,
+    label: str,
+    tasks: Sequence[str],
+    device: torch.device,
+    read_task: Callable[[str], ConceptData],
+    read_model: Callable[[bool, int], tuple[torch.nn.Module, object]],
+    overwrite: bool = False,
+) -> list[Path]:
+    """Score the kept probes of every finished task under `root/results/<label>/` on its validation split, writing
+    `validation.parquet` beside the scores (`train` writes it itself; this serves runs trained before it did). Each
+    probe's recomputed validation loss is compared with the one its training recorded, as a check that the weights,
+    inputs and model were all restored."""
+    written = []
+    loaded: tuple[tuple[bool, int], tuple[torch.nn.Module, object]] | None = None
+    for name in tasks:
+        folder = root / "results" / label / name
+        if not (folder / "run.json").exists():
+            continue
+        if (folder / "validation.parquet").exists() and not overwrite:
+            print(f"have {folder / 'validation.parquet'}")
+            continue
+        record = json.loads((folder / "run.json").read_text(encoding="utf-8"))
+        settings, spec, data = recorded_settings(record), recorded_spec(record), read_task(name)
+        weights = load_file(str(folder / "probes.safetensors"))
+        started = time.time()
+        if data.task.level == "protein":
+            store = PooledTapStore(store_path(root, "trained", "original"))
+            if store.manifest.normalized != settings.normalize:
+                raise SystemExit(f"{store.root} does not pool the token states {folder} was trained on (normalize={settings.normalize}).")
+            layouts = stored_layouts(store, spec)
+            results = validate_protein_task(data, store, layouts, restore_selected(weights, layouts, data, settings, device), settings, device)
+        else:
+            key = (bool(record.get("random_init", False)), settings.seed)
+            if loaded is None or loaded[0] != key:
+                loaded = (key, read_model(*key))
+            model, tokenizer = loaded[1]
+            layouts = site_layouts(spec, model_dims(model))
+            selected = restore_selected(weights, layouts, data, settings, device)
+            results = validate_residue_task(model, tokenizer, spec, layouts, selected, data, settings, device)
+        table = results.frames()["validation"]
+        recorded = pd.read_parquet(folder / "training.parquet")[["family", "probe_name", "best_validation_loss"]]
+        check = table.merge(recorded, on=["family", "probe_name"], validate="one_to_one")
+        gap = ((check["validation_loss"] - check["best_validation_loss"]).abs() / check["best_validation_loss"].abs().clip(lower=1e-8)).max()
+        table.to_parquet(folder / "validation.parquet", index=False)
+        written.append(folder / "validation.parquet")
+        print(f"{name}: {len(table)} probes in {time.time() - started:.0f} s; largest relative gap to the recorded validation loss {gap:.1e}"
+              f"{'  (CHECK: inputs or model differ from training)' if gap > 0.02 else ''} -> {folder / 'validation.parquet'}")
+    return written
+
+
 def write_sweep(folder: Path, results: TaskResults, meta: dict[str, object]) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     results.sweep_frame().to_parquet(folder / "sweep.parquet", index=False)
@@ -344,6 +434,20 @@ def command_train(args: argparse.Namespace) -> None:
               "repo": args.repo, "revision": args.revision, "local_data": args.local_data},
         pilot=pilot,
         sweep=args.command == "sweep",
+    )
+
+
+def command_validate(args: argparse.Namespace) -> None:
+    device = torch.device(args.device)
+    torch.backends.cuda.matmul.allow_tf32 = True  # as in training
+    validate_tasks(
+        Path(args.root),
+        args.label,
+        parse_tasks(args.tasks),
+        device,
+        read_task=lambda name: load_concept(name, repo=args.repo, revision=args.revision, local_dir=args.local_data),
+        read_model=lambda random_init, seed: load_model(args.model, device, random_init=random_init, seed=seed),
+        overwrite=args.overwrite,
     )
 
 
@@ -515,6 +619,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     training(commands.add_parser("train", help="train and score every probe of each task"))
     training(commands.add_parser("sweep", help="train every probe under every --lr and --wd setting and score each on validation"))
+
+    validated = commands.add_parser("validate", help="score the kept probes of finished tasks on their validation split")
+    validated.add_argument("--root", required=True)
+    validated.add_argument("--label", default="linear", help="results label")
+    validated.add_argument("--tasks", default="all")
+    validated.add_argument("--model", default="ESMC-300", help="the model residue tasks stream from; each run.json gives its seed and random init")
+    validated.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    validated.add_argument("--repo", default=DEFAULT_REPO)
+    validated.add_argument("--revision", default=None)
+    validated.add_argument("--local-data", default=None)
+    validated.add_argument("--overwrite", action="store_true")
+    validated.set_defaults(handler=command_validate)
 
     select = commands.add_parser("select", help="choose one global setting from the sweeps of one or more labels")
     select.add_argument("--root", required=True)

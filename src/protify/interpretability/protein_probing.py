@@ -5,7 +5,8 @@ full-width probe per layer (input 2w: mean then variance), and, for head-split s
 layer and head (input 2 d_h: that head's mean then variance columns); with `pooling="mean"` every probe reads the
 mean columns alone (w, or d_h). Training is minibatch AdamW over proteins
 with validation each epoch (or every `validate_every` steps), per-probe early stopping on validation loss, and the
-best validation weights kept. Test scores cover the controls when control stores are given. Linear banks run on the
+best validation weights kept, which are then scored on the validation split in the test metric (the scores a best
+state is chosen by). Test scores cover the controls when control stores are given. Linear banks run on the
 probe bank's shared-input path: the P probes of a family read P slices of one row, and every grid setting reads the
 same slice, so one batched bf16 GEMM a step serves all K * P probes.
 
@@ -93,7 +94,7 @@ def _flat(X: Tensor) -> Tensor:
     return X.reshape(X.shape[0], -1)
 
 
-def validation_loss(bank: ProbeBank, X: Tensor, targets: Tensor, settings_count: int, batch: int = 512) -> Tensor:
+def validation_loss(bank: ProbeBank, X: Tensor, targets: Tensor, settings_count: int, batch: int = 512, which: str = "current") -> Tensor:
     """Mean validation loss of every group, settings included, from inputs shared across settings."""
     # X: (n, P, w); targets: (n,) or (n, C)
     probes = bank.groups // settings_count
@@ -103,10 +104,10 @@ def validation_loss(bank: ProbeBank, X: Tensor, targets: Tensor, settings_count:
         rows = X[start: start + batch]  # (b, P, w)
         labels = targets[start: start + batch]
         if _shared(bank):
-            totals += bank.shared_loss_sums(_flat(rows), labels, every_group, probes)
+            totals += bank.shared_loss_sums(_flat(rows), labels, every_group, probes, which=which)
             continue
         for setting in range(settings_count):
-            totals[setting * probes: (setting + 1) * probes] += bank.loss_sums(rows, labels, setting * probes, (setting + 1) * probes)
+            totals[setting * probes: (setting + 1) * probes] += bank.loss_sums(rows, labels, setting * probes, (setting + 1) * probes, which)
     denominator = X.shape[0] if bank.loss == "multiclass" else X.shape[0] * bank.outputs
     return totals / denominator
 
@@ -221,6 +222,37 @@ def score_bank(bank: ProbeBank, which: str, X: Tensor, targets: Tensor, accumula
         accumulator.add(Z, targets[start: start + batch], proteins[start: start + batch])
 
 
+def _validate(bank: ProbeBank, family: str, inputs: Tensor, targets: Tensor, data: ConceptData, plan: ResamplePlan, results: TaskResults) -> None:
+    """A trained bank's validation scores and losses with its kept weights: what best states are chosen by."""
+    # inputs: (v, P, w)
+    task = data.task
+    accumulator = ScoreAccumulator(task.kind, bank.groups, task.outputs, plan, per_label=False)
+    score_bank(bank, "best", inputs, targets, accumulator)
+    results.add_validation(task.name, family, bank.names, accumulator, validation_loss(bank, inputs, targets, 1, which="best"))
+
+
+def validate_protein_task(
+    data: ConceptData,
+    store: PooledTapStore,
+    layouts: dict[str, SiteLayout],
+    selected: dict[str, dict[str, ProbeBank]],
+    settings: TrainingSettings,
+    device: torch.device,
+    results: TaskResults | None = None,
+) -> TaskResults:
+    """Score trained banks (`selected[site][family]`, restored from a run) on the validation split of a pooled store."""
+    results = results or TaskResults()
+    rows = store.rows_for(data.splits["validation"].sequences)
+    targets = data.protein_targets("validation").to(device)
+    plan = ResamplePlan.draw(len(rows), 0, settings.resample_fraction, settings.seed, device)
+    for site, layout in layouts.items():
+        loaded = store.load(site, rows, device)  # (v, L, 2 * w)
+        for family, _, view in families(layout, settings.pooling):
+            _validate(selected[site][family], family, view(loaded), targets, data, plan, results)
+        del loaded
+    return results
+
+
 def scrambled_targets(data: ConceptData, sequences: list[str], seed: int, device: torch.device) -> Tensor:
     """Targets of the scrambled control: ProtParam recomputed on the scrambled sequence, else labels shuffled."""
     task = data.task
@@ -252,6 +284,7 @@ def train_protein_task(
     targets = {split: data.protein_targets(split).to(device) for split in split_rows}
     test_sequences = data.splits["test"].sequences
     plan = ResamplePlan.draw(len(test_sequences), settings.resamples, settings.resample_fraction, settings.seed, device)
+    validation_plan = ResamplePlan.draw(len(split_rows["validation"]), 0, settings.resample_fraction, settings.seed, device)
     gaussian_generator = torch.Generator(device="cpu").manual_seed(settings.seed)
     scrambled = scrambled_targets(data, test_sequences, controls.scramble_seed, device) if controls is not None else None
 
@@ -262,6 +295,7 @@ def train_protein_task(
             bank, epochs = fit_family(names, inputs, targets, data, settings, device, f"{task.name} {site} {family}")
             selected, chosen = bank.select_settings(len(settings.grid()))
             results.add_training(task.name, family, selected, chosen, settings, epochs)
+            _validate(selected, family, inputs["validation"], targets["validation"], data, validation_plan, results)
             if save_weights is not None:
                 save_weights[f"{site}.{family}"] = selected.state("best")
             accumulator = ScoreAccumulator(task.kind, selected.groups, task.outputs, plan)

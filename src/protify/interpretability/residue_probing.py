@@ -3,8 +3,9 @@
 Each batch runs ESMC once with tap hooks. As a state arrives the hook gathers its residue rows (CLS, EOS and
 padding dropped), and every probe that reads that site and layer takes its gradient there, so memory holds one
 state at a time. With `settings.normalize`, every state is L2-normalized token by token as it arrives. One optimizer step follows each forward pass. Validation passes run the same hooks without
-gradients, and the test passes run the model four times (trained and untrained weights, original and scrambled
-sequences) to score the controls.
+gradients; after training one more scores the kept weights in the test metric (what best states are chosen by), and
+the test passes run the model four times (trained and untrained weights, original and scrambled sequences) to score
+the controls.
 
 Symbols: b sequences; l token columns; n residue rows of a batch; w site width; L layers of a site; H heads;
 d_h head width; C classes; K grid settings.
@@ -338,7 +339,51 @@ def train_residue_task(
             results.add_training(task.name, family, reduced, chosen, settings, epochs)
             if save_weights is not None:
                 save_weights[f"{site}.{family}"] = reduced.state("best")
+    validate_residue_task(model, tokenizer, spec, layouts, selected, data, settings, device, results)
     score_residue_task(model, tokenizer, spec, layouts, selected, data, settings, device, results)
+    return results
+
+
+@torch.no_grad()
+def validate_residue_task(
+    model: nn.Module,
+    tokenizer: object,
+    spec: TapSpec,
+    layouts: dict[str, SiteLayout],
+    selected: dict[str, dict[str, ProbeBank]],
+    data: ConceptData,
+    settings: TrainingSettings,
+    device: torch.device,
+    results: TaskResults | None = None,
+) -> TaskResults:
+    """Score trained banks (`selected[site][family]`, one grid setting) on the validation split with their kept
+    weights: the score in the test metric, which best states are chosen by, and the loss."""
+    task = data.task
+    results = results or TaskResults()
+    split = data.splits["validation"]
+    plan = ResamplePlan.draw(len(split.sequences), 0, settings.resample_fraction, settings.seed, device)
+    slots = {site: {layer: slot for slot, layer in enumerate(layout.layers)} for site, layout in layouts.items()}
+    keys = [(site, family) for site, banks in selected.items() for family in banks]
+    accumulators = {(site, family): ScoreAccumulator(task.kind, selected[site][family].groups, task.outputs, plan, per_label=False) for site, family in keys}
+    losses = {(site, family): torch.zeros(selected[site][family].groups, device=device) for site, family in keys}
+    rows_seen = 0
+
+    def score(site: str, layer: int, X: Tensor) -> None:
+        rows = _rows(X, batch.flat_index)  # (n, w)
+        slot = slots[site][layer]
+        for family, bank in selected[site].items():
+            heads = layouts[site].heads if family == "head" else 1
+            start = slot * heads
+            Z = _layer_logits(bank, rows, start, heads, "best")  # (n, heads, C)
+            accumulators[(site, family)].add(Z, batch.targets, batch.proteins, start, batch.protein_index)
+            losses[(site, family)][start: start + heads] += bank._loss_terms(Z, batch.targets)[0]
+
+    for token_batch in token_batches(split.sequences, settings.max_tokens):
+        batch = residue_batch(tokenizer, token_batch, split.labels, device)
+        _run(model, spec, score, batch, settings.normalize)
+        rows_seen += batch.targets.shape[0]
+    for site, family in keys:
+        results.add_validation(task.name, family, selected[site][family].names, accumulators[(site, family)], losses[(site, family)] / max(rows_seen, 1))
     return results
 
 

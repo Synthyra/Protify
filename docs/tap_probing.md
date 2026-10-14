@@ -95,7 +95,7 @@ With controls (the default for `train`), every trained probe is also scored, at 
 | Control | What changes |
 |---|---|
 | untrained model | every module of the model reset to PyTorch's default initialization |
-| scrambled sequence | every residue after the first shuffled (residue labels follow their residues) |
+| scrambled sequence | every residue after the first shuffled; ProtParam is recomputed on the scrambled sequence, residue labels and multilabel vectors are shuffled within the protein by an independent draw, and a single class (localization, metal ion binding) is kept |
 | untrained probe | the probe's initial weights |
 | L2-normalized | each token state scaled to unit norm |
 | mean state | the mean state of a batch of 8 proteins (position by position for residue tasks), with the batch's mean or most common label |
@@ -106,8 +106,17 @@ as L2-normalized residue states do, reaches it near a constant. Scores are the M
 similarity for the ProtParam regression), on the full test split and on 7 random halves of it, so every score has a
 spread. Without controls (`--no-controls`), residue tasks are scored in batches that fill the token budget. Results go to `RUN/results/<label>/<task>/`:
 `scores.parquet` (one row per probe, condition and resample), `elementwise.parquet` (per label),
-`training.parquet` (steps, epochs and selected setting of each probe), `probes.safetensors` (the selected weights) and
-`run.json` (the task, the settings and the elapsed time; its presence marks a finished task).
+`training.parquet` (steps, epochs and selected setting of each probe), `validation.parquet` (each kept probe's score
+on the whole validation split, in the test metric, and its validation loss), `probes.safetensors` (the selected
+weights) and `run.json` (the task, the settings and the elapsed time; its presence marks a finished task).
+
+**Choosing a best state.** Wherever a figure or table names the best state of a task, a site or a family of sites,
+the state is the one with the highest validation score, and its test score is reported. The highest test score over
+hundreds of probes would overstate small test sets and favor the families with more states, and validation loss is no
+guide across states: probes on stronger features stop at more confident, worse calibrated outputs, so the lowest
+loss often belongs to a weak early state. `validate --root RUN --label LABEL` adds `validation.parquet` to runs trained
+before `train` wrote it, rebuilding each probe from `probes.safetensors`; it checks every recomputed validation loss
+against the one training recorded.
 
 ## Phosphomimetic scanning
 
@@ -182,8 +191,8 @@ randomly initialized model (`--random-roots`), and writes 300 dpi PNGs and summa
 | `depth_curves.png` | each task's residual stream along depth, against the random-init model and the controls |
 | `selected_tasks.png` | five tasks' residual streams with the best depth and its spread over replicates |
 | `controls.png` | all twenty conditions (model, probe and input) along the residual stream |
-| `site_maps.png` | every site by block, relative to each task's best probe |
-| `site_gaps.png` | each site's best score minus the best residual-stream score, and the block of each peak |
+| `site_maps.png` | every site by block, relative to each task's highest score |
+| `site_gaps.png` | each site's best score minus the best residual-stream score, and the block each best probe reads |
 | `site_families.png` | attention and MLP sites along the blocks against the block output |
 | `rotation.png` | rotated minus unrotated queries and keys, full width and per head |
 | `heads.png` | every head of the head-split sites by block |

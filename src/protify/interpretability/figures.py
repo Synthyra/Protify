@@ -10,6 +10,12 @@ a curve's band is one standard deviation over every replicate's test halves, and
 of the full-test score over replicates alone. A probe name is `site:layer` or `site:layer:h<head>`. Depth puts the
 residual stream on one axis: the embedding at 0, block k's states at k + 1, and the final norm one past the last block.
 Scores are MCC, or cosine similarity for ProtParam.
+
+A best state (of a task, a site or a family of sites) is chosen on validation: the probe with the highest validation
+score (the test metric on the validation split, `validation.parquet`), averaged over replicates; its test score is the
+one reported. The highest test score over hundreds of probes would overstate small test sets and favor the families
+with more states, and the validation loss is no guide across states, since probes on stronger features stop at more
+confident, worse calibrated outputs.
 """
 
 from __future__ import annotations
@@ -161,6 +167,27 @@ def read_replicates(roots: Sequence[Path], label: str, name: str = "scores") -> 
     return pd.concat([read_table(Path(root), label, name).assign(replicate=index) for index, root in enumerate(roots)], ignore_index=True)
 
 
+def read_validation(replicates: Sequence[tuple[Path, str]]) -> pd.DataFrame | None:
+    """Every replicate's (root, label) validation scores and losses, with `replicate`; None, and best states chosen on
+    the test score, when a replicate has none (run `validate`). Tasks scored without validation are named."""
+    tables = []
+    for index, (root, label) in enumerate(replicates):
+        folder = Path(root) / "results" / label
+        missing = sorted(path.parent.name for path in folder.glob("*/scores.parquet") if not (path.parent / "validation.parquet").exists())
+        if missing:
+            print(f"No validation scores for {', '.join(missing)} under {folder}: run `validate`.")
+        try:
+            tables.append(read_table(Path(root), label, "validation").assign(replicate=index))
+        except FileNotFoundError:
+            print(f"Best states are chosen on the test score: {folder} has no validation scores.")
+            return None
+    return pd.concat(tables, ignore_index=True)
+
+
+def _validation(validation: pd.DataFrame, keys: list[str]) -> pd.DataFrame:
+    return validation.groupby(keys)[["validation_score", "validation_loss"]].mean()
+
+
 def with_probe_parts(scores: pd.DataFrame) -> pd.DataFrame:
     """The table with `site`, `layer` and `head` (-1 for a full-width probe) split out of `probe_name`."""
     parts = scores["probe_name"].str.split(":", expand=True)
@@ -177,23 +204,44 @@ def depth(site: str, layer: int, blocks: int) -> int:
     return layer + 1
 
 
-def summarize(scores: pd.DataFrame) -> pd.DataFrame:
+def summarize(scores: pd.DataFrame, validation: pd.DataFrame | None = None) -> pd.DataFrame:
     """Per probe and condition: `full`, the full-test score averaged over replicates, and `full_std`, its standard
-    deviation over replicates (0 for one); `mean` and `std` over every replicate's test halves; `replicates`."""
+    deviation over replicates (0 for one); `mean` and `std` over every replicate's test halves; `replicates`; and, with
+    the validation tables, the probe's `validation_score` and `validation_loss` averaged over replicates."""
     if "replicate" not in scores:
         scores = scores.assign(replicate=0)
     keys = ["task", "family", "probe_name", "plm", "probe", "control"]
     full = scores[scores["resample"] == 0].groupby(keys)["score"].agg(full="mean", full_std="std", replicates="count")
     full["full_std"] = full["full_std"].fillna(0.0)
     halves = scores[scores["resample"] > 0].groupby(keys)["score"].agg(["mean", "std"])
-    return with_probe_parts(halves.join(full).reset_index())
+    summary = with_probe_parts(halves.join(full).reset_index())
+    if validation is not None:
+        summary = summary.join(_validation(validation, ["task", "family", "probe_name"]), on=["task", "family", "probe_name"])
+    return summary
 
 
-def full_scores(scores: pd.DataFrame) -> pd.DataFrame:
-    """Each replicate's full-test scores, with the probe parts: the rows a per-replicate statistic reads."""
+def full_scores(scores: pd.DataFrame, validation: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Each replicate's full-test scores, with the probe parts and, with the validation tables, each replicate's
+    validation score: the rows a per-replicate statistic reads."""
     if "replicate" not in scores:
         scores = scores.assign(replicate=0)
-    return with_probe_parts(scores[scores["resample"] == 0])
+    rows = with_probe_parts(scores[scores["resample"] == 0])
+    if validation is not None:
+        keys = ["task", "family", "probe_name", "replicate"]
+        rows = rows.join(_validation(validation, keys), on=keys)
+    return rows
+
+
+def _choose(frame: pd.DataFrame, keys: list[str] | None = None) -> pd.DataFrame | pd.Series:
+    """The probe chosen on validation, of the whole frame (a row) or of each group of `keys` (a frame): the highest
+    validation score, or, in a table without validation scores, the highest full-test score."""
+    if "validation_score" in frame and frame["validation_score"].notna().any():
+        key = frame["validation_score"].fillna(-np.inf)
+    else:
+        key = frame["full" if "full" in frame else "score"]
+    if keys is None:
+        return frame.loc[key.idxmax()]
+    return frame.loc[key.groupby([frame[column] for column in keys]).idxmax()]
 
 
 def headline(summary: pd.DataFrame) -> pd.DataFrame:
@@ -207,25 +255,28 @@ def _with_depth(frame: pd.DataFrame, blocks: int) -> pd.DataFrame:
 
 
 def best_states(summary: pd.DataFrame, blocks: int) -> pd.DataFrame:
-    """Per task: the best residual-stream, attention, MLP and any-site probes, the best single head, and the controls at
-    the residual-stream best, by full-test score averaged over replicates."""
+    """Per task: the best probe of the residual stream between blocks (the states a per-layer probe reads), of the
+    attention and MLP sites and of any site (the mid-block stream counts only there), the best single head, and the
+    controls at the residual-stream best, each chosen on validation, with full-test scores averaged over replicates."""
     rows = []
     trained = headline(summary)
     for task, block in trained.groupby("task"):
         full = block[block["family"] == "full"]
         row = {"task": task}
-        for name, sites in (("residual", RESIDUAL), ("attention", ATTENTION), ("mlp", MLP + ("resid_mid",)), ("any", tuple(SITE_LABELS))):
+        for name, sites in (("residual", RESIDUAL), ("attention", ATTENTION), ("mlp", MLP), ("any", tuple(SITE_LABELS))):
             candidates = full[full["site"].isin(sites)]
             if candidates.empty:
                 continue
-            best = candidates.loc[candidates["full"].idxmax()]
+            best = _choose(candidates)
             row[f"{name}_site"], row[f"{name}_layer"], row[f"{name}_score"] = best["site"], int(best["layer"]), float(best["full"])
             row[f"{name}_std"], row[f"{name}_replicate_std"] = float(best["std"]), float(best["full_std"])
             row[f"{name}_depth"] = depth(best["site"], int(best["layer"]), blocks)
+            row[f"{name}_validation"] = float(best.get("validation_score", np.nan))
         heads = block[block["family"] == "head"]
         if not heads.empty:
-            best = heads.loc[heads["full"].idxmax()]
+            best = _choose(heads)
             row["head_site"], row["head_layer"], row["head"], row["head_score"] = best["site"], int(best["layer"]), int(best["head"]), float(best["full"])
+            row["head_replicate_std"], row["head_validation"] = float(best["full_std"]), float(best.get("validation_score", np.nan))
         if "residual_site" in row:
             same = summary[(summary["task"] == task) & (summary["probe_name"] == f"{row['residual_site']}:{row['residual_layer']}")]
             for plm, probe, control, legend in CONDITIONS[1:]:
@@ -239,11 +290,11 @@ def best_states(summary: pd.DataFrame, blocks: int) -> pd.DataFrame:
 
 
 def site_bests(summary: pd.DataFrame) -> pd.DataFrame:
-    """Per task and site: the best full-test score over depth (layers) of its full-width probes, and where it peaks."""
+    """Per task and site: the layer of its full-width probes chosen on validation, and that probe's full-test score."""
     trained = headline(summary)
     trained = trained[trained["family"] == "full"]
-    peaks = trained.loc[trained.groupby(["task", "site"])["full"].idxmax()]
-    return peaks[["task", "site", "layer", "full", "full_std"]].reset_index(drop=True)
+    columns = ["task", "site", "layer", "full", "full_std"] + [column for column in ("validation_score", "validation_loss") if column in trained]
+    return _choose(trained, ["task", "site"])[columns].reset_index(drop=True)
 
 
 def replicate_spread(summary: pd.DataFrame) -> pd.DataFrame:
@@ -320,7 +371,8 @@ def depth_curves(summary: pd.DataFrame, blocks: int, path: Path, random: pd.Data
 
 
 def selected_tasks(summary: pd.DataFrame, per_replicate: pd.DataFrame, blocks: int, path: Path, tasks: Sequence[str] = SELECTED_TASKS) -> Path:
-    """A few tasks' residual streams, the dashed line at the best depth averaged over replicates, its spread shaded."""
+    """A few tasks' residual streams, the dashed line at the best depth (each replicate's choice on validation)
+    averaged over replicates, its spread shaded."""
     plt = _pyplot()
     tasks = _chosen(tasks, set(summary["task"]), len(SELECTED_TASKS))
     figure, axes = plt.subplots(1, len(tasks), figsize=(7.2, 1.6), squeeze=False)
@@ -331,7 +383,7 @@ def selected_tasks(summary: pd.DataFrame, per_replicate: pd.DataFrame, blocks: i
     for axis, task in zip(axes.flat, tasks):
         _depth_line(axis, stream[stream["task"] == task], blocks, PALETTE[0], "trained model")
         rows = replicates[replicates["task"] == task]
-        best = rows.loc[rows.groupby("replicate")["score"].idxmax(), "depth"].to_numpy(dtype=float)
+        best = _choose(rows, ["replicate"])["depth"].to_numpy(dtype=float)
         center, spread = float(best.mean()), float(best.std(ddof=1)) if len(best) > 1 else 0.0
         axis.axvspan(center - spread, center + spread, color=GRID, alpha=0.9, lw=0, zorder=0)
         axis.axvline(center, color=INK_SECONDARY, ls="--", lw=0.8)
@@ -416,7 +468,7 @@ def prot_param_curves(elementwise: pd.DataFrame, label_names: Sequence[str], blo
 
 
 def site_maps(summary: pd.DataFrame, path: Path, tasks: Sequence[str] = TASK_ORDER) -> Path:
-    """Every per-block site of every task by block: the full-test score over the task's best probe."""
+    """Every per-block site of every task by block: the full-test score over the task's highest one, which is circled."""
     plt = _pyplot()
     tasks = _ordered(tasks, set(summary["task"]))
     trained = headline(summary)
@@ -438,26 +490,27 @@ def site_maps(summary: pd.DataFrame, path: Path, tasks: Sequence[str] = TASK_ORD
         axis.tick_params(length=1.5)
         _bare(axis)
         axis.text(0.0, 1.02, SHORT_LABELS.get(task, task), transform=axis.transAxes, fontsize=6, va="bottom", color=INK)
-        axis.text(1.0, 1.02, f"best {best:.2f}", transform=axis.transAxes, fontsize=5.5, va="bottom", ha="right", color=INK_SECONDARY)
+        axis.text(1.0, 1.02, f"max {best:.2f}", transform=axis.transAxes, fontsize=5.5, va="bottom", ha="right", color=INK_SECONDARY)
         if _bottom(axis, axes, len(tasks)):
             axis.set_xlabel("block")
     figure.tight_layout(h_pad=1.0, w_pad=0.6, rect=(0, 0, 0.93, 1))
     if image is not None:
         bar = figure.colorbar(image, cax=figure.add_axes((0.945, 0.35, 0.012, 0.3)))
-        bar.set_label("score / task best", fontsize=6)
+        bar.set_label("score / task maximum", fontsize=6)
         bar.ax.tick_params(labelsize=5.5)
     return _save(figure, path)
 
 
 def site_gap_map(summary: pd.DataFrame, path: Path, tasks: Sequence[str] = TASK_ORDER) -> Path:
-    """A: every site's best score over depth minus the task's best residual-stream score (the embedding, lower in every
-    task, is left out); cells at least 0.05 from zero are labeled. B: the block at which each site's probe peaks."""
+    """A: every site's best score over depth minus the task's best residual-stream score, each best chosen on validation
+    (the embedding, lower in every task, is left out); cells at least 0.05 from zero are labeled. B: the block each
+    site's best probe reads."""
     plt = _pyplot()
     bests = site_bests(summary)
     tasks = _ordered(tasks, set(bests["task"]))
     sites = [site for site in SITE_LABELS if site in set(bests["site"])]
     scores = bests.pivot_table(index="task", columns="site", values="full").reindex(index=tasks, columns=sites)
-    residual = scores[[site for site in RESIDUAL if site in scores]].max(axis=1)
+    residual = _choose(bests[bests["site"].isin(RESIDUAL)], ["task"]).set_index("task")["full"].reindex(tasks)
     gaps = scores.sub(residual, axis=0).drop(columns="embedding", errors="ignore")
     blocks_at = bests.pivot_table(index="task", columns="site", values="layer").reindex(index=tasks, columns=[s for s in sites if s in BLOCK_SITES])
     figure, (left, right) = plt.subplots(1, 2, figsize=(7.2, 0.2 * len(tasks) + 1.3), gridspec_kw={"width_ratios": [gaps.shape[1], blocks_at.shape[1] * 0.9]})
@@ -680,7 +733,7 @@ def diff_summary(
     names: tuple[str, str] = ("trained model", "random-init model"),
 ) -> Path:
     """A: per task and site, the best score over depth under the first summary minus that under the second.
-    B: the best probe of each task under each, with the spread over replicates."""
+    B: the best probe of each task under each, with the spread over replicates. Bests are chosen on validation."""
     plt = _pyplot()
     first, second = site_bests(first), site_bests(second)
     tasks = _ordered(tasks, set(first["task"]) & set(second["task"]))
@@ -706,8 +759,8 @@ def diff_summary(
     bar.set_label(f"{names[0]} minus {names[1]}, best score", fontsize=5.5)
     bar.ax.tick_params(labelsize=5)
     _letter(left, "A", -0.02)
-    best_first = first.loc[first.groupby("task")["full"].idxmax()].set_index("task").reindex(tasks)
-    best_second = second.loc[second.groupby("task")["full"].idxmax()].set_index("task").reindex(tasks)
+    best_first = _choose(first, ["task"]).set_index("task").reindex(tasks)
+    best_second = _choose(second, ["task"]).set_index("task").reindex(tasks)
     positions = np.arange(len(tasks))[::-1]
     for frame, color, marker, size, legend in ((best_second, INK_SECONDARY, "s", 4.6, names[1]), (best_first, PALETTE[0], "o", 3.0, names[0])):
         right.errorbar(frame["full"], positions, xerr=frame["full_std"], fmt=marker, ms=size, color=color, ecolor=color,
@@ -728,15 +781,16 @@ def diff_summary(
 
 
 def variant_table(variants: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Per task and variant: the best residual-stream and any-state full-test scores (with their spread over
-    replicates) and the mean over every full-width probe; a last row per variant averages the tasks all variants share."""
+    """Per task and variant: the full-test scores (with their spread over replicates) of the best residual-stream and
+    any-state probes, chosen on validation, and the mean over every full-width probe; a last row per variant averages
+    the tasks all variants share."""
     rows = []
     for name, summary in variants.items():
         trained = headline(summary)
         trained = trained[trained["family"] == "full"]
         for task, block in trained.groupby("task"):
             stream = block[block["site"].isin(RESIDUAL)]
-            best_stream, best_any = stream.loc[stream["full"].idxmax()], block.loc[block["full"].idxmax()]
+            best_stream, best_any = _choose(stream), _choose(block)
             rows.append({"variant": name, "task": task, "residual_best": best_stream["full"], "residual_best_std": best_stream["full_std"],
                          "any_best": best_any["full"], "any_best_std": best_any["full_std"], "mean_probe": block["full"].mean(),
                          "replicates": int(block["replicates"].max())})
@@ -778,7 +832,7 @@ def compare(variants: dict[str, Sequence[tuple[Path, str]]], out: Path, blocks: 
     out.mkdir(parents=True, exist_ok=True)
     summaries = {
         name: summarize(pd.concat([read_table(Path(root), label, "scores").assign(replicate=index) for index, (root, label) in enumerate(replicates)],
-                                  ignore_index=True))
+                                  ignore_index=True), read_validation(replicates))
         for name, replicates in variants.items()
     }
     names = list(summaries)
@@ -962,10 +1016,11 @@ def result_figures(
     `random_roots`, against those of a randomly initialized model."""
     written: list[Path] = []
     scores = read_replicates(roots, label)
-    summary = summarize(scores)
+    validation = read_validation([(root, label) for root in roots])
+    summary = summarize(scores, validation)
     summary.to_parquet(out / "summary.parquet", index=False)
     written.append(out / "summary.parquet")
-    random = summarize(read_replicates(random_roots, label)) if random_roots else None
+    random = summarize(read_replicates(random_roots, label), read_validation([(root, label) for root in random_roots])) if random_roots else None
     if random is not None:
         random.to_parquet(out / "summary_random_init.parquet", index=False)
         written.append(out / "summary_random_init.parquet")
@@ -974,7 +1029,7 @@ def result_figures(
     written.append(write_summary(site_bests(summary), out / "site_bests.csv"))
     spreads = {"trained": replicate_spread(summary)}
     written.append(depth_curves(summary, blocks, out / "depth_curves.png", random))
-    written.append(selected_tasks(summary, full_scores(scores), blocks, out / "selected_tasks.png"))
+    written.append(selected_tasks(summary, full_scores(scores, validation), blocks, out / "selected_tasks.png"))
     if set(summary["control"]) - {"original"}:
         written.append(control_grid(summary, blocks, out / "controls.png"))
     written.append(site_maps(summary, out / "site_maps.png"))

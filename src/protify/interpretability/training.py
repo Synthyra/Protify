@@ -81,9 +81,28 @@ def make_bank(
     return bank
 
 
+def restore_bank(names: list[str], saved: dict[str, Tensor], outputs: int, loss: str, settings: TrainingSettings, device: torch.device | str) -> ProbeBank:
+    """A trained bank of one grid setting rebuilt from its saved `state("best")`: the best weights, as the current
+    weights too, and the standardization. `names` are the probes in the order they were saved."""
+    best = {key.removeprefix("best."): value for key, value in saved.items() if key.startswith("best.")}
+    width = best["weight" if settings.probe.kind == "linear" else "weight1"].shape[1]
+    bank = ProbeBank(names, width, outputs, loss, settings.probe, saved["learning_rates"], saved["weight_decays"], settings.seed, device)
+    if set(best) != set(bank.params) or any(value.shape != bank.params[name].shape for name, value in best.items()):
+        shapes = {name: tuple(value.shape) for name, value in best.items()}
+        raise ValueError(f"Saved weights of shapes {shapes} do not fit {bank.groups} probes from {names[0]}.")
+    for name, value in best.items():
+        bank.params[name] = value.to(bank.device, torch.float32).clone()
+        bank.best[name] = value.to(bank.device, torch.float32).clone()
+    bank.mean = saved["mean"].to(bank.device, torch.float32)
+    bank.inverse_std = saved["inverse_std"].to(bank.device, torch.float32)
+    bank.best_loss = saved["best_loss"].to(bank.device)
+    bank.best_step = saved["best_step"].to(bank.device)
+    return bank
+
+
 @dataclass
 class TaskResults:
-    """Long tables of one task's test scores, elementwise scores and chosen training settings.
+    """Long tables of one task's test scores, elementwise scores, chosen training settings and validation scores.
 
     A sweep fills `sweep` instead: every probe under every grid setting, scored on the validation split only.
     """
@@ -92,6 +111,7 @@ class TaskResults:
     elementwise: list[pd.DataFrame] = field(default_factory=list)
     training: list[pd.DataFrame] = field(default_factory=list)
     sweep: list[pd.DataFrame] = field(default_factory=list)
+    validation: list[pd.DataFrame] = field(default_factory=list)
 
     def add_scores(
         self,
@@ -173,11 +193,25 @@ class TaskResults:
             "seconds": seconds,
         }))
 
+    def add_validation(self, task: str, family: str, names: list[str], accumulator: ScoreAccumulator, losses: Tensor) -> None:
+        """One row per trained probe: its score on the whole validation split, in the test metric, which best states
+        are chosen by, and its validation loss with the weights kept."""
+        self.validation.append(pd.DataFrame({
+            "task": task,
+            "family": family,
+            "probe_name": [name.split("|")[0] for name in names],
+            "validation_score": accumulator.scores()[0].cpu().numpy(),
+            "validation_loss": losses.detach().cpu().numpy(),
+        }))
+
     def frames(self) -> dict[str, pd.DataFrame]:
-        return {
+        tables = {
             name: pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
             for name, parts in (("scores", self.scores), ("elementwise", self.elementwise), ("training", self.training))
         }
+        if self.validation:
+            tables["validation"] = pd.concat(self.validation, ignore_index=True)
+        return tables
 
     def sweep_frame(self) -> pd.DataFrame:
         return pd.concat(self.sweep, ignore_index=True) if self.sweep else pd.DataFrame()
