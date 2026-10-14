@@ -209,7 +209,7 @@ Two options change what the probes read, and each variant runs under its own `--
 
 `compare --variants NAME=ROOT[:LABEL][,ROOT[:LABEL]...] ...` sets variants against the first one: `variants.csv`
 holds each task's best residual-stream and any-state scores and its mean over full-width probes per variant,
-`variants_depth.png` overlays their residual streams, and `variants_maps_<name>.png` and `variants_summary_<name>.png`
+`variants_depth.png` overlays their residual streams, `variants_dots.png` sets each task's best residual-stream score per variant beside its difference from the first (best probe and mean over probes), and `variants_maps_<name>.png` and `variants_summary_<name>.png`
 map each variant's difference from the first by site and block.
 
 ```bash

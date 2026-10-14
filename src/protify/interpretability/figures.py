@@ -872,6 +872,39 @@ def variant_depth_curves(variants: dict[str, pd.DataFrame], blocks: int, path: P
     return _save(figure, path)
 
 
+def variant_dots(table: pd.DataFrame, path: Path) -> Path:
+    """A: each task's best residual-stream probe under each variant, chosen on validation, one color per variant. B:
+    each variant's score minus the first variant's, for the best stream probe (filled) and the mean over all
+    full-width probes (hollow)."""
+    plt = _pyplot()
+    table = table[table["task"] != "mean over shared tasks"]
+    names = list(dict.fromkeys(table["variant"]))
+    tasks = _ordered(TASK_ORDER, set(table["task"])) + sorted(set(table["task"]) - set(TASK_ORDER))
+    scores = {column: table.pivot_table(index="task", columns="variant", values=column).reindex(index=tasks) for column in ("residual_best", "mean_probe")}
+    figure, (left, right) = plt.subplots(1, 2, figsize=(7.0, 0.2 * len(tasks) + 1.0), sharey=True, gridspec_kw={"width_ratios": [1.2, 1.0]})
+    positions = np.arange(len(tasks))
+    for axis in (left, right):
+        for position in positions[::2]:
+            axis.axhspan(position - 0.5, position + 0.5, color="#f6f5f2", lw=0, zorder=0)
+        axis.grid(axis="x", color=GRID, lw=0.5)
+    for name, color in zip(names, PALETTE):
+        left.scatter(scores["residual_best"].get(name), positions, s=14, color=color, zorder=3, label=name)
+    right.axvline(0.0, color=INK_SECONDARY, lw=0.7)
+    for name, color in zip(names[1:], PALETTE[1:]):
+        right.scatter(scores["residual_best"][name] - scores["residual_best"][names[0]], positions, s=14, color=color, zorder=3)
+        right.scatter(scores["mean_probe"][name] - scores["mean_probe"][names[0]], positions, s=14, facecolors="none", edgecolors=color, linewidths=0.8, zorder=3)
+    left.set_yticks(positions)
+    left.set_yticklabels([SHORT_LABELS.get(task, task) for task in tasks])
+    left.set_ylim(len(tasks) - 0.5, -0.5)
+    left.set_xlabel("best residual-stream score")
+    right.set_xlabel(f"minus {names[0]}")
+    _letter(left, "A", -0.02)
+    _letter(right, "B", -0.02)
+    left.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=len(names), frameon=False, fontsize=5.5)
+    figure.tight_layout(w_pad=0.6)
+    return _save(figure, path)
+
+
 def compare(variants: dict[str, Sequence[tuple[Path, str]]], out: Path, blocks: int) -> list[Path]:
     """Figures and a table comparing variants of the analysis, each a list of replicate (root, label) pairs; the
     first variant is the reference the others are drawn against."""
@@ -882,7 +915,9 @@ def compare(variants: dict[str, Sequence[tuple[Path, str]]], out: Path, blocks: 
         for name, replicates in variants.items()
     }
     names = list(summaries)
-    written = [write_summary(variant_table(summaries), out / "variants.csv"), variant_depth_curves(summaries, blocks, out / "variants_depth.png")]
+    table = variant_table(summaries)
+    written = [write_summary(table, out / "variants.csv"), variant_depth_curves(summaries, blocks, out / "variants_depth.png"),
+               variant_dots(table, out / "variants_dots.png")]
     reference = names[0]
     for name in names[1:]:
         slug = "".join(character if character.isalnum() else "_" for character in name).strip("_")

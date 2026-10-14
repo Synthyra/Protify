@@ -1108,7 +1108,7 @@ def test_figures_from_result_tables(tmp_path: Path) -> None:
     main(["compare", "--variants", f"raw={roots[0]},{roots[1]}:linear", f"other={random_root}", "--out", str(out / "compare"), "--blocks", "3"])
     variants = pd.read_csv(out / "compare" / "variants.csv")
     assert set(variants["variant"]) == {"raw", "other"} and (variants[variants["variant"] == "raw"]["replicates"].dropna() == 2).all()
-    for name in ("variants_depth", "variants_maps_other", "variants_summary_other"):
+    for name in ("variants_depth", "variants_dots", "variants_maps_other", "variants_summary_other"):
         assert (out / "compare" / f"{name}.png").stat().st_size > 10_000, name
     ranked = pd.DataFrame([
         {"label": label, "learning_rate": rate, "weight_decay": decay, "mean_shortfall": rate * decay, "batch_size": batch, "max_tokens": 0}
