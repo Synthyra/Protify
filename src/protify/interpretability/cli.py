@@ -73,16 +73,14 @@ STORE_VARIANTS = (
 PAIR_PREFIX = f"{PAIR_TASK}_"
 
 
+TASK_GROUPS = {"all": ALL_TASKS, "protein": PROTEIN_TASKS, "residue": RESIDUE_TASKS}
+
+
 def parse_tasks(value: str) -> tuple[str, ...]:
-    """Task names from a CLI value: 'all' (the 22 concepts), 'protein', 'residue', or comma-separated names, among
-    which the protein-protein interaction task 'ppi', which no group includes."""
-    if value == "all":
-        return ALL_TASKS
-    if value == "protein":
-        return PROTEIN_TASKS
-    if value == "residue":
-        return RESIDUE_TASKS
-    names = tuple(name.strip() for name in value.split(",") if name.strip())
+    """Task names from a CLI value: comma-separated task names or groups ('all' for the 22 concepts, 'protein',
+    'residue'), among them the protein-protein interaction task 'ppi', which no group includes."""
+    parts = (name.strip() for name in value.split(","))
+    names = tuple(dict.fromkeys(name for part in parts if part for name in TASK_GROUPS.get(part, (part,))))
     unknown = sorted(set(names) - set(ALL_TASKS) - {PAIR_TASK})
     if unknown:
         raise SystemExit(f"Unknown tasks {unknown}; known tasks are {list(ALL_TASKS) + [PAIR_TASK]}.")

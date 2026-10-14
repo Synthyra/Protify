@@ -19,9 +19,9 @@ try:
     from src.protify.interpretability.baselines import BASELINE_SITES, BaselineModel
     from src.protify.interpretability.capture import capture_states, model_dims
     from src.protify.interpretability import figures
-    from src.protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, main, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
+    from src.protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
     from src.protify.interpretability.pairs import MeanRows, PairRows, load_pairs, mean_targets, ranking_metrics
-    from src.protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
+    from src.protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from src.protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from src.protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
@@ -40,9 +40,9 @@ except ImportError:
     from protify.interpretability.baselines import BASELINE_SITES, BaselineModel
     from protify.interpretability.capture import capture_states, model_dims
     from protify.interpretability import figures
-    from protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, main, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
+    from protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
     from protify.interpretability.pairs import MeanRows, PairRows, load_pairs, mean_targets, ranking_metrics
-    from protify.interpretability.concepts import ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
+    from protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
     from protify.interpretability.interventions import ACTIVE, INACTIVE, UNKNOWN, PhosphoProtein, fit_logistic, paired_tests, phosphoproteins, pooled_means, run_phospho_interventions, scanning_mutants
     from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
@@ -812,6 +812,14 @@ def test_one_hot_baseline_reads_residue_identity(tokenizer: object, tmp_path: Pa
     scores = pd.read_parquet(tmp_path / "run" / "results" / "linear" / "ssp_q3" / "scores.parquet")
     assert set(scores["probe_name"]) == {"embedding:0"}
     assert headline_scores(scores)["embedding:0"] > 0.95  # each class is a set of residues
+
+
+def test_task_lists_mix_groups_and_names() -> None:
+    assert parse_tasks("protein,ppi") == PROTEIN_TASKS + ("ppi",)
+    assert parse_tasks("all") == ALL_TASKS and parse_tasks("residue") == RESIDUE_TASKS
+    assert parse_tasks("go_cc, ssp_q3,go_cc") == ("go_cc", "ssp_q3")
+    with pytest.raises(SystemExit):
+        parse_tasks("protein,nonsense")
 
 
 def test_pair_rows_are_symmetric_and_ranked_as_sklearn_ranks() -> None:
