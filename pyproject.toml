@@ -51,6 +51,7 @@ requests = ">=2.34.2"
 pyyaml = ">=6.0.3"
 joblib = ">=1.6.0"
 umap-learn = ">=0.5.12"
+biopython = ">=1.85"  # interpretability: ProtParam targets of scrambled sequences
 pyarrow = ">=25.0.1"  # runtime backend: datasets and pandas load it by name
 kernels = ">=0.17.1"  # runtime backend: FastPLMs imports it for the kernels attention backend
 

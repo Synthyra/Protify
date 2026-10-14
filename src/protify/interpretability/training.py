@@ -1,0 +1,142 @@
+"""Settings, results and bookkeeping shared by the protein-level and residue-level probe trainers."""
+
+from __future__ import annotations
+
+import itertools
+import numpy as np
+import pandas as pd
+import torch
+
+from dataclasses import dataclass, field
+from torch import Tensor
+
+from .probe_bank import ProbeBank, ProbeSettings
+from .scores import ScoreAccumulator
+
+
+# The test conditions: which model produced the states, which probe read them, and how the input was changed.
+PLM_STATES = ("trained", "untrained")
+PROBE_STATES = ("trained", "untrained")
+CONTROLS = ("original", "l2_normalized", "mean", "scrambled", "random_gaussian")
+MEAN_CONTROL_BATCH = 8  # proteins whose states and labels the mean control averages
+
+
+@dataclass(frozen=True)
+class TrainingSettings:
+    """How every probe of a task is trained, validated and scored."""
+
+    learning_rates: tuple[float, ...] = (1e-3,)
+    weight_decays: tuple[float, ...] = (1e-4,)
+    batch_size: int = 64  # proteins per optimizer step, for protein tasks
+    max_tokens: int = 32768  # padded tokens per optimizer step, for residue tasks
+    max_epochs: int = 50
+    patience: int = 5  # validations without improvement before a probe stops
+    validate_every: int = 0  # optimizer steps between validations; 0 validates once per epoch
+    seed: int = 24895
+    resamples: int = 7
+    resample_fraction: float = 0.5
+    controls: bool = True
+    probe: ProbeSettings = field(default_factory=ProbeSettings)
+
+    def grid(self) -> list[tuple[float, float]]:
+        """Every (learning rate, weight decay) pair; each probe keeps the pair that validates best."""
+        return list(itertools.product(self.learning_rates, self.weight_decays))
+
+
+def grid_vectors(settings: TrainingSettings, probes: int) -> tuple[Tensor, Tensor]:
+    """Learning rate and weight decay of each group, setting-major: probes of setting 0 first."""
+    pairs = settings.grid()
+    rates = torch.tensor([rate for rate, _ in pairs for _ in range(probes)], dtype=torch.float32)  # (K * P,)
+    decays = torch.tensor([decay for _, decay in pairs for _ in range(probes)], dtype=torch.float32)  # (K * P,)
+    return rates, decays
+
+
+def make_bank(
+    names: list[str],
+    width: int,
+    outputs: int,
+    loss: str,
+    settings: TrainingSettings,
+    seed: int,
+    device: torch.device | str,
+) -> ProbeBank:
+    """A bank holding every probe once per grid setting, with the same initial weights in every setting."""
+    rates, decays = grid_vectors(settings, len(names))
+    count = len(settings.grid())
+    labelled = [f"{name}|lr={rate:g}|wd={decay:g}" for rate, decay in settings.grid() for name in names]
+    bank = ProbeBank(labelled, width, outputs, loss, settings.probe, rates, decays, seed, device)
+    # One initialization per probe shared across settings, so settings differ only in how they train.
+    for name, value in bank.params.items():
+        shared = value[: len(names)].repeat((count,) + (1,) * (value.dim() - 1))
+        bank.params[name] = shared.clone()
+        bank.initial[name] = shared.clone()
+        bank.best[name] = shared.clone()
+    return bank
+
+
+@dataclass
+class TaskResults:
+    """Long tables of one task's test scores, elementwise scores and chosen training settings."""
+
+    scores: list[pd.DataFrame] = field(default_factory=list)
+    elementwise: list[pd.DataFrame] = field(default_factory=list)
+    training: list[pd.DataFrame] = field(default_factory=list)
+
+    def add_scores(
+        self,
+        task: str,
+        family: str,
+        names: list[str],
+        accumulator: ScoreAccumulator,
+        plm: str,
+        probe: str,
+        control: str,
+        keep_elementwise: bool,
+    ) -> None:
+        names = [name.split("|")[0] for name in names]
+        scores = accumulator.scores().cpu().numpy()  # (R + 1, G)
+        rows, groups = scores.shape
+        frame = pd.DataFrame({
+            "task": task,
+            "family": family,
+            "probe_name": np.repeat(np.asarray(names), rows),
+            "resample": np.tile(np.arange(rows), groups),
+            "plm": plm,
+            "probe": probe,
+            "control": control,
+            "score": scores.T.reshape(-1),
+        })
+        self.scores.append(frame)
+        elementwise = accumulator.elementwise() if keep_elementwise else None
+        if elementwise is not None:
+            values = elementwise.cpu().numpy()  # (R + 1, G, C)
+            rows, groups, outputs = values.shape
+            self.elementwise.append(pd.DataFrame({
+                "task": task,
+                "family": family,
+                "probe_name": np.repeat(np.asarray(names), rows * outputs),
+                "resample": np.tile(np.repeat(np.arange(rows), outputs), groups),
+                "label_index": np.tile(np.arange(outputs), rows * groups),
+                "score": values.transpose(1, 0, 2).reshape(-1),
+            }))
+
+    def add_training(self, task: str, family: str, bank: ProbeBank, chosen: Tensor, settings: TrainingSettings, epochs: int) -> None:
+        pairs = settings.grid()
+        choice = chosen.cpu().numpy()
+        self.training.append(pd.DataFrame({
+            "task": task,
+            "family": family,
+            "probe_name": [name.split("|")[0] for name in bank.names],
+            "learning_rate": [pairs[index][0] for index in choice],
+            "weight_decay": [pairs[index][1] for index in choice],
+            "best_validation_loss": bank.best_loss.cpu().numpy(),
+            "best_step": bank.best_step.cpu().numpy(),
+            "steps": bank.steps,
+            "epochs": epochs,
+        }))
+
+    def frames(self) -> dict[str, pd.DataFrame]:
+        return {
+            name: pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+            for name, parts in (("scores", self.scores), ("elementwise", self.elementwise), ("training", self.training))
+        }
