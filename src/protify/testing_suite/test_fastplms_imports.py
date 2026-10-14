@@ -2,39 +2,27 @@
 
 import importlib.util
 import os
-import sys
-import pytest
 
 
-def _ensure_fastplms_on_path() -> str:
-    """Reset FastPLMs imports to the vendored source tree for each contract test."""
-    # FastPLMs 1.0 is a source repository rather than an installable distribution.
-    fastplms_root = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "fastplms",
-        "src",
-    )
-    # The research foundry keeps one FastPLMs, at models/fastplms, importable as `fastplms`.
-    # Without the submodule, that source is the one Protify resolves.
+def _fastplms_root() -> str:
+    """The source root Protify resolves FastPLMs from.
+
+    A GitHub checkout holds FastPLMs 1.0, a source repository rather than an installable
+    distribution, as the submodule, whose `src` conftest puts first on the path. The research
+    foundry keeps one FastPLMs, at models/fastplms, importable as `fastplms`. This only reads the
+    root: dropping the loaded `fastplms` modules here, as this file once did before every test,
+    left the test modules collected earlier holding classes Protify no longer used, so their
+    patches and `pytest.raises` missed.
+    """
+    submodule_root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fastplms", "src")
+    if os.path.isdir(os.path.join(submodule_root, "fastplms")):
+        return submodule_root
     importable = importlib.util.find_spec("fastplms")
-    if not os.path.isdir(os.path.join(fastplms_root, "fastplms")) and importable and importable.origin:
-        return os.path.dirname(os.path.dirname(importable.origin))
-    if fastplms_root in sys.path:
-        sys.path.remove(fastplms_root)
-    sys.path.insert(0, fastplms_root)
-    if "fastplms" in sys.modules:
-        for module_name in list(sys.modules):
-            if module_name == "fastplms" or module_name.startswith("fastplms."):
-                del sys.modules[module_name]
-    return fastplms_root
+    assert importable is not None and importable.origin is not None, "FastPLMs is neither the submodule nor importable"
+    return os.path.dirname(os.path.dirname(importable.origin))
 
 
-FASTPLMS_ROOT = _ensure_fastplms_on_path()
-
-
-@pytest.fixture(autouse=True)
-def _reset_fastplms_import_path() -> None:
-    _ensure_fastplms_on_path()
+FASTPLMS_ROOT = _fastplms_root()
 
 
 def test_fastplms_root_exists():
