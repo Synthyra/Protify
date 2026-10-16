@@ -663,9 +663,10 @@ def command_train(args: argparse.Namespace) -> None:
 
     root = Path(args.root)
     name = args.wandb_name or root.name
-    config = {**meta, "seed": args.seed, "tasks": list(tasks), "sites": args.sites, "blocks": args.blocks,
+    config = {**meta, "experiment_id": args.wandb_group, "base_model": model_label(args), "dataset_id": args.repo,
+              "dataset_revision": args.revision, "seed": args.seed, "tasks": list(tasks), "sites": args.sites, "blocks": args.blocks,
               "variants": {variant.label: asdict(variant.settings) for variant in variants}}
-    with Run(root / "wandb" / name, config, project=args.wandb_project, group=args.wandb_group, job_type="train", name=name) as run:
+    with Run(root / "wandb" / name, config, project=args.wandb_project, group=args.wandb_group, job_type="fit_final", name=name) as run:
         rows: list[dict[str, object]] = []
         run_tasks(lambda task, variant, record: rows.append(log_task(run, tasks.index(task), task, variant, record)))
         run.table("tasks", rows)
