@@ -9,7 +9,14 @@ with validation each epoch (or every `validate_every` steps), per-probe early st
 best validation weights kept, which are then scored on the validation split in the test metric (the scores a best
 state is chosen by). Test scores cover the controls when control stores are given. Linear banks run on the
 probe bank's shared-input path: the P probes of a family read P slices of one row, and every grid setting reads the
-same slice, so one batched bf16 GEMM a step serves all K * P probes.
+same slice, so one batched bf16 GEMM a step serves all K * P probes. MLP banks run on its fused path, one batched
+product per layer for every setting.
+
+One load serves several variants (`Variant`): probe kinds, hidden widths, dropouts and poolings, each its own bank
+and its own results, trained in turn on the rows a site chunk holds on the device. Mean-only pooling reads the first
+half of the same rows. Layer chunks also keep every variant's bank under `settings.bank_budget_gb`. Classification
+tasks add ROC AUC, average precision and balanced MCC of the full-width probes on validation and test
+(`ranking.parquet`).
 
 Symbols: n proteins; L layers of a site; w site width; H heads; d_h head width; C outputs; K grid settings;
 P probes of a family (L, or L * H).
@@ -22,20 +29,32 @@ import time
 import numpy as np
 import torch
 
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
 from torch import Tensor
 from tqdm.auto import tqdm
 
 from .concepts import ConceptData, prot_param_values, scramble, scramble_seed, shuffled_labels
 from .pooled_store import PooledTapStore
 from .probe_bank import ProbeBank
-from .scores import ResamplePlan, ScoreAccumulator
+from .scores import ResamplePlan, ScoreAccumulator, ranking_summary
 from .sites import SiteLayout
 from .training import MEAN_CONTROL_BATCH, PLM_STATES, TaskResults, TrainingSettings, make_bank
 
 
 Family = tuple[str, list[str], Callable[[Tensor], Tensor]]
+BANK_COPIES = 8  # float32 copies a bank holds of each weight: itself, best, initial, gradient, two moments, fused operands
+
+
+@dataclass
+class Variant:
+    """One probe configuration trained from a shared load: its results label, its settings, and where its results and
+    kept weights collect."""
+
+    label: str
+    settings: TrainingSettings
+    results: TaskResults = field(default_factory=TaskResults)
+    weights: dict[str, dict[str, Tensor]] | None = None
 
 
 @dataclass
@@ -58,12 +77,15 @@ class ControlStores:
         return seeds.pop()
 
 
-def layer_chunks(layout: SiteLayout, rows: int, budget_gb: float) -> list[tuple[SiteLayout, slice]]:
+def layer_chunks(layout: SiteLayout, rows: int, budget_gb: float, layer_bytes: int = 0, bank_budget_gb: float = 0.0) -> list[tuple[SiteLayout, slice]]:
     """A site's layers in contiguous chunks whose pooled rows (bfloat16 mean and variance of `rows` proteins) fit the
-    budget, each as the chunk's layout and its slots among the store's layers. Probes of different layers train
-    independently and a chunk keeps its probes' initial weights, so chunks change memory and nothing else."""
+    budget, and, with `bank_budget_gb`, whose banks (`layer_bytes` a layer) fit that, each as the chunk's layout and
+    its slots among the store's layers. Probes of different layers train independently and a chunk keeps its probes'
+    initial weights, so chunks change memory and nothing else."""
     per_layer = rows * 2 * layout.width * 2  # bytes of one layer
     size = max(1, min(layout.num_layers, int(budget_gb * 1e9) // max(per_layer, 1)))
+    if bank_budget_gb > 0 and layer_bytes > 0:
+        size = max(1, min(size, int(bank_budget_gb * 1e9) // layer_bytes))
     return [
         (replace(layout, layers=layout.layers[start: start + size]), slice(start, start + size))
         for start in range(0, layout.num_layers, size)
@@ -74,6 +96,25 @@ def family_offset(layout: SiteLayout, slots: slice, family: str) -> tuple[int, i
     """Where a chunk's probes sit in the whole site's family: (first, total), counted in probes."""
     heads = layout.heads if family == "head" else 1
     return slots.start * heads, layout.num_layers * heads
+
+
+def bank_layer_bytes(layout: SiteLayout, settings: TrainingSettings, outputs: int) -> int:
+    """Device bytes one layer's probes take in a bank under `settings`, every grid setting and family included: what
+    `bank_budget_gb` bounds. A head family's probes together hold a full-width probe's input columns."""
+    width = 2 * layout.width if settings.pooling == "mean_var" else layout.width
+    if settings.probe.kind == "linear":
+        parameters = width * outputs + outputs
+    else:
+        hidden = settings.probe.hidden
+        parameters = width * hidden + hidden + hidden * outputs + outputs
+    families = 2 if layout.heads else 1
+    return len(settings.grid()) * families * parameters * 4 * BANK_COPIES
+
+
+def bank_outputs(bank: ProbeBank, X: Tensor, which: str = "best", batch: int = 512) -> Tensor:
+    """Every group's outputs for every row, in batches: (n, G, C)."""
+    # X: (n, P, w)
+    return torch.cat([bank_logits(bank, X[start: start + batch], which) for start in range(0, X.shape[0], batch)])
 
 
 def keep_state(saved: dict[str, dict[str, Tensor]], key: str, state: dict[str, Tensor]) -> None:
@@ -114,13 +155,22 @@ def feature_moments(X: Tensor, chunk: int = 1024) -> tuple[Tensor, Tensor]:
 
 
 def _shared(bank: ProbeBank) -> bool:
-    """Linear banks take the shared-input path; MLP banks keep one forward per grid setting."""
+    """Linear banks take the shared-input path; MLP banks the fused path, one product per layer for every setting."""
     return bank.settings.kind == "linear"
 
 
 def _flat(X: Tensor) -> Tensor:
     # X: (n, P, w) -> (n, P * w), the row every grid setting's probe p reads its slice p of
     return X.reshape(X.shape[0], -1)
+
+
+def bank_logits(bank: ProbeBank, X: Tensor, which: str = "current") -> Tensor:
+    """Outputs of every group of a bank whose settings read the same rows: (n, G, C), groups setting-major."""
+    # X: (n, P, w)
+    probes = X.shape[1]
+    if _shared(bank):
+        return bank.shared_logits(_flat(X), torch.arange(bank.groups, device=bank.device), probes, which)
+    return bank.fused_logits(X, bank.groups // probes, which)
 
 
 def validation_loss(bank: ProbeBank, X: Tensor, targets: Tensor, settings_count: int, batch: int = 512, which: str = "current") -> Tensor:
@@ -134,9 +184,8 @@ def validation_loss(bank: ProbeBank, X: Tensor, targets: Tensor, settings_count:
         labels = targets[start: start + batch]
         if _shared(bank):
             totals += bank.shared_loss_sums(_flat(rows), labels, every_group, probes, which=which)
-            continue
-        for setting in range(settings_count):
-            totals[setting * probes: (setting + 1) * probes] += bank.loss_sums(rows, labels, setting * probes, (setting + 1) * probes, which)
+        else:
+            totals += bank.fused_loss_sums(rows, labels, settings_count, which)
     denominator = X.shape[0] if bank.loss == "multiclass" else X.shape[0] * bank.outputs
     return totals / denominator
 
@@ -170,8 +219,7 @@ def train_bank(
             if _shared(bank):
                 bank.shared_accumulate(_flat(inputs), labels, every_group, probes)
             else:
-                for setting in range(count):
-                    bank.accumulate(inputs, labels, setting * probes, (setting + 1) * probes)
+                bank.fused_accumulate(inputs, labels, count)
             bank.step()
             if bank.steps % validate_every == 0:
                 active = bank.observe(validation_loss(bank, valid_X, valid_y, count), settings.patience)
@@ -241,17 +289,9 @@ def score_bank(bank: ProbeBank, which: str, X: Tensor, targets: Tensor, accumula
     proteins = torch.arange(X.shape[0], device=X.device)
     row_bytes = bank.groups * max(bank.outputs, 1) * (64 if getattr(accumulator, "per_label", None) is not None else 16)
     batch = max(1, min(512, budget // row_bytes))
-    probes = X.shape[1]  # P; a sweep's bank holds G = K * P groups, a trained bank G = P
-    every_group = torch.arange(bank.groups, device=bank.device)  # (G,)
     for start in range(0, X.shape[0], batch):
-        rows = X[start: start + batch]  # (b, P, w)
-        if _shared(bank):
-            Z = bank.shared_logits(_flat(rows), every_group, probes, which)  # (b, G, C)
-        else:
-            Z = torch.cat([
-                bank.logits(rows, first, first + probes, which) for first in range(0, bank.groups, probes)
-            ], dim=1)  # (b, G, C)
-        accumulator.add(Z, targets[start: start + batch], proteins[start: start + batch])
+        rows = X[start: start + batch]  # (b, P, w); a sweep's bank holds G = K * P groups, a trained bank G = P
+        accumulator.add(bank_logits(bank, rows, which), targets[start: start + batch], proteins[start: start + batch])
 
 
 def _validate(bank: ProbeBank, family: str, inputs: Tensor, targets: Tensor, data: ConceptData, plan: ResamplePlan, results: TaskResults) -> None:
@@ -303,6 +343,70 @@ def scrambled_targets(data: ConceptData, sequences: list[str], seed: int, device
     return torch.tensor(np.stack([np.atleast_1d(label).astype(np.float32) for label in shuffled]), device=device)
 
 
+def _variant_chunks(layout: SiteLayout, rows: int, variants: Sequence[Variant], outputs: int) -> list[tuple[SiteLayout, slice]]:
+    """Layer chunks whose rows fit the site budget and whose largest variant's bank fits the bank budget."""
+    first = variants[0].settings
+    layer_bytes = max(bank_layer_bytes(layout, variant.settings, outputs) for variant in variants)
+    return layer_chunks(layout, rows, first.site_budget_gb, layer_bytes, first.bank_budget_gb)
+
+
+def _add_rankings(bank: ProbeBank, family: str, inputs: dict[str, Tensor], targets: dict[str, Tensor], data: ConceptData, results: TaskResults) -> None:
+    """ROC AUC, average precision and balanced MCC of a trained bank's kept weights on validation and test."""
+    for split in ("validation", "test"):
+        summary = ranking_summary(bank_outputs(bank, inputs[split]), targets[split], data.task.kind)  # (P,) each
+        results.add_ranking(data.task.name, family, bank.names, split, summary["roc_auc"], summary["average_precision"],
+                            balanced_mcc=summary["balanced_mcc"])
+
+
+def train_protein_variants(
+    data: ConceptData,
+    store: PooledTapStore,
+    layouts: dict[str, SiteLayout],
+    variants: Sequence[Variant],
+    device: torch.device,
+    controls: ControlStores | None = None,
+) -> None:
+    """Train and score every probe of one protein-level task on a pooled store, once per variant, each site chunk
+    loaded once for all of them; each variant's results and kept weights go to its own containers. The variants share
+    a seed, so they share the test halves."""
+    task = data.task
+    shared = variants[0].settings
+    split_rows = {split: store.rows_for(data.splits[split].sequences) for split in ("train", "validation", "test")}
+    targets = {split: data.protein_targets(split).to(device) for split in split_rows}
+    test_sequences = data.splits["test"].sequences
+    plan = ResamplePlan.draw(len(test_sequences), shared.resamples, shared.resample_fraction, shared.seed, device)
+    validation_plan = ResamplePlan.draw(len(split_rows["validation"]), 0, shared.resample_fraction, shared.seed, device)
+    gaussian_generators = {variant.label: torch.Generator(device="cpu").manual_seed(variant.settings.seed) for variant in variants}
+    scrambled = scrambled_targets(data, test_sequences, controls.scramble_seed, device) if controls is not None else None
+
+    rows_held = sum(len(rows) for rows in split_rows.values())
+    for site, layout in layouts.items():
+        for part, slots in _variant_chunks(layout, rows_held, variants, task.outputs):
+            loaded = {split: store.load(site, rows, device, slots) for split, rows in split_rows.items()}  # each (n, L_c, 2 * w)
+            for variant in variants:
+                settings, results = variant.settings, variant.results
+                for family, names, view in families(part, settings.pooling):
+                    inputs = {split: view(values) for split, values in loaded.items()}  # (n, P, w')
+                    offset = family_offset(layout, slots, family)
+                    bank, epochs = fit_family(names, inputs, targets, data, settings, device, f"{task.name} {variant.label} {site} {family}", offset)
+                    selected, chosen = bank.select_settings(len(settings.grid()))
+                    del bank
+                    results.add_training(task.name, family, selected, chosen, settings, epochs)
+                    _validate(selected, family, inputs["validation"], targets["validation"], data, validation_plan, results)
+                    if variant.weights is not None:
+                        keep_state(variant.weights, f"{site}.{family}", selected.state("best"))
+                    accumulator = ScoreAccumulator(task.kind, selected.groups, task.outputs, plan)
+                    score_bank(selected, "best", inputs["test"], targets["test"], accumulator)
+                    results.add_scores(task.name, family, selected.names, accumulator, "trained", "trained", "original", True)
+                    if task.kind != "regression" and family == "full":
+                        _add_rankings(selected, family, inputs, targets, data, results)
+                    if controls is not None and family == "full":
+                        _score_controls(selected, site, slots, view, data, controls, targets["test"], scrambled, plan,
+                                        gaussian_generators[variant.label], results, device)
+                    del selected
+            del loaded
+
+
 def train_protein_task(
     data: ConceptData,
     store: PooledTapStore,
@@ -313,38 +417,10 @@ def train_protein_task(
     results: TaskResults | None = None,
     save_weights: dict[str, dict[str, Tensor]] | None = None,
 ) -> TaskResults:
-    """Train and score every probe of one protein-level task on a pooled store."""
-    task = data.task
-    results = results or TaskResults()
-    split_rows = {split: store.rows_for(data.splits[split].sequences) for split in ("train", "validation", "test")}
-    targets = {split: data.protein_targets(split).to(device) for split in split_rows}
-    test_sequences = data.splits["test"].sequences
-    plan = ResamplePlan.draw(len(test_sequences), settings.resamples, settings.resample_fraction, settings.seed, device)
-    validation_plan = ResamplePlan.draw(len(split_rows["validation"]), 0, settings.resample_fraction, settings.seed, device)
-    gaussian_generator = torch.Generator(device="cpu").manual_seed(settings.seed)
-    scrambled = scrambled_targets(data, test_sequences, controls.scramble_seed, device) if controls is not None else None
-
-    rows_held = sum(len(rows) for rows in split_rows.values())
-    for site, layout in layouts.items():
-        for part, slots in layer_chunks(layout, rows_held, settings.site_budget_gb):
-            loaded = {split: store.load(site, rows, device, slots) for split, rows in split_rows.items()}  # each (n, L_c, 2 * w)
-            for family, names, view in families(part, settings.pooling):
-                inputs = {split: view(values) for split, values in loaded.items()}  # (n, P, w')
-                offset = family_offset(layout, slots, family)
-                bank, epochs = fit_family(names, inputs, targets, data, settings, device, f"{task.name} {site} {family}", offset)
-                selected, chosen = bank.select_settings(len(settings.grid()))
-                results.add_training(task.name, family, selected, chosen, settings, epochs)
-                _validate(selected, family, inputs["validation"], targets["validation"], data, validation_plan, results)
-                if save_weights is not None:
-                    keep_state(save_weights, f"{site}.{family}", selected.state("best"))
-                accumulator = ScoreAccumulator(task.kind, selected.groups, task.outputs, plan)
-                score_bank(selected, "best", inputs["test"], targets["test"], accumulator)
-                results.add_scores(task.name, family, selected.names, accumulator, "trained", "trained", "original", True)
-                if controls is None or family != "full":
-                    continue
-                _score_controls(selected, site, slots, view, data, controls, targets["test"], scrambled, plan, gaussian_generator, results, device)
-            del loaded
-    return results
+    """Train and score every probe of one protein-level task on a pooled store under one setting."""
+    variant = Variant("", settings, results or TaskResults(), save_weights)
+    train_protein_variants(data, store, layouts, [variant], device, controls)
+    return variant.results
 
 
 def sweep_protein_task(
@@ -356,25 +432,40 @@ def sweep_protein_task(
     results: TaskResults | None = None,
 ) -> TaskResults:
     """Train every probe under every grid setting and score each on the validation split; test is never read."""
+    variant = Variant("", settings, results or TaskResults())
+    sweep_protein_variants(data, store, layouts, [variant], device)
+    return variant.results
+
+
+def sweep_protein_variants(
+    data: ConceptData,
+    store: PooledTapStore,
+    layouts: dict[str, SiteLayout],
+    variants: Sequence[Variant],
+    device: torch.device,
+) -> None:
+    """`sweep_protein_task` once per variant, each site chunk loaded once for all of them."""
     task = data.task
-    results = results or TaskResults()
+    shared = variants[0].settings
     split_rows = {split: store.rows_for(data.splits[split].sequences) for split in ("train", "validation")}
     targets = {split: data.protein_targets(split).to(device) for split in split_rows}
-    plan = ResamplePlan.draw(len(data.splits["validation"].sequences), 0, settings.resample_fraction, settings.seed, device)
+    plan = ResamplePlan.draw(len(data.splits["validation"].sequences), 0, shared.resample_fraction, shared.seed, device)
     rows_held = sum(len(rows) for rows in split_rows.values())
     for site, layout in layouts.items():
-        for part, slots in layer_chunks(layout, rows_held, settings.site_budget_gb):
+        for part, slots in _variant_chunks(layout, rows_held, variants, task.outputs):
             loaded = {split: store.load(site, rows, device, slots) for split, rows in split_rows.items()}  # each (n, L_c, 2 * w)
-            for family, names, view in families(part, settings.pooling):
-                started = time.time()
-                inputs = {split: view(values) for split, values in loaded.items()}  # (n, P, w')
-                offset = family_offset(layout, slots, family)
-                bank, epochs = fit_family(names, inputs, targets, data, settings, device, f"sweep {task.name} {site} {family}", offset)
-                validation = ScoreAccumulator(task.kind, bank.groups, task.outputs, plan, per_label=False)
-                score_bank(bank, "best", inputs["validation"], targets["validation"], validation)
-                results.add_sweep(task.name, family, bank, validation, settings, epochs, _elapsed(started, device))
+            for variant in variants:
+                settings = variant.settings
+                for family, names, view in families(part, settings.pooling):
+                    started = time.time()
+                    inputs = {split: view(values) for split, values in loaded.items()}  # (n, P, w')
+                    offset = family_offset(layout, slots, family)
+                    bank, epochs = fit_family(names, inputs, targets, data, settings, device, f"sweep {task.name} {variant.label} {site} {family}", offset)
+                    validation = ScoreAccumulator(task.kind, bank.groups, task.outputs, plan, per_label=False)
+                    score_bank(bank, "best", inputs["validation"], targets["validation"], validation)
+                    variant.results.add_sweep(task.name, family, bank, validation, settings, epochs, _elapsed(started, device))
+                    del bank
             del loaded
-    return results
 
 
 def _score_controls(

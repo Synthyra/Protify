@@ -4,15 +4,17 @@
 rotary rotation, values, the MLP's gate, up and activation states) during one forward pass. `pooled_store` writes
 their per-protein mean and variance for protein-level tasks; `residue_probing` trains residue-level probes inside
 the hooks, so token states are never stored; `token_store` keeps token states of chosen sites when they are needed.
-`probe_bank` trains every probe of a site, layer, head and hyperparameter setting at once, and `selection` picks one
-global setting from a sweep of them. Run `python -m protify.interpretability --help` for the command line.
+`probe_bank` trains every probe of a site, layer, head and hyperparameter setting at once (linear and MLP probes alike),
+and `selection` picks one global setting from a sweep of them. `protein_intervals` scores the states each probe variant
+reports on bootstrap draws of the test proteins, and `solver` refits linear ones by a converged solver. Run
+`python -m protify.interpretability --help` for the command line.
 """
 
 from .capture import capture_states, model_dims, tap_hooks
 from .concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptTask, load_concept
 from .pooled_store import PooledTapStore, embed_pooled, masked_mean_var
 from .probe_bank import ProbeBank, ProbeSettings
-from .protein_probing import sweep_protein_task, train_protein_task
+from .protein_probing import Variant, sweep_protein_task, sweep_protein_variants, train_protein_task, train_protein_variants
 from .residue_probing import sweep_residue_task, train_residue_task
 from .scores import ResamplePlan, ScoreAccumulator
 from .selection import choose_setting, rank_settings, read_sweeps
@@ -40,6 +42,7 @@ __all__ = [
     "TaskResults",
     "TokenTapStore",
     "TrainingSettings",
+    "Variant",
     "capture_states",
     "choose_setting",
     "embed_pooled",
@@ -51,8 +54,10 @@ __all__ = [
     "read_sweeps",
     "site_layouts",
     "sweep_protein_task",
+    "sweep_protein_variants",
     "sweep_residue_task",
     "tap_hooks",
     "train_protein_task",
+    "train_protein_variants",
     "train_residue_task",
 ]

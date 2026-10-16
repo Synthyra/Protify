@@ -7,7 +7,12 @@ layers are simple), which avoids autograd graphs and full-size gradient buffers 
 AdamW, as PyTorch defines it, with a learning rate and weight decay per group, so a small grid of settings trains
 side by side as extra groups and each probe keeps the setting that validates best.
 
-Symbols: n rows of a batch (proteins, or residues); G groups; w input width; m hidden width; C outputs.
+Groups that read one input share a faster path: the linear probes of a residue batch (`shared_*`), and the MLP probes
+of a protein bank, whose grid settings all read the same rows (`fused_*`), so one batched product per layer serves
+every setting.
+
+Symbols: n rows of a batch (proteins, or residues); G groups; w input width; m hidden width; C outputs; K grid
+settings; P probes of one setting.
 """
 
 from __future__ import annotations
@@ -104,6 +109,9 @@ class ProbeBank:
         self.second_moment = {name: torch.zeros_like(value) for name, value in self.params.items()}
         self.learning_rates = learning_rates.to(self.device, torch.float32)  # (G,)
         self.weight_decays = weight_decays.to(self.device, torch.float32)  # (G,)
+        # dropout masks come from the bank's own seed, so a replicate seed reproduces its run
+        self.dropout_generator = torch.Generator(device=self.device).manual_seed(seed)
+        self.operand_dtype = torch.bfloat16  # of the fused MLP path's products; float32 weights, moments and losses
         self.steps = 0
         self.mean = torch.zeros(groups, width, device=self.device)  # (G, w)
         self.inverse_std = torch.ones(groups, width, device=self.device)  # (G, w)
@@ -187,8 +195,7 @@ class ProbeBank:
         weight2, bias2 = self.params["weight2"][start:stop], self.params["bias2"][start:stop]
         pre = torch.einsum("ngw,gwm->ngm", inputs, weight1) + bias1  # (n, g, m)
         hidden = F.gelu(pre)  # (n, g, m)
-        keep = 1.0 - self.settings.dropout
-        dropped = (torch.rand_like(hidden) < keep).to(hidden.dtype) / keep if self.settings.dropout > 0 else None
+        dropped = self._dropout_mask(hidden)  # (n, g, m) or None
         hidden_used = hidden * dropped if dropped is not None else hidden  # (n, g, m)
         Z = torch.einsum("ngm,gmc->ngc", hidden_used, weight2) + bias2  # (n, g, C)
         loss, dZ = self._loss_terms(Z, targets)  # (g,), (n, g, C)
@@ -208,6 +215,97 @@ class ProbeBank:
         Z = self.logits(X, start, stop, which)  # (n, g, C)
         loss, _ = self._loss_terms(Z, targets)  # (g,)
         return loss
+
+    def _dropout_mask(self, hidden: Tensor) -> Tensor | None:
+        """Inverted-dropout scales for hidden units, drawn from the bank's generator; None without dropout."""
+        if self.settings.dropout <= 0:
+            return None
+        keep = 1.0 - self.settings.dropout
+        drawn = torch.rand(hidden.shape, generator=self.dropout_generator, device=hidden.device)  # hidden's shape
+        return (drawn < keep).to(hidden.dtype) / keep
+
+    # -- MLP probes whose grid settings read one input -------------------------------------------------------------
+    #
+    # A protein bank holds each probe once per grid setting, setting-major (K settings times P probes), and every
+    # setting's probe p reads slice p of the same rows under the same standardization. The K first layers of probe p
+    # are then one (w, K * m) matrix: the rows are standardized once, and one batched product over the P probes gives
+    # every setting's hidden units. Products run in `operand_dtype` (bf16) with float32 weights, moments and losses, as
+    # the linear shared path does; float32 operands give the per-group path's numbers.
+
+    def _packed(self, values: Tensor) -> Tensor:
+        """A contiguous copy of a permuted view in the operand dtype, in one pass."""
+        return torch.empty(values.shape, dtype=self.operand_dtype, device=values.device).copy_(values)
+
+    def _fused_inputs(self, X: Tensor, settings_count: int) -> Tensor:
+        # X: (n, P, w) -> (P, n, w) standardized, in the operand dtype
+        probes = self.groups // settings_count
+        mean = self.mean.view(settings_count, probes, self.width)[0]  # (P, w), the same in every setting
+        inverse_std = self.inverse_std.view(settings_count, probes, self.width)[0]  # (P, w)
+        standardized = (X.to(torch.float32) - mean) * inverse_std  # (n, P, w)
+        return self._packed(standardized.transpose(0, 1))  # (P, n, w)
+
+    def _fused_weights(self, which: str, settings_count: int) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """The first layers of each probe across settings, (P, w, K * m) in the operand dtype, with their biases
+        (P, 1, K * m), and the second layers (K, P, m, C) with theirs (K, P, C)."""
+        weights = self._weights(which)
+        count, probes, hidden = settings_count, self.groups // settings_count, self.settings.hidden
+        first = weights["weight1"].view(count, probes, self.width, hidden).permute(1, 2, 0, 3)  # (P, w, K, m)
+        first = self._packed(first).view(probes, self.width, count * hidden)  # (P, w, K * m)
+        first_bias = weights["bias1"].view(count, probes, hidden).transpose(0, 1).reshape(probes, 1, count * hidden)  # (P, 1, K * m)
+        second = weights["weight2"].view(count, probes, hidden, self.outputs)  # (K, P, m, C)
+        second_bias = weights["bias2"].view(count, probes, self.outputs)  # (K, P, C)
+        return first, first_bias, second, second_bias
+
+    def _fused_output(self, hidden: Tensor, second: Tensor, second_bias: Tensor) -> Tensor:
+        # hidden: (P, n, K * m) -> logits (n, K * P, C), groups setting-major
+        count, probes, width, outputs = second.shape
+        H = hidden.view(probes, hidden.shape[1], count, width).to(self.operand_dtype)  # (P, n, K, m)
+        Z = torch.einsum("pnkm,kpmc->nkpc", H, second.to(self.operand_dtype)).to(torch.float32) + second_bias  # (n, K, P, C)
+        return Z.reshape(Z.shape[0], count * probes, outputs)  # (n, G, C)
+
+    def fused_logits(self, X: Tensor, settings_count: int = 1, which: str = "current") -> Tensor:
+        """Outputs of every group of an MLP bank whose `settings_count` settings read the same rows."""
+        # X: (n, P, w) -> (n, G, C)
+        first, first_bias, second, second_bias = self._fused_weights(which, settings_count)
+        pre = torch.bmm(self._fused_inputs(X, settings_count), first).to(torch.float32) + first_bias  # (P, n, K * m)
+        return self._fused_output(F.gelu(pre), second, second_bias)
+
+    def fused_loss_sums(self, X: Tensor, targets: Tensor, settings_count: int = 1, which: str = "current") -> Tensor:
+        """Summed loss of every group over these rows: (G,)."""
+        loss, _ = self._loss_terms(self.fused_logits(X, settings_count, which), targets)
+        return loss
+
+    def fused_accumulate(self, X: Tensor, targets: Tensor, settings_count: int = 1) -> Tensor:
+        """`accumulate` for every group of an MLP bank whose settings read the same rows. Returns mean losses (G,)."""
+        # X: (n, P, w); targets: (n,) or (n, C)
+        rows = X.shape[0]
+        if rows == 0:
+            return torch.zeros(self.groups, device=self.device)
+        count, probes, hidden = settings_count, self.groups // settings_count, self.settings.hidden
+        scale = 1.0 / self._denominator(rows)
+        inputs = self._fused_inputs(X, count)  # (P, n, w)
+        first, first_bias, second, second_bias = self._fused_weights("current", count)
+        pre = torch.bmm(inputs, first).to(torch.float32) + first_bias  # (P, n, K * m)
+        activated = F.gelu(pre)  # (P, n, K * m)
+        dropped = self._dropout_mask(activated)  # (P, n, K * m) or None
+        used = activated * dropped if dropped is not None else activated  # (P, n, K * m)
+        Z = self._fused_output(used, second, second_bias)  # (n, G, C)
+        loss, dZ = self._loss_terms(Z, targets)  # (G,), (n, G, C)
+        dZ = (dZ * scale).view(rows, count, probes, self.outputs)  # (n, K, P, C)
+        self.grads["bias2"] += dZ.sum(dim=0).reshape(self.groups, self.outputs)
+        dZ = dZ.to(self.operand_dtype)
+        H = used.view(probes, rows, count, hidden).to(self.operand_dtype)  # (P, n, K, m)
+        d_second = torch.einsum("pnkm,nkpc->kpmc", H, dZ).to(torch.float32)  # (K, P, m, C)
+        self.grads["weight2"] += d_second.reshape(self.groups, hidden, self.outputs)
+        d_used = torch.einsum("nkpc,kpmc->pnkm", dZ, second.to(self.operand_dtype)).to(torch.float32)  # (P, n, K, m)
+        d_used = d_used.reshape(probes, rows, count * hidden)  # (P, n, K * m)
+        if dropped is not None:
+            d_used = d_used * dropped
+        d_pre = d_used * _gelu_grad(pre)  # (P, n, K * m)
+        d_first = torch.bmm(inputs.transpose(1, 2), d_pre.to(self.operand_dtype)).to(torch.float32)  # (P, w, K * m)
+        self.grads["weight1"] += d_first.view(probes, self.width, count, hidden).permute(2, 0, 1, 3).reshape(self.groups, self.width, hidden)
+        self.grads["bias1"] += d_pre.sum(dim=1).view(probes, count, hidden).transpose(0, 1).reshape(self.groups, hidden)
+        return loss * scale
 
     # -- linear probes that read one shared input ------------------------------------------------------------------
     #

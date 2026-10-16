@@ -30,6 +30,11 @@ from .token_batches import TokenBatch, token_batches
 STORE_FORMAT = "protify_pooled_taps_v1"
 
 
+def store_path(root: Path, plm: str, view: str, prefix: str = "") -> Path:
+    """Where a run root keeps the pooled store of one model state and input view, such as `trained_original`."""
+    return root / "stores" / f"{prefix}{plm}_{view}"
+
+
 def masked_mean_var(X: Tensor, mask: Tensor) -> Tensor:
     """Mean then population variance over the rows the mask keeps, in float32."""
     # X: (b, l, w); mask: (b, l), 1 on CLS, residues and EOS

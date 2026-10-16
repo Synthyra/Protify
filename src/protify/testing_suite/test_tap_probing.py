@@ -26,9 +26,11 @@ try:
     from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from src.protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
     from src.protify.interpretability.probe_bank import ProbeBank, ProbeSettings
-    from src.protify.interpretability.protein_probing import full_view, head_view, score_bank, validation_loss
+    from src.protify.interpretability.protein_intervals import chosen_states, draw_scores
+    from src.protify.interpretability.protein_probing import bank_layer_bytes, full_view, head_view, layer_chunks, score_bank, validation_loss
     from src.protify.interpretability.residue_probing import _mean_groups, residue_batch, score_residue_task, untrained_copy
-    from src.protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, multiclass_mcc
+    from src.protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, draw_plan, drawn_ranking, multiclass_mcc, ranking_summary
+    from src.protify.interpretability.solver import chosen_fit, penalty_path, standardized_rows
     from src.protify.interpretability.selection import choose_setting, rank_settings, read_sweeps
     from src.protify.interpretability.sites import ALL_SITES, ModelDims, TapSpec, parse_sites, site_layouts
     from src.protify.interpretability.token_batches import SPECIAL_TOKENS, group_batches, token_batches
@@ -48,9 +50,11 @@ except ImportError:
     from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
     from protify.interpretability.probe_bank import ProbeBank, ProbeSettings
-    from protify.interpretability.protein_probing import full_view, head_view, score_bank, validation_loss
+    from protify.interpretability.protein_intervals import chosen_states, draw_scores
+    from protify.interpretability.protein_probing import bank_layer_bytes, full_view, head_view, layer_chunks, score_bank, validation_loss
     from protify.interpretability.residue_probing import _mean_groups, residue_batch, score_residue_task, untrained_copy
-    from protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, multiclass_mcc
+    from protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, draw_plan, drawn_ranking, multiclass_mcc, ranking_summary
+    from protify.interpretability.solver import chosen_fit, penalty_path, standardized_rows
     from protify.interpretability.selection import choose_setting, rank_settings, read_sweeps
     from protify.interpretability.sites import ALL_SITES, ModelDims, TapSpec, parse_sites, site_layouts
     from protify.interpretability.token_batches import SPECIAL_TOKENS, group_batches, token_batches
@@ -611,6 +615,266 @@ def test_protein_shared_path_matches_the_per_group_path() -> None:
     score_bank(bank, "current", X, targets, fused)
     reference.add(torch.cat([bank.logits(X.float(), start, start + probes) for start in (0, probes)], dim=1), targets, torch.arange(rows))
     torch.testing.assert_close(fused.scores(), reference.scores(), rtol=0, atol=0.1)
+
+
+def task_targets(loss: str, rows: int, outputs: int, generator: torch.Generator) -> torch.Tensor:
+    if loss == "multiclass":
+        return torch.randint(0, outputs, (rows,), generator=generator)
+    if loss == "multilabel":
+        return (torch.rand(rows, outputs, generator=generator) > 0.5).float()
+    return torch.randn(rows, outputs, generator=generator)
+
+
+@pytest.mark.parametrize("loss", ["multiclass", "multilabel", "regression"])
+def test_fused_mlp_path_matches_the_per_setting_path(loss: str) -> None:
+    generator = torch.Generator().manual_seed(12)
+    count, probes, width, outputs, rows = 3, 4, 5, 3, 11
+    settings = TrainingSettings(learning_rates=(1e-2, 1e-3, 3e-4), weight_decays=(0.0,), probe=ProbeSettings(kind="mlp", hidden=6, dropout=0.0))
+    bank = make_bank([f"s:{layer}" for layer in range(probes)], width, outputs, loss, settings, seed=0, device=CPU)
+    for value in bank.params.values():  # distinct weights in every setting, so a mix-up between settings shows
+        value.add_(0.1 * torch.randn(value.shape, generator=generator))
+    mean = torch.randn(probes, width, generator=generator)
+    variance = torch.rand(probes, width, generator=generator) + 0.5
+    bank.set_standardization(mean.repeat(count, 1), variance.repeat(count, 1))
+    reference = ProbeBank(bank.names, width, outputs, loss, bank.settings, bank.learning_rates, bank.weight_decays, seed=0, device=CPU)
+    reference.params = {name: value.clone() for name, value in bank.params.items()}
+    reference.set_standardization(mean.repeat(count, 1), variance.repeat(count, 1))
+    X = torch.randn(rows, probes, width, generator=generator) + mean  # (n, P, w)
+    targets = task_targets(loss, rows, outputs, generator)
+    starts = range(0, count * probes, probes)
+
+    bank.operand_dtype = torch.float32
+    losses = bank.fused_accumulate(X, targets, count)
+    expected = torch.cat([reference.accumulate(X, targets, start, start + probes) for start in starts])
+    torch.testing.assert_close(losses, expected, rtol=1e-5, atol=1e-6)
+    for name in bank.grads:
+        torch.testing.assert_close(bank.grads[name], reference.grads[name], rtol=1e-4, atol=1e-6)
+    expected_Z = torch.cat([reference.logits(X, start, start + probes) for start in starts], dim=1)  # (n, K * P, C)
+    torch.testing.assert_close(bank.fused_logits(X, count), expected_Z, rtol=1e-5, atol=1e-6)
+    expected_sums = torch.cat([reference.loss_sums(X, targets, start, start + probes) for start in starts])
+    torch.testing.assert_close(bank.fused_loss_sums(X, targets, count), expected_sums, rtol=1e-5, atol=1e-5)
+    bank.operand_dtype = torch.bfloat16  # as training runs it
+    torch.testing.assert_close(bank.fused_logits(X, count), expected_Z, rtol=5e-2, atol=5e-2)
+
+
+def test_fused_dropout_drops_units_at_its_rate_from_the_banks_seed() -> None:
+    settings = TrainingSettings(learning_rates=(1e-2, 1e-3), weight_decays=(0.0,), probe=ProbeSettings(kind="mlp", hidden=64, dropout=0.3))
+    masks = [make_bank(["s:0", "s:1"], 8, 2, "multiclass", settings, seed=3, device=CPU)._dropout_mask(torch.ones(2, 400, 128)) for _ in range(2)]
+    kept = masks[0] > 0
+    assert abs(kept.float().mean().item() - 0.7) < 0.01
+    torch.testing.assert_close(masks[0][kept], torch.full((int(kept.sum()),), 1.0 / 0.7))
+    assert torch.equal(masks[0], masks[1])  # the seed decides the masks
+    assert make_bank(["s:0"], 8, 2, "multiclass", replace(settings, probe=ProbeSettings(kind="mlp", dropout=0.0)), seed=3, device=CPU)._dropout_mask(torch.ones(3)) is None
+
+
+def test_bank_budget_chunks_the_layers() -> None:
+    layout = site_layouts(TapSpec(sites=("resid_post",)), ModelDims(d=64, f=256, heads=4, blocks=6))["resid_post"]
+    settings = TrainingSettings(learning_rates=(1e-2, 1e-3), weight_decays=(0.0,), probe=ProbeSettings(kind="mlp", hidden=32))
+    per_layer = bank_layer_bytes(layout, settings, outputs=3)
+    assert per_layer == 2 * (128 * 32 + 32 + 32 * 3 + 3) * 4 * 8  # two settings, mean and variance in, eight float32 copies
+    assert bank_layer_bytes(layout, replace(settings, pooling="mean"), outputs=3) < per_layer
+    chunks = layer_chunks(layout, rows=10, budget_gb=1.0, layer_bytes=per_layer, bank_budget_gb=2.5 * per_layer / 1e9)
+    assert [slots for _, slots in chunks] == [slice(0, 2), slice(2, 4), slice(4, 6)]
+    assert len(layer_chunks(layout, rows=10, budget_gb=1.0, layer_bytes=per_layer)) == 1  # no bank budget, no bank chunks
+
+
+def test_ranking_summary_matches_sklearn_macro_averages() -> None:
+    from sklearn.metrics import average_precision_score, roc_auc_score
+
+    rng = np.random.default_rng(4)
+    rows, classes = 60, 4
+    labels = rng.integers(0, classes, rows)
+    labels[:classes] = np.arange(classes)
+    Z = torch.from_numpy(rng.normal(size=(rows, 2, classes)) + 1.5 * np.eye(classes)[labels][:, None, :]).float()  # (n, G, C)
+    summary = ranking_summary(Z, torch.from_numpy(labels), "multiclass")
+    for group in range(2):
+        probabilities = torch.softmax(Z[:, group], dim=-1).numpy()
+        assert summary["roc_auc"][group].item() == pytest.approx(roc_auc_score(labels, probabilities, multi_class="ovr", average="macro"), abs=1e-6)
+        assert summary["average_precision"][group].item() == pytest.approx(average_precision_score(np.eye(classes)[labels], probabilities, average="macro"), abs=1e-6)
+    truth = (rng.random((rows, 3)) > 0.5).astype(np.float32)
+    truth[0], truth[1] = 1.0, 0.0  # every label holds both classes
+    logits = torch.from_numpy(rng.normal(size=(rows, 2, 3)) + 2.0 * truth[:, None, :]).float()
+    summary = ranking_summary(logits, torch.from_numpy(truth), "multilabel")
+    drawn = drawn_ranking(logits, torch.from_numpy(truth), "multilabel", torch.ones(1, rows))  # the whole split as one draw
+    for group in range(2):
+        assert summary["roc_auc"][group].item() == pytest.approx(roc_auc_score(truth, logits[:, group].numpy(), average="macro"), abs=1e-6)
+        assert summary["average_precision"][group].item() == pytest.approx(average_precision_score(truth, logits[:, group].numpy(), average="macro"), abs=1e-6)
+        assert drawn["roc_auc"][group, 0].item() == pytest.approx(summary["roc_auc"][group].item(), abs=1e-9)
+        assert drawn["average_precision"][group, 0].item() == pytest.approx(summary["average_precision"][group].item(), abs=1e-9)
+        balanced = np.mean([reference_balanced_mcc(truth[:, label], logits[:, group, label].numpy()) for label in range(3)])
+        assert summary["balanced_mcc"][group].item() == pytest.approx(balanced, abs=1e-9)
+
+
+def test_draw_scores_weigh_proteins_by_their_draw_counts() -> None:
+    from sklearn.metrics import roc_auc_score
+
+    rng = np.random.default_rng(9)
+    rows, classes, replicates, draws = 40, 3, 2, 4
+    targets = torch.from_numpy(rng.integers(0, classes, rows))
+    outputs = torch.from_numpy(rng.normal(size=(replicates, rows, classes)) + 1.2 * np.eye(classes)[targets.numpy()][None]).float()  # (S, n, C)
+    counts = protein_draws(rows, draws, seed=0)  # (B, n)
+    scores = draw_scores(outputs, targets, "multiclass", counts)
+    assert set(scores) == {"score", "roc_auc", "average_precision", "balanced_mcc"}
+    assert all(values.shape == (draws + 1,) for values in scores.values())
+    assert np.isnan(scores["balanced_mcc"][1:].numpy()).all()  # balanced MCC is reported on the whole split alone
+    for draw in range(draws):
+        index = torch.arange(rows).repeat_interleave(counts[draw].long())  # the draw's proteins, repeats included
+        direct, auc = [], []
+        for replicate in range(replicates):
+            accumulator = ScoreAccumulator("multiclass", 1, classes, ResamplePlan.draw(len(index), 0))
+            accumulator.add(outputs[replicate, index].unsqueeze(1), targets[index], torch.arange(len(index)))
+            direct.append(accumulator.scores()[0, 0].item())
+            auc.append(roc_auc_score(targets[index].numpy(), torch.softmax(outputs[replicate, index], dim=-1).numpy(), multi_class="ovr", average="macro"))
+        assert scores["score"][draw + 1].item() == pytest.approx(np.mean(direct), abs=1e-9)
+        assert scores["roc_auc"][draw + 1].item() == pytest.approx(np.mean(auc), abs=1e-6)
+
+
+def test_variants_from_one_load_match_separate_runs(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path / "data")
+    names = ["localization", "go_cc", "prot_param"]
+    datasets = {name: load_concept(name, local_dir=tmp_path / "data") for name in names}
+    root = tmp_path / "run"
+    write_stores(tiny_model, tokenizer, "tiny", datasets, root, TapSpec(sites=("embedding", "resid_post")), controls=False, seed=0, max_tokens=256, device=CPU)
+    common = ["--root", str(root), "--tasks", ",".join(names), "--local-data", str(tmp_path / "data"), "--sites", "embedding,resid_post",
+              "--device", "cpu", "--lr", "3e-2", "3e-3", "--wd", "0", "--batch-size", "16", "--max-epochs", "6", "--patience", "3",
+              "--hidden", "16", "--dropout", "0.2", "--no-controls", "--seed", "5"]
+    main(["train", *common, "--probe", "linear", "mlp", "--pooling", "mean_var", "mean"])
+    main(["train", *common, "--probe", "mlp", "--pooling", "mean", "--label", "alone"])
+    main(["train", *common, "--probe", "linear", "--label", "linear_alone"])
+    for name in names:
+        for joint, alone in (("mlp_mean", "alone"), ("linear", "linear_alone")):
+            for table in ("scores", "training", "validation"):
+                pd.testing.assert_frame_equal(pd.read_parquet(root / "results" / joint / name / f"{table}.parquet"),
+                                              pd.read_parquet(root / "results" / alone / name / f"{table}.parquet"))
+        record = json.loads((root / "results" / "mlp_mean" / name / "run.json").read_text(encoding="utf-8"))
+        assert record["pooling"] == "mean" and record["settings"]["probe"]["kind"] == "mlp" and record["variants"] == 4
+        weights = load_file(str(root / "results" / "mlp_mean" / name / "probes.safetensors"))
+        assert weights["embedding.full.best.weight1"].shape == (1, 64, 16)  # the mean columns alone
+        assert load_file(str(root / "results" / "mlp" / name / "probes.safetensors"))["resid_post.full.best.weight1"].shape == (3, 128, 16)
+        training = pd.read_parquet(root / "results" / "mlp" / name / "training.parquet")
+        assert set(training["probe_kind"]) == {"mlp"} and set(training["hidden"]) == {16.0} and set(training["pooling"]) == {"mean_var"}
+        ranking = root / "results" / "mlp" / name / "ranking.parquet"
+        if datasets[name].task.kind == "regression":
+            assert not ranking.exists()
+            continue
+        table = pd.read_parquet(ranking)
+        assert set(table["split"]) == {"validation", "test"} and set(table["family"]) == {"full"}
+        assert table[["roc_auc", "average_precision", "balanced_mcc"]].notna().all().all()
+    with pytest.raises(SystemExit):  # train takes one hidden width
+        main(["train", *common, "--probe", "mlp", "--hidden", "16", "32", "--label", "two"])
+    # a variants file gives each variant its own selected setting
+    chosen = [{"label": "picked_mlp", "probe": "mlp", "pooling": "mean", "hidden": 8, "dropout": 0.3, "lr": [1e-2], "wd": [0.1], "batch_size": 32},
+              {"label": "picked_linear", "probe": "linear", "pooling": "mean_var", "lr": [3e-3]}]
+    (tmp_path / "variants.json").write_text(json.dumps(chosen), encoding="utf-8")
+    main(["train", *common, "--variants", str(tmp_path / "variants.json")])
+    mlp = json.loads((root / "results" / "picked_mlp" / "go_cc" / "run.json").read_text(encoding="utf-8"))["settings"]
+    assert mlp["probe"]["hidden"] == 8 and mlp["probe"]["dropout"] == 0.3 and mlp["learning_rates"] == [1e-2] and mlp["batch_size"] == 32
+    assert mlp["pooling"] == "mean" and mlp["weight_decays"] == [0.1]
+    linear = json.loads((root / "results" / "picked_linear" / "go_cc" / "run.json").read_text(encoding="utf-8"))["settings"]
+    assert linear["probe"]["kind"] == "linear" and linear["learning_rates"] == [3e-3] and linear["batch_size"] == 16 and linear["weight_decays"] == [0.0]
+
+
+def test_a_raw_pass_writes_the_normalized_twin(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path / "data")
+    protein = {"localization": load_concept("localization", local_dir=tmp_path / "data")}
+    spec = TapSpec(sites=("embedding", "resid_post"))
+    write_stores(tiny_model, tokenizer, "tiny", protein, tmp_path / "raw", spec, controls=False, seed=0, max_tokens=256, device=CPU, normalized_twin=tmp_path / "twin")
+    write_stores(tiny_model, tokenizer, "tiny", protein, tmp_path / "alone", spec, controls=False, seed=0, max_tokens=256, device=CPU, normalize=True)
+    raw, twin, alone = (PooledTapStore(store_path(tmp_path / name, "trained", "original")) for name in ("raw", "twin", "alone"))
+    assert not raw.manifest.normalized and twin.manifest.normalized
+    rows = twin.rows_for(protein["localization"].splits["test"].sequences)
+    for site in ("embedding", "resid_post"):
+        assert torch.equal(twin.load(site, rows), alone.load(site, rows))
+    with pytest.raises(SystemExit):
+        store_passes(protein, tmp_path / "raw", controls=False, seed=0, normalize=True, normalized_twin=tmp_path / "twin")
+
+
+def test_mlp_sweeps_of_replicates_then_select(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path / "data")
+    names = ["localization", "go_cc"]
+    datasets = {name: load_concept(name, local_dir=tmp_path / "data") for name in names}
+    roots = [tmp_path / f"run_s{seed}" for seed in (0, 1)]
+    for seed, root in zip((0, 1), roots):
+        write_stores(tiny_model, tokenizer, "tiny", datasets, root, TapSpec(sites=("embedding", "resid_post")), controls=False, seed=0, max_tokens=256, device=CPU)
+        main(["sweep", "--root", str(root), "--tasks", ",".join(names), "--local-data", str(tmp_path / "data"), "--sites", "embedding,resid_post",
+              "--device", "cpu", "--lr", "3e-2", "3e-3", "--wd", "0", "0.1", "--batch-size", "16", "--max-epochs", "4", "--patience", "2",
+              "--probe", "mlp", "--pooling", "mean_var", "mean", "--hidden", "8", "16", "--dropout", "0.1", "0.3", "--label", "p", "--seed", str(seed)])
+    sweep = pd.read_parquet(roots[0] / "sweeps" / "p_mlp" / "go_cc" / "sweep.parquet")
+    assert len(sweep) == 4 * 4 * (1 + 3)  # lr x wd, hidden x dropout, embedding and three blocks
+    assert set(sweep["hidden"]) == {8.0, 16.0} and set(sweep["dropout"]) == {0.1, 0.3} and set(sweep["pooling"]) == {"mean_var"}
+    sweeps = read_sweeps(roots, ["p_mlp"])
+    assert set(sweeps["replicate"]) == {0, 1}
+    ranked = rank_settings(sweeps)
+    assert len(ranked) == 16 and ranked["mean_shortfall"].min() >= 0.0
+    main(["select", "--root", *map(str, roots), "--labels", "p_mlp_mean", "--loss", "classification"])
+    record = json.loads((roots[0] / "sweeps" / "selection_p_mlp_mean_classification.json").read_text(encoding="utf-8"))
+    assert record["chosen"]["hidden"] in (8.0, 16.0) and len(record["roots"]) == 2
+
+
+def test_selection_averages_replicates_and_prefers_narrow_layers_within_tolerance() -> None:
+    rows = []
+    for replicate, lift in ((0, 0.0), (1, 0.01)):
+        for hidden, rate, score in ((256.0, 1e-3, 0.800), (512.0, 1e-3, 0.802), (256.0, 1e-2, 0.70), (512.0, 1e-2, 0.75)):
+            for probe in ("p:0", "p:1"):
+                rows.append({"replicate": replicate, "label": "mlp", "task": "a", "family": "full", "probe_name": probe, "hidden": hidden,
+                             "dropout": 0.1, "learning_rate": rate, "weight_decay": 0.0, "validation_score": score + lift,
+                             "task_seconds": 10.0, "batch_size": 256, "max_tokens": 0})
+    ranked = rank_settings(pd.DataFrame(rows))
+    assert ranked.iloc[0]["hidden"] == 512.0 and ranked.iloc[0]["mean_shortfall"] == pytest.approx(0.0)
+    assert choose_setting(ranked, tolerance=0.005)["hidden"] == 256.0  # 0.002 behind, and narrower
+    assert choose_setting(ranked, tolerance=0.001)["hidden"] == 512.0
+
+
+def test_protein_intervals_and_the_solver_share_the_draws(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path / "data")
+    names = ["localization", "go_cc", "prot_param", "metal_ion_binding"]
+    datasets = {name: load_concept(name, local_dir=tmp_path / "data") for name in names}
+    roots = [tmp_path / f"run_s{seed}" for seed in (0, 1)]
+    data = ["--local-data", str(tmp_path / "data"), "--tasks", ",".join(names), "--device", "cpu"]
+    write_stores(tiny_model, tokenizer, "tiny", datasets, roots[0], TapSpec(sites=("embedding", "resid_post")), controls=False, seed=0, max_tokens=256, device=CPU)
+    roots[1].mkdir()
+    (roots[1] / "stores").symlink_to(roots[0] / "stores", target_is_directory=True)  # a replicate reads the same stores
+    for seed, root in zip((0, 1), roots):
+        main(["train", "--root", str(root), *data, "--sites", "embedding,resid_post", "--lr", "3e-2", "--wd", "0", "--batch-size", "16",
+              "--max-epochs", "6", "--patience", "3", "--hidden", "16", "--no-controls", "--seed", str(seed),
+              "--probe", "linear", "mlp", "--pooling", "mean_var", "mean"])
+    labels = ["linear", "linear_mean", "mlp", "mlp_mean"]
+    out = tmp_path / "intervals"
+    main(["protein-intervals", "--roots", *map(str, roots), "--labels", *labels, "--out", str(out), "--draws", "30", *data])
+    for name in names:
+        table = pd.read_parquet(out / f"{name}.parquet")
+        assert set(table["label"]) == set(labels) and set(table["choice"]) == {"stream", "any"}
+        assert set(table["draw"]) == set(range(-1, 30))
+        regression = datasets[name].task.kind == "regression"
+        assert set(table["metric"]) == ({"score"} if regression else {"score", "roc_auc", "average_precision", "balanced_mcc"})
+        for label in labels:
+            chosen = chosen_states(roots, label, name)["any"]
+            tested = []
+            for root in roots:
+                scores = pd.read_parquet(root / "results" / label / name / "scores.parquet")
+                tested.append(float(scores[(scores["family"] == "full") & (scores["probe_name"] == chosen) & (scores["resample"] == 0)
+                                           & (scores["control"] == "original")]["score"].iloc[0]))
+            whole = table[(table["label"] == label) & (table["choice"] == "any") & (table["metric"] == "score") & (table["draw"] == -1)]["value"]
+            assert whole.iloc[0] == pytest.approx(np.mean(tested), abs=1e-6)  # the whole split's score is the replicates' mean test score
+    first = pd.read_parquet(out / "localization.parquet")
+    main(["protein-intervals", "--roots", *map(str, roots), "--labels", *labels, "--out", str(out), "--draws", "30", "--overwrite", *data])
+    pd.testing.assert_frame_equal(pd.read_parquet(out / "localization.parquet"), first)  # the draws are fixed by their seed
+
+    solved = tmp_path / "solver"
+    main(["solve", "--roots", *map(str, roots), "--out", str(solved), "--draws", "30", *data])
+    for name in names:
+        table = pd.read_parquet(solved / f"{name}.parquet")
+        assert set(table["label"]) == {"linear_solver", "linear_mean_solver"}
+        adamw = pd.read_parquet(out / f"{name}.parquet")
+        pairs = table[["label", "choice", "probe_name"]].drop_duplicates().assign(label=lambda frame: frame["label"].str.removesuffix("_solver"))
+        assert set(map(tuple, pairs.to_numpy())) <= set(map(tuple, adamw[["label", "choice", "probe_name"]].drop_duplicates().to_numpy()))
+        fits = pd.read_parquet(solved / f"{name}_fits.parquet")
+        assert fits.groupby(["label", "probe_name"])["chosen"].sum().eq(1).all()  # replicates sharing a store share one fit
+        assert fits["root"].nunique() == 1
+    store = PooledTapStore(store_path(roots[0], "trained", "original"))
+    rows = standardized_rows(store, "embedding:0", datasets["localization"], "mean_var", CPU)
+    targets = {split: datasets["localization"].protein_targets(split) for split in ("train", "validation", "test")}
+    assert chosen_fit(penalty_path(datasets["localization"], rows, targets))["validation"] > 0.8
 
 
 def test_selection_prefers_the_fastest_label_within_tolerance() -> None:

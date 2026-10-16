@@ -4,18 +4,32 @@ Scores are accumulated protein by protein, so a half is just a weighted sum of p
 resample axis is the full split and rows 1..R are fixed random halves (R = 7 by default). Classification keeps
 confusion counts and reports the Matthews correlation coefficient; regression keeps cosine terms and reports the
 mean per-protein cosine similarity between the predicted and true standardized vectors, plus each target's cosine
-across proteins.
+across proteins. The resample weights may be any nonnegative counts, so bootstrap draws of the test proteins (counts
+from `protein_draws`) score the same way.
 
-Symbols: n rows (proteins, or residues); p proteins of a batch; g groups; C outputs; R resamples; P test proteins.
+Ranking metrics sit beside the counts: ROC AUC, average precision and Atlas's balanced MCC of binary scores, and their
+macro means over the labels of a protein task (`ranking_summary`, `drawn_ranking`), a multiclass task's classes taken
+one against the rest.
+
+Symbols: n rows (proteins, or residues); p proteins of a batch; g groups; C outputs; R resamples; P test proteins;
+B bootstrap draws; L labels ranked.
 """
 
 from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from dataclasses import dataclass
 from torch import Tensor
+
+
+BALANCED_VIEWS = 10  # class-balanced views of an unbalanced split, for balanced MCC
+METRIC_CHUNK = 32  # probes whose rankings are computed at once
+INTERVAL_DRAWS = 1000  # bootstrap draws of the test proteins, for intervals
+INTERVAL_SEED = 0  # one seed for every run, so that every probe and model shares the draws
+RANKING_METRICS = ("roc_auc", "average_precision", "balanced_mcc")
 
 
 @dataclass(frozen=True)
@@ -168,3 +182,158 @@ class ScoreAccumulator:
             products, predicted, truth = self.terms.unbind(dim=-1)
             return products / torch.sqrt(predicted * truth).clamp_min(1e-300)
         return None
+
+
+def draw_plan(counts: Tensor) -> ResamplePlan:
+    """A plan whose row 0 is the whole split and rows 1..B are bootstrap draws of its proteins (`protein_draws`)."""
+    # counts: (B, P)
+    return ResamplePlan(torch.cat([torch.ones(1, counts.shape[1], dtype=counts.dtype, device=counts.device), counts]))  # (B + 1, P)
+
+
+# -- ranking metrics ---------------------------------------------------------------------------------------------
+
+
+def ranking_metrics(scores: Tensor, labels: Tensor, chunk: int = METRIC_CHUNK) -> tuple[Tensor, Tensor]:
+    """ROC AUC and average precision of each column of `scores` against binary `labels`, as scikit-learn computes them
+    for untied scores, `chunk` columns at a time."""
+    # scores: (n, G); labels: (n,) 0 or 1
+    roc_aucs, precisions = [], []
+    ranks = torch.arange(1, scores.shape[0] + 1, dtype=torch.float64, device=scores.device).unsqueeze(1)  # (n, 1)
+    for start in range(0, scores.shape[1], chunk):
+        order = scores[:, start: start + chunk].argsort(dim=0, descending=True)  # (n, g)
+        hits = labels.to(torch.float64)[order]  # (n, g), 1 where the k-th highest score belongs to a positive
+        positives = hits.sum(dim=0)  # (g,)
+        negatives = scores.shape[0] - positives
+        true_positives = hits.cumsum(dim=0)  # (n, g)
+        precisions.append((true_positives / ranks * hits).sum(dim=0) / positives.clamp_min(1))
+        negatives_above = (1.0 - hits).cumsum(dim=0)  # (n, g), negatives ranked at or above each row
+        roc_aucs.append(((negatives - negatives_above) * hits).sum(dim=0) / (positives * negatives).clamp_min(1))
+    return torch.cat(roc_aucs), torch.cat(precisions)
+
+
+def threshold_mcc(scores: Tensor, labels: Tensor) -> Tensor:
+    """MCC of each column of logits `scores` at probability 0.5 (a logit of 0 or more predicts a positive)."""
+    # scores: (n, G); labels: (n,) 0 or 1
+    predicted, positive = scores >= 0, labels.to(torch.bool).unsqueeze(1)  # (n, G), (n, 1)
+    masks = (predicted & positive, predicted & ~positive, ~predicted & positive, ~predicted & ~positive)
+    return binary_mcc(torch.stack([mask.sum(dim=0, dtype=torch.float64) for mask in masks], dim=-1))  # (G,)
+
+
+def balanced_views(labels: np.ndarray, seed: int = 0, subsamples: int = BALANCED_VIEWS) -> list[np.ndarray]:
+    """Index sets of class-balanced views, drawn as Atlas draws them: the majority class downsampled without
+    replacement to the minority's size, view i from seed `seed + 11 * (i + 1)`; a balanced split is its own one view."""
+    # labels: (n,) 0 or 1
+    positive, negative = np.flatnonzero(labels == 1), np.flatnonzero(labels == 0)
+    if len(positive) == len(negative):
+        return [np.arange(len(labels))]
+    majority, minority = (negative, positive) if len(negative) > len(positive) else (positive, negative)
+    return [np.concatenate([minority, np.random.default_rng(seed + 11 * (view + 1)).choice(majority, size=len(minority), replace=False)])
+            for view in range(subsamples)]
+
+
+def balanced_mcc(scores: Tensor, labels: Tensor, seed: int = 0, subsamples: int = BALANCED_VIEWS, chunk: int = METRIC_CHUNK) -> Tensor:
+    """Balanced MCC of each column of `scores`, as Atlas defines it: the MCC at the one threshold that maximizes its mean
+    over the class-balanced views (`balanced_views`), a score at or above the threshold predicting a positive. Every
+    score is a candidate threshold, which reaches every count any view can show."""
+    # scores: (n, G); labels: (n,) 0 or 1
+    views = balanced_views(labels.cpu().numpy(), seed, subsamples)
+    member = torch.zeros((len(views), scores.shape[0]), dtype=torch.bool, device=scores.device)  # (V, n)
+    for row, view in enumerate(views):
+        member[row, torch.as_tensor(view, device=scores.device)] = True
+    positive = labels.to(torch.bool)  # (n,)
+    out = []
+    for start in range(0, scores.shape[1], chunk):
+        ordered, order = scores[:, start: start + chunk].sort(dim=0, descending=True)  # (n, g)
+        cut = torch.ones_like(ordered, dtype=torch.bool)  # (n, g), the last row of each run of equal scores
+        cut[:-1] = ordered[:-1] != ordered[1:]
+        hit = positive[order]  # (n, g)
+        mean = torch.zeros(ordered.shape, dtype=torch.float64, device=scores.device)  # (n, g)
+        for inside in member:
+            kept = inside[order]  # (n, g)
+            tp = (hit & kept).cumsum(dim=0, dtype=torch.float64)  # (n, g), the view's positives at or above each cut
+            fp = (~hit & kept).cumsum(dim=0, dtype=torch.float64)
+            counts = torch.stack([tp, fp, float((positive & inside).sum()) - tp, float((~positive & inside).sum()) - fp], dim=-1)  # (n, g, 4)
+            mean += binary_mcc(counts) / len(member)
+        out.append(mean.masked_fill(~cut, -torch.inf).max(dim=0).values)
+    return torch.cat(out)  # (G,)
+
+
+def protein_draws(proteins: int, draws: int = INTERVAL_DRAWS, seed: int = INTERVAL_SEED) -> Tensor:
+    """Each protein's count in each of `draws` bootstrap draws of a split's `proteins` proteins, taken with
+    replacement on the CPU from `seed`, so that every probe and model shares them: (draws, proteins)."""
+    picks = torch.randint(0, proteins, (draws, proteins), generator=torch.Generator().manual_seed(seed))  # (B, u)
+    return torch.zeros(draws, proteins).scatter_add_(1, picks, torch.ones(draws, proteins))  # (B, u)
+
+
+def weighted_ranking_metrics(scores: Tensor, labels: Tensor, weights: Tensor) -> tuple[Tensor, Tensor]:
+    """ROC AUC and average precision of each column of `scores` under each row of `weights`, as scikit-learn computes
+    them with sample weights (a run of tied scores is one threshold): (G, B) each, NaN where a row weighs one class
+    alone."""
+    # scores: (n, G); labels: (n,) 0 or 1; weights: (B, n), nonnegative
+    hit = labels.to(device=scores.device, dtype=torch.float64)  # (n,)
+    weights = weights.to(device=scores.device, dtype=torch.float64)
+    roc_aucs, precisions = [], []
+    for column in scores.T:
+        ordered, order = column.sort(descending=True)  # (n,)
+        ends = torch.ones_like(ordered, dtype=torch.bool)  # (n,), the last row of each run of equal scores
+        ends[:-1] = ordered[:-1] != ordered[1:]
+        weight = weights[:, order]  # (B, n)
+        tp = (weight * hit[order]).cumsum(dim=1)[:, ends]  # (B, r), positive weight at or above each threshold
+        fp = (weight * (1.0 - hit[order])).cumsum(dim=1)[:, ends]
+        tp_above, fp_above = F.pad(tp[:, :-1], (1, 0)), F.pad(fp[:, :-1], (1, 0))  # (B, r), at the threshold before
+        positives, negatives = tp[:, -1], fp[:, -1]  # (B,)
+        both = (positives > 0) & (negatives > 0)
+        area = ((fp - fp_above) * (tp + tp_above)).sum(dim=1) / 2  # trapezoids between thresholds
+        precision = torch.where(tp + fp > 0, tp / (tp + fp).clamp_min(1e-300), 0.0)  # (B, r)
+        roc_aucs.append(torch.where(both, area / (positives * negatives).clamp_min(1e-300), torch.nan))
+        precisions.append(torch.where(both, ((tp - tp_above) * precision).sum(dim=1) / positives.clamp_min(1e-300), torch.nan))
+    return torch.stack(roc_aucs), torch.stack(precisions)  # (G, B), (G, B)
+
+
+def label_scores(Z: Tensor, targets: Tensor, kind: str) -> tuple[Tensor, Tensor]:
+    """One binary ranking problem per label of a protein task: its scores and its 0/1 labels. A multiclass task's
+    labels are its classes, one against the rest, ranked by log-probability; a binary or multilabel task's are its
+    outputs, ranked by logit."""
+    # Z: (n, G, C) logits; targets: (n,) classes, or (n, C) 0/1 -> scores (n, G, L), labels (n, L)
+    if kind == "multiclass":
+        return torch.log_softmax(Z.to(torch.float32), dim=-1), F.one_hot(targets.long(), Z.shape[-1])
+    return Z.to(torch.float32), targets.reshape(Z.shape[0], -1)
+
+
+def ranked_labels(labels: Tensor) -> list[int]:
+    """The labels a split holds both classes of, the only ones a ranking metric is defined for."""
+    # labels: (n, L) 0 or 1
+    positives = labels.sum(dim=0)  # (L,)
+    return torch.nonzero((positives > 0) & (positives < labels.shape[0])).flatten().tolist()
+
+
+def ranking_summary(Z: Tensor, targets: Tensor, kind: str) -> dict[str, Tensor]:
+    """Macro ROC AUC, average precision and balanced MCC of each group of a classification task, over the labels the
+    split holds both classes of: (G,) each, NaN when it holds none."""
+    # Z: (n, G, C) logits; targets: (n,) or (n, C)
+    scores, labels = label_scores(Z, targets, kind)  # (n, G, L), (n, L)
+    kept = ranked_labels(labels)
+    totals = {name: torch.zeros(Z.shape[1], dtype=torch.float64, device=Z.device) for name in RANKING_METRICS}  # (G,) each
+    for label in kept:
+        column, truth = scores[..., label], labels[:, label]  # (n, G), (n,)
+        roc_auc, average_precision = ranking_metrics(column, truth)
+        totals["roc_auc"] += roc_auc
+        totals["average_precision"] += average_precision
+        totals["balanced_mcc"] += balanced_mcc(column, truth)
+    return {name: total / len(kept) if kept else torch.full_like(total, torch.nan) for name, total in totals.items()}
+
+
+def drawn_ranking(Z: Tensor, targets: Tensor, kind: str, weights: Tensor) -> dict[str, Tensor]:
+    """Macro ROC AUC and average precision of each group under each row of `weights` (whole split and bootstrap
+    draws, `draw_plan`): (G, B) each. A label that a draw holds one class of is left out of that draw's mean."""
+    # Z: (n, G, C) logits; targets: (n,) or (n, C); weights: (B, n)
+    scores, labels = label_scores(Z, targets, kind)  # (n, G, L), (n, L)
+    shape = (Z.shape[1], weights.shape[0])
+    sums = {name: torch.zeros(shape, dtype=torch.float64, device=Z.device) for name in ("roc_auc", "average_precision")}  # (G, B) each
+    counts = {name: torch.zeros(shape, dtype=torch.float64, device=Z.device) for name in sums}
+    for label in ranked_labels(labels):
+        for name, values in zip(sums, weighted_ranking_metrics(scores[..., label], labels[:, label], weights)):  # (G, B) each
+            defined = ~values.isnan()
+            sums[name] += torch.where(defined, values, 0.0)
+            counts[name] += defined
+    return {name: torch.where(counts[name] > 0, sums[name] / counts[name].clamp_min(1), torch.nan) for name in sums}

@@ -6,6 +6,8 @@
     python -m protify.interpretability train  --root RUN [--tasks all] [--lr 1e-3 ...] [--probe linear]
     python -m protify.interpretability validate --root RUN [--label linear]
     python -m protify.interpretability intervals --root RUN [--tasks ppi,ppi2] [--draws 1000]
+    python -m protify.interpretability protein-intervals --roots RUN RUN_2 RUN_3 --labels linear linear_mean mlp mlp_mean --out DIR
+    python -m protify.interpretability solve --roots RUN RUN_2 RUN_3 --labels linear linear_mean --out DIR
     python -m protify.interpretability phospho --root RUN [--proteins 1000]
     python -m protify.interpretability pca    --root RUN --tasks interpro_family --sites resid_post --layers 0,5,10,15,20
     python -m protify.interpretability figures --roots RUN [RUN_2 ...] [--random-roots RANDOM ...] --out FIGURES
@@ -21,7 +23,15 @@ and scores every probe of each task: protein tasks from the stores, residue task
 Results go to `RUN/results/<label>/<task>/` as parquet tables and a safetensors file of the selected probe weights;
 `validation.parquet` holds each probe's validation score, which best states are chosen by, and `validate` adds it to
 runs trained before `train` wrote it. `intervals` adds bootstrap intervals over the test proteins to finished pair
-tasks (`intervals.parquet`).
+tasks (`intervals.parquet`). For the protein tasks, `protein-intervals` scores the states each results label reports
+(best residual stream and best site, chosen on validation averaged over seed replicates) on bootstrap draws of the test
+proteins shared by every label, model and replicate, and `solve` refits the linear labels' states by a converged
+solver and scores them on the same draws.
+
+`train` and `sweep` take several `--probe` kinds and `--pooling` choices, and a sweep several MLP `--hidden` widths and
+`--dropout` rates: the protein tasks train every combination from one load of each site chunk, each under its own
+label (`linear`, `linear_mean`, `mlp`, `mlp_mean`, after `--label` as a prefix). `select` takes one root per seed
+replicate and averages their shortfalls. `--wandb-project` logs a `train` run through `foundry.logging`.
 `phospho` runs the phosphomimetic scanning test, `pca` writes principal coordinates of pooled states by label set,
 `figures` draws every figure and summary table the runs' tables support, `compare` sets variants of the analysis
 (normalized inputs, mean-only pooling) against a reference, and `trends` sets models side by side on a relative depth
@@ -55,16 +65,19 @@ from .concepts import ALL_TASKS, DEFAULT_REPO, PROTEIN_TASKS, RESIDUE_TASKS, Con
 from .capture import model_dims
 from .interventions import paired_tests, run_phospho_interventions
 from .latent import label_sets, project_layers
-from .pairs import INTERVAL_DRAWS, INTERVAL_SEED, PAIR_SOURCES, PAIR_TASK, PAIR_TASKS, PairData, load_pairs, pair_intervals, pair_prefix, sweep_pair_task, train_pair_task, validate_pair_task
-from .pooled_store import PooledTapStore, embed_pooled
+from .pairs import PAIR_SOURCES, PAIR_TASK, PAIR_TASKS, PairData, load_pairs, pair_intervals, pair_prefix, sweep_pair_task, train_pair_task, validate_pair_task
+from .pooled_store import PooledTapStore, embed_pooled, store_path
 from .probe_bank import ProbeBank, ProbeSettings
-from .protein_probing import ControlStores, sweep_protein_task, train_protein_task, validate_protein_task
+from .protein_intervals import protein_intervals
+from .protein_probing import ControlStores, Variant, sweep_protein_variants, train_protein_variants, validate_protein_task
 from .residue_probing import sweep_residue_task, train_residue_task, untrained_copy, validate_residue_task
+from .scores import INTERVAL_DRAWS, INTERVAL_SEED
 from .selection import choose_setting, rank_settings, read_sweeps, task_optima
 from .sites import ModelDims, SiteLayout, TapSpec, parse_sites, site_layouts
+from .solver import solve_tasks
 from .token_batches import TokenBatch, token_batches
 from .token_store import embed_tokens
-from .training import TaskResults, TrainingSettings, restore_bank
+from .training import TaskResults, TrainingSettings, recorded_settings, recorded_spec, restore_bank
 
 
 STORE_VARIANTS = (
@@ -145,10 +158,6 @@ def load_tasks(tasks: Sequence[str], args: argparse.Namespace) -> dict[str, Conc
     return {name: load_task(name, args) for name in tasks}
 
 
-def store_path(root: Path, plm: str, view: str, prefix: str = "") -> Path:
-    return root / "stores" / f"{prefix}{plm}_{view}"
-
-
 def stored_layouts(store: PooledTapStore, spec: TapSpec) -> dict[str, SiteLayout]:
     """The layouts of the spec's sites as the store holds them: the store's layers, whatever blocks the spec names."""
     dims = ModelDims(**store.manifest.dims)
@@ -187,13 +196,15 @@ def store_passes(
     normalize: bool = False,
     untrained: bool = True,
     prefix: str = "",
+    normalized_twin: Path | None = None,
 ) -> list[StorePass]:
     """(model state, sequences, store roots, input transform) of each forward pass the stores need.
 
     With `normalize`, every store pools L2-normalized token states, so the `original` and `scrambled` stores are the
     normalized variant's inputs and the `l2_normalized` control would equal `original`: it gets no store of its own, and
     `control_stores` reads `original` for it. Without `untrained`, the control stores are the trained model's alone.
-    `prefix` names a task family's own stores, such as a pair task's."""
+    `prefix` names a task family's own stores, such as a pair task's. `normalized_twin`, another run root, gets the
+    normalized `original` store of a raw root from the same forward pass."""
     every = sorted({sequence for data in datasets.values() for split in data.splits.values() for sequence in split.sequences})
     tested = sorted({sequence for data in datasets.values() for sequence in data.splits["test"].sequences})
 
@@ -204,6 +215,10 @@ def store_passes(
         return store_path(root, plm, view, prefix)
 
     passes: list[StorePass] = [("trained", every, {normalize: path("trained", "original")}, None)]
+    if normalized_twin is not None:
+        if normalize:
+            raise SystemExit("--normalized-root takes the normalized twin of a raw root; leave out --normalize.")
+        passes[0][2][True] = store_path(normalized_twin, "trained", "original", prefix)
     if controls:
         if not normalize:
             passes.append(("trained", tested, {True: path("trained", "l2_normalized")}, None))
@@ -233,13 +248,14 @@ def write_stores(
     normalize: bool = False,
     untrained: bool = True,
     prefix: str = "",
+    normalized_twin: Path | None = None,
 ) -> None:
     """The pooled stores of the protein tasks (or, with a `prefix`, of the pair task's proteins): every sequence under
-    the trained model, and the control stores.
+    the trained model, and the control stores; with `normalized_twin`, that root's normalized store from the same pass.
 
     With a `foundry.pilot.Pilot`, only the first pass runs, under the pilot's watch, and its store is left incomplete.
     """
-    passes = store_passes(datasets, root, controls, seed, normalize, untrained, prefix)
+    passes = store_passes(datasets, root, controls, seed, normalize, untrained, prefix, normalized_twin)
     if pilot is not None:
         pilot.total_steps = sum(len(token_batches(sorted(set(sequences), key=len, reverse=True), max_tokens)) for _, sequences, _, _ in passes)
         _, sequences, roots, _ = passes[0]
@@ -279,16 +295,18 @@ def command_embed(args: argparse.Namespace) -> None:
     model, tokenizer = load_model(args.model, device, random_init=args.random_init, seed=args.seed)
     untrained = not args.no_untrained
     protein = [name for name in tasks if name in PROTEIN_TASKS]
+    twin = Path(args.normalized_root) if args.normalized_root else None
     if protein:
         write_stores(model, tokenizer, model_label(args), load_tasks(protein, args), Path(args.root), spec, args.controls, args.seed,
-                     args.max_tokens, device, pilot, args.normalize, untrained)
+                     args.max_tokens, device, pilot, args.normalize, untrained, normalized_twin=twin)
     for name in (name for name in tasks if name in PAIR_SOURCES and pilot is None):
         write_stores(model, tokenizer, model_label(args), load_tasks([name], args), Path(args.root), spec, args.controls, args.seed,
                      args.max_tokens, device, None, args.normalize, untrained, pair_prefix(name))
 
 
 def training_settings(args: argparse.Namespace) -> TrainingSettings:
-    probe = ProbeSettings(kind=args.probe, hidden=args.hidden, dropout=args.dropout)
+    """The settings of the first variant the arguments name (`training_variants` gives them all)."""
+    probe = ProbeSettings(kind=args.probe[0], hidden=args.hidden[0], dropout=args.dropout[0])
     return TrainingSettings(
         learning_rates=tuple(args.lr),
         weight_decays=tuple(args.wd),
@@ -301,10 +319,55 @@ def training_settings(args: argparse.Namespace) -> TrainingSettings:
         controls=not args.no_controls,
         probe=probe,
         normalize=args.normalize,
-        pooling=args.pooling,
+        pooling=args.pooling[0],
         untrained_controls=not args.no_untrained,
         site_budget_gb=args.site_budget_gb,
+        bank_budget_gb=args.bank_budget_gb,
     )
+
+
+def variant_label(label: str | None, kind: str, pooling: str, several: bool) -> str:
+    """A variant's results label: the one given when the arguments name one variant, else `<kind>[_mean]` after the
+    given label as a prefix (`linear`, `linear_mean`, `mlp`, `mlp_mean`, or `p_b256_mlp_mean`)."""
+    name = f"{kind}_mean" if pooling == "mean" else kind
+    if label is None:
+        return name
+    return f"{label}_{name}" if several else label
+
+
+def file_variant(entry: dict[str, object], base: TrainingSettings) -> Variant:
+    """One variant of a `--variants` file: `label`, `probe`, `pooling`, and optionally `hidden`, `dropout`, `lr`, `wd` and
+    `batch_size`, each variant's own selection; anything left out is the command line's."""
+    probe = ProbeSettings(kind=entry["probe"], hidden=int(entry.get("hidden", base.probe.hidden)), dropout=float(entry.get("dropout", base.probe.dropout)))
+    settings = replace(
+        base,
+        probe=probe,
+        pooling=entry["pooling"],
+        learning_rates=tuple(float(rate) for rate in entry.get("lr", base.learning_rates)),
+        weight_decays=tuple(float(decay) for decay in entry.get("wd", base.weight_decays)),
+        batch_size=int(entry.get("batch_size", base.batch_size)),
+    )
+    return Variant(str(entry["label"]), settings)
+
+
+def training_variants(args: argparse.Namespace, sweep: bool) -> list[Variant]:
+    """Every (probe kind, pooling, hidden width, dropout) the arguments name, each with its label and settings. An MLP
+    variant takes every hidden width and dropout under one label in a sweep, which ranks them as settings; `train`
+    takes one of each."""
+    base = training_settings(args)
+    if args.variants:
+        return [file_variant(entry, base) for entry in json.loads(Path(args.variants).read_text(encoding="utf-8"))]
+    several = len(args.probe) * len(args.pooling) > 1
+    shapes = [(hidden, dropout) for hidden in args.hidden for dropout in args.dropout]
+    if not sweep and "mlp" in args.probe and len(shapes) > 1:
+        raise SystemExit("train takes one --hidden and one --dropout; sweep them first and train under the selection.")
+    variants = []
+    for kind in args.probe:
+        for pooling in args.pooling:
+            for hidden, dropout in shapes if kind == "mlp" else shapes[:1]:
+                settings = replace(base, probe=ProbeSettings(kind=kind, hidden=hidden, dropout=dropout), pooling=pooling)
+                variants.append(Variant(variant_label(args.label, kind, pooling, several), settings))
+    return variants
 
 
 def write_results(folder: Path, results: TaskResults, weights: dict[str, dict[str, torch.Tensor]], meta: dict[str, object]) -> None:
@@ -330,12 +393,16 @@ def train_tasks(
     meta: dict[str, object] | None = None,
     pilot: object | None = None,
     sweep: bool = False,
+    variants: Sequence[Variant] | None = None,
+    on_task: Callable[[str, Variant, dict[str, object]], None] | None = None,
 ) -> None:
     """Train and score every probe of each task, writing `root/results/<label>/<task>/`; finished tasks are skipped.
 
     With `sweep`, every grid setting is kept and scored on the validation split alone, and each task writes
     `root/sweeps/<label>/<task>/sweep.parquet` (see `selection`). With a `foundry.pilot.Pilot`, the first residue
-    task trains under the pilot's watch for one window, and nothing is written.
+    task trains under the pilot's watch for one window, and nothing is written. `variants` (probe kinds, poolings,
+    hidden widths, dropouts) train the protein tasks from one load of each site chunk, each under its own label;
+    pair and residue tasks take `label` and `settings`. `on_task(task, variant, record)` sees each finished variant.
     """
     model = tokenizer = None
     if pilot is not None:
@@ -346,27 +413,31 @@ def train_tasks(
         layouts = site_layouts(spec, model_dims(model))
         train_residue_task(model, tokenizer, spec, layouts, data, settings, device, watch=pilot.watch)
         return
+    variants = list(variants) if variants else [Variant(label, settings)]
+    kind = "sweeps" if sweep else "results"
     for name in tasks:
-        folder = root / ("sweeps" if sweep else "results") / label / name
-        if (folder / "run.json").exists() and not overwrite:
-            print(f"have {folder}")
+        pending = [variant for variant in variants if overwrite or not (root / kind / variant.label / name / "run.json").exists()]
+        if not pending:
+            print(f"have {', '.join(str(root / kind / variant.label / name) for variant in variants)}")
             continue
         data = read_task(name)
+        if data.task.level == "protein":
+            _train_protein_variants(name, data, root, spec, pending, device, meta, sweep, on_task)
+            continue
+        label, settings = pending[0].label, pending[0].settings
+        folder = root / kind / label / name
         weights: dict[str, dict[str, torch.Tensor]] = {}
         started = time.time()
-        if data.task.level in ("protein", "pair"):
-            prefix = pair_prefix(name) if data.task.level == "pair" else ""
+        if data.task.level == "pair":
+            prefix = pair_prefix(name)
             store = PooledTapStore(store_path(root, "trained", "original", prefix))
-            if store.manifest.normalized != settings.normalize:
-                state = "normalized" if store.manifest.normalized else "raw"
-                raise SystemExit(f"{store.root} pools {state} token states; embed and train must agree on --normalize.")
+            _check_treatment(store, settings)
             layouts = stored_layouts(store, spec)
-            sweeper, trainer = (sweep_pair_task, train_pair_task) if data.task.level == "pair" else (sweep_protein_task, train_protein_task)
             if sweep:
-                results = sweeper(data, store, layouts, settings, device)
+                results = sweep_pair_task(data, store, layouts, settings, device)
             else:
                 controls = control_stores(root, prefix, settings.untrained_controls) if settings.controls else None
-                results = trainer(data, store, layouts, settings, device, controls, save_weights=weights)
+                results = train_pair_task(data, store, layouts, settings, device, controls, save_weights=weights)
         else:
             if model is None:
                 model, tokenizer = read_model()
@@ -376,16 +447,7 @@ def train_tasks(
             else:
                 results = train_residue_task(model, tokenizer, spec, layouts, data, settings, device, save_weights=weights)
         elapsed = time.time() - started
-        record = {
-            "task": asdict(data.task),
-            "spec": asdict(spec),
-            "settings": asdict(settings),
-            "seconds": elapsed,
-            # proteins, or pairs for the pair task (whose proteins are counted apart)
-            "rows": {split: len(part.labels) for split, part in data.splits.items()},
-            **({"proteins": {split: len(part.sequences) for split, part in data.splits.items()}} if data.task.level == "pair" else {}),
-            **(meta or {}),
-        }
+        record = task_record(data, spec, settings, elapsed, meta)
         if sweep:
             write_sweep(folder, results, record)
         else:
@@ -393,18 +455,68 @@ def train_tasks(
         print(f"{name}: {elapsed:.0f} s -> {folder}")
 
 
-def recorded_settings(record: dict[str, object]) -> TrainingSettings:
-    """The training settings a task's run.json records (runs from before `normalize` and `pooling` used neither)."""
-    saved = dict(record["settings"])
-    probe = dict(saved.pop("probe"))
-    probe["betas"] = tuple(probe["betas"])
-    saved["learning_rates"], saved["weight_decays"] = tuple(saved["learning_rates"]), tuple(saved["weight_decays"])
-    return TrainingSettings(**saved, probe=ProbeSettings(**probe))
+def task_record(data: ConceptData | PairData, spec: TapSpec, settings: TrainingSettings, seconds: float, meta: dict[str, object] | None) -> dict[str, object]:
+    """A finished task's run.json."""
+    return {
+        "task": asdict(data.task),
+        "spec": asdict(spec),
+        "settings": asdict(settings),
+        "seconds": seconds,
+        # proteins, or pairs for the pair task (whose proteins are counted apart)
+        "rows": {split: len(part.labels) for split, part in data.splits.items()},
+        **({"proteins": {split: len(part.sequences) for split, part in data.splits.items()}} if data.task.level == "pair" else {}),
+        **(meta or {}),
+    }
 
 
-def recorded_spec(record: dict[str, object]) -> TapSpec:
-    spec = record["spec"]
-    return TapSpec(sites=tuple(spec["sites"]), blocks=tuple(spec["blocks"]) if spec["blocks"] else None, per_head=spec["per_head"])
+def _check_treatment(store: PooledTapStore, settings: TrainingSettings) -> None:
+    if store.manifest.normalized != settings.normalize:
+        state = "normalized" if store.manifest.normalized else "raw"
+        raise SystemExit(f"{store.root} pools {state} token states; embed and train must agree on --normalize.")
+
+
+def _train_protein_variants(
+    name: str,
+    data: ConceptData,
+    root: Path,
+    spec: TapSpec,
+    variants: Sequence[Variant],
+    device: torch.device,
+    meta: dict[str, object] | None,
+    sweep: bool,
+    on_task: Callable[[str, Variant, dict[str, object]], None] | None,
+) -> None:
+    """One protein task under every variant, from one load of each site chunk; each label writes its own folder. A
+    sweep's MLP variants of one label (one per hidden width and dropout) share its table. Every run.json records the
+    seconds of the whole pass and how many variants shared it."""
+    fresh = [Variant(variant.label, variant.settings, TaskResults(), None if sweep else {}) for variant in variants]
+    labels = [variant.label for variant in fresh]
+    if not sweep and len(set(labels)) < len(labels):
+        raise SystemExit(f"Trained variants need labels of their own: {labels}.")
+    shared = fresh[0].settings
+    store = PooledTapStore(store_path(root, "trained", "original"))
+    _check_treatment(store, shared)
+    layouts = stored_layouts(store, spec)
+    started = time.time()
+    if sweep:
+        sweep_protein_variants(data, store, layouts, fresh, device)
+    else:
+        controls = control_stores(root, "", shared.untrained_controls) if shared.controls else None
+        train_protein_variants(data, store, layouts, fresh, device, controls)
+    elapsed = time.time() - started
+    for label in dict.fromkeys(labels):
+        group = [variant for variant in fresh if variant.label == label]
+        variant = group[0]
+        folder = root / ("sweeps" if sweep else "results") / label / name
+        extra = {"pooling": variant.settings.pooling, "variants": len(fresh), "probes": [asdict(member.settings.probe) for member in group]}
+        record = task_record(data, spec, variant.settings, elapsed, {**(meta or {}), **extra})
+        if sweep:
+            write_sweep(folder, TaskResults(sweep=[frame for member in group for frame in member.results.sweep]), record)
+            continue
+        write_results(folder, variant.results, variant.weights, record)
+        if on_task is not None:
+            on_task(name, variant, record)
+    print(f"{name}: {elapsed:.0f} s, {len(fresh)} variants -> {', '.join(dict.fromkeys(labels))}")
 
 
 def restore_selected(
@@ -531,22 +643,49 @@ def command_train(args: argparse.Namespace) -> None:
         pilot = make_pilot(Path(args.root), args.command, "tokens", lambda batch: len(batch.sequences) * batch.padded_length)
     device = torch.device(args.device)
     torch.backends.cuda.matmul.allow_tf32 = True
-    train_tasks(
-        parse_tasks(args.tasks),
-        Path(args.root),
-        args.label,
-        tap_spec(args),
-        training_settings(args),
-        device,
-        read_task=lambda name: load_task(name, args),
-        read_model=lambda: load_model(args.model, device, random_init=args.random_init, seed=args.seed),
-        overwrite=args.overwrite,
-        meta={"model": model_label(args), "random_init": args.random_init, "normalize": args.normalize, "pooling": args.pooling,
-              "repo": args.repo, "revision": args.revision, "local_data": args.local_data,
-              "pair_repos": {name: PAIR_SOURCES[name].repo for name in PAIR_SOURCES}},
-        pilot=pilot,
-        sweep=args.command == "sweep",
-    )
+    sweep = args.command == "sweep"
+    variants = training_variants(args, sweep)
+    tasks = parse_tasks(args.tasks)
+    meta = {"model": model_label(args), "random_init": args.random_init, "normalize": args.normalize, "pooling": variants[0].settings.pooling,
+            "repo": args.repo, "revision": args.revision, "local_data": args.local_data,
+            "pair_repos": {name: PAIR_SOURCES[name].repo for name in PAIR_SOURCES}}
+
+    def run_tasks(on_task: Callable[[str, Variant, dict[str, object]], None] | None = None) -> None:
+        train_tasks(tasks, Path(args.root), variants[0].label, tap_spec(args), variants[0].settings, device,
+                    read_task=lambda name: load_task(name, args),
+                    read_model=lambda: load_model(args.model, device, random_init=args.random_init, seed=args.seed),
+                    overwrite=args.overwrite, meta=meta, pilot=pilot, sweep=sweep, variants=variants, on_task=on_task)
+
+    if sweep or pilot is not None or not args.wandb_project:
+        run_tasks()
+        return
+    from foundry.logging import Run
+
+    root = Path(args.root)
+    name = args.wandb_name or root.name
+    config = {**meta, "seed": args.seed, "tasks": list(tasks), "sites": args.sites, "blocks": args.blocks,
+              "variants": {variant.label: asdict(variant.settings) for variant in variants}}
+    with Run(root / "wandb" / name, config, project=args.wandb_project, group=args.wandb_group, job_type="train", name=name) as run:
+        rows: list[dict[str, object]] = []
+        run_tasks(lambda task, variant, record: rows.append(log_task(run, tasks.index(task), task, variant, record)))
+        run.table("tasks", rows)
+
+
+def log_task(run: object, step: int, task: str, variant: Variant, record: dict[str, object]) -> dict[str, object]:
+    """Log one finished variant of one task to a `foundry.logging.Run`: the validation and test score of its best
+    full-width probe, chosen on validation (`val/<label>`, `test/<label>`, the step being the task's place in the
+    list). Returns the task's table row."""
+    tables = variant.results.frames()
+    validation = tables["validation"]
+    full = validation[validation["family"] == "full"]
+    best = full.loc[full["validation_score"].idxmax()]
+    scores = tables["scores"]
+    headline = scores[(scores["family"] == "full") & (scores["probe_name"] == best["probe_name"]) & (scores["resample"] == 0)
+                      & (scores["plm"] == "trained") & (scores["probe"] == "trained") & (scores["control"] == "original")]
+    test = float(headline["score"].iloc[0])
+    run.log({f"val/{variant.label}": float(best["validation_score"]), f"test/{variant.label}": test}, step=step)
+    return {"task": task, "label": variant.label, "probe_name": best["probe_name"], "validation": float(best["validation_score"]),
+            "test": test, "train_proteins": record["rows"]["train"], "seconds": record["seconds"]}
 
 
 def command_validate(args: argparse.Namespace) -> None:
@@ -570,9 +709,23 @@ def command_intervals(args: argparse.Namespace) -> None:
                    draws=args.draws, seed=args.draw_seed, overwrite=args.overwrite)
 
 
+def command_protein_intervals(args: argparse.Namespace) -> None:
+    device = torch.device(args.device)
+    torch.backends.cuda.matmul.allow_tf32 = True  # as in training
+    protein_intervals([Path(root) for root in args.roots], args.labels, parse_tasks(args.tasks), Path(args.out),
+                      read_task=lambda name: load_task(name, args), device=device, draws=args.draws, seed=args.draw_seed, overwrite=args.overwrite)
+
+
+def command_solve(args: argparse.Namespace) -> None:
+    solve_tasks([Path(root) for root in args.roots], args.labels, parse_tasks(args.tasks), Path(args.out),
+                read_task=lambda name: load_task(name, args), device=torch.device(args.device), draws=args.draws, seed=args.draw_seed,
+                overwrite=args.overwrite)
+
+
 def command_select(args: argparse.Namespace) -> None:
-    root = Path(args.root)
-    sweeps = read_sweeps(root, args.labels)
+    roots = [Path(root) for root in args.root]
+    root = roots[0]
+    sweeps = read_sweeps(roots, args.labels)
     if args.loss != "all":
         # squared error and cross entropy want different step sizes, so each loss can have its own global setting
         sweeps = sweeps[(sweeps["kind"] == "regression") == (args.loss == "regression")]
@@ -582,12 +735,12 @@ def command_select(args: argparse.Namespace) -> None:
         print(ranked.head(args.show).to_string(index=False))
         print("\nEach task's own best setting:")
         print(task_optima(sweeps).to_string(index=False))
-    choice = {name: (value.item() if hasattr(value, "item") else value) for name, value in chosen.items()}
+    choice = {name: None if pd.isna(value) else (value.item() if hasattr(value, "item") else value) for name, value in chosen.items()}
     print(f"\nchosen: {choice}")
     suffix = "" if args.loss == "all" else f"_{args.loss}"
     out = Path(args.out) if args.out else root / "sweeps" / f"selection_{'_'.join(args.labels)}{suffix}.json"
-    record = {"labels": list(args.labels), "loss": args.loss, "tasks": sorted(set(sweeps["task"])), "tolerance": args.tolerance,
-              "chosen": choice, "ranking": ranked.to_dict(orient="records")}
+    record = {"labels": list(args.labels), "roots": [str(path) for path in roots], "loss": args.loss, "tasks": sorted(set(sweeps["task"])),
+              "tolerance": args.tolerance, "chosen": choice, "ranking": ranked.astype(object).where(ranked.notna(), None).to_dict(orient="records")}
     out.write_text(json.dumps(record, indent=2, default=str), encoding="utf-8", newline="\n")
 
 
@@ -724,6 +877,7 @@ def build_parser() -> argparse.ArgumentParser:
     embed.add_argument("--root", required=True)
     embed.add_argument("--tasks", default="protein")
     embed.add_argument("--controls", action="store_true", help="also write the control stores of the test proteins")
+    embed.add_argument("--normalized-root", default=None, help="another root that gets the normalized protein-task store from the same forward pass")
     embed.set_defaults(handler=command_embed)
 
     def training(sub: argparse.ArgumentParser) -> None:
@@ -731,9 +885,11 @@ def build_parser() -> argparse.ArgumentParser:
         normalizing(sub)
         data_sources(sub)
         sub.add_argument("--root", required=True)
-        sub.add_argument("--label", default="linear", help="results subfolder, so settings can be compared")
+        sub.add_argument("--label", default=None,
+                         help="results subfolder; default <probe>[_mean], and with several probes or poolings a prefix of those names")
         sub.add_argument("--tasks", default="all")
         sub.add_argument("--site-budget-gb", type=float, default=8.0, help="pooled rows of one site held on the device at once; wider sites train in layer chunks")
+        sub.add_argument("--bank-budget-gb", type=float, default=0.0, help="weights and optimizer state of one protein bank; larger sites train in layer chunks (0: unbounded)")
         sub.add_argument("--lr", type=float, nargs="+", default=[1e-3])
         sub.add_argument("--wd", type=float, nargs="+", default=[1e-4])
         sub.add_argument("--batch-size", type=int, default=64, help="proteins per step, protein tasks")
@@ -741,11 +897,16 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--max-epochs", type=int, default=50)
         sub.add_argument("--patience", type=int, default=5)
         sub.add_argument("--validate-every", type=int, default=0, help="steps between validations; 0 is once per epoch")
-        sub.add_argument("--probe", choices=("linear", "mlp"), default="linear")
-        sub.add_argument("--hidden", type=int, default=512)
-        sub.add_argument("--dropout", type=float, default=0.1)
+        sub.add_argument("--probe", choices=("linear", "mlp"), nargs="+", default=["linear"], help="probe kinds; protein tasks train every kind from one load")
+        sub.add_argument("--hidden", type=int, nargs="+", default=[512], help="MLP hidden widths (several in a sweep only)")
+        sub.add_argument("--dropout", type=float, nargs="+", default=[0.1], help="MLP dropouts (several in a sweep only)")
         sub.add_argument("--no-controls", action="store_true")
-        sub.add_argument("--pooling", choices=("mean_var", "mean"), default="mean_var", help="what protein probes read of a pooled state")
+        sub.add_argument("--pooling", choices=("mean_var", "mean"), nargs="+", default=["mean_var"], help="what protein probes read of a pooled state; several train from one load")
+        sub.add_argument("--variants", default=None,
+                         help="a JSON list of variants, each with its label, probe, pooling and its own hidden, dropout, lr, wd and batch_size; replaces --probe and --pooling")
+        sub.add_argument("--wandb-project", default=None, help="log a train run to this W&B project through foundry.logging (sweeps make no run)")
+        sub.add_argument("--wandb-group", default=None, help="the W&B group: the experiment id")
+        sub.add_argument("--wandb-name", default=None, help="the run's name; default the root's folder name")
         sub.add_argument("--overwrite", action="store_true")
         sub.set_defaults(handler=command_train)
 
@@ -773,8 +934,32 @@ def build_parser() -> argparse.ArgumentParser:
     intervals.add_argument("--overwrite", action="store_true")
     intervals.set_defaults(handler=command_intervals)
 
+    protein = commands.add_parser("protein-intervals", help="bootstrap intervals of the protein tasks' reported states, averaged over seed replicates")
+    protein.add_argument("--roots", nargs="+", required=True, help="one root per seed replicate")
+    protein.add_argument("--labels", nargs="+", required=True, help="results labels, such as linear linear_mean mlp mlp_mean")
+    protein.add_argument("--out", required=True)
+    protein.add_argument("--tasks", default="protein")
+    protein.add_argument("--draws", type=int, default=INTERVAL_DRAWS, help="bootstrap draws of the test proteins")
+    protein.add_argument("--draw-seed", type=int, default=INTERVAL_SEED, help="seed of the draws; every run that shares it shares the draws")
+    protein.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    data_sources(protein)
+    protein.add_argument("--overwrite", action="store_true")
+    protein.set_defaults(handler=command_protein_intervals)
+
+    solve = commands.add_parser("solve", help="converged linear fits at the reported states of linear labels, scored on the same draws")
+    solve.add_argument("--roots", nargs="+", required=True, help="one root per seed replicate")
+    solve.add_argument("--labels", nargs="+", default=["linear", "linear_mean"])
+    solve.add_argument("--out", required=True)
+    solve.add_argument("--tasks", default="protein")
+    solve.add_argument("--draws", type=int, default=INTERVAL_DRAWS)
+    solve.add_argument("--draw-seed", type=int, default=INTERVAL_SEED)
+    solve.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    data_sources(solve)
+    solve.add_argument("--overwrite", action="store_true")
+    solve.set_defaults(handler=command_solve)
+
     select = commands.add_parser("select", help="choose one global setting from the sweeps of one or more labels")
-    select.add_argument("--root", required=True)
+    select.add_argument("--root", nargs="+", required=True, help="one root, or one per seed replicate, whose shortfalls are averaged")
     select.add_argument("--labels", nargs="+", required=True, help="sweep labels to compare, such as one per batch size")
     select.add_argument("--tolerance", type=float, default=0.005, help="mean validation shortfall a faster label may give up")
     select.add_argument("--show", type=int, default=20, help="ranked settings to print")

@@ -32,7 +32,6 @@ import time
 import numpy as np
 import pandas as pd
 import torch
-import torch.nn.functional as F
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,8 +40,18 @@ from torch import Tensor
 from .concepts import ConceptTask
 from .pooled_store import PooledTapStore
 from .probe_bank import ProbeBank
-from .protein_probing import ControlStores, _flat, _shared, families, family_offset, feature_moments, fit_family, keep_state, layer_chunks, score_bank, validation_loss
-from .scores import ResamplePlan, ScoreAccumulator, binary_mcc
+from .protein_probing import ControlStores, bank_logits, families, family_offset, feature_moments, fit_family, keep_state, layer_chunks, score_bank, validation_loss
+from .scores import (
+    INTERVAL_DRAWS,
+    INTERVAL_SEED,
+    ResamplePlan,
+    ScoreAccumulator,
+    balanced_mcc,
+    protein_draws,
+    ranking_metrics,
+    threshold_mcc,
+    weighted_ranking_metrics,
+)
 from .sites import SiteLayout
 from .training import MEAN_CONTROL_BATCH, TaskResults, TrainingSettings
 
@@ -70,10 +79,6 @@ PAIR_SPLITS = {"train": "train", "validation": "valid", "test": "test"}
 MAX_PAIR_RESIDUES = 2046
 STANDARDIZE_FLOOR = 1e-6
 STANDARDIZE_ROWS = 1024  # proteins standardized at once
-BALANCED_VIEWS = 10  # class-balanced views of an unbalanced split, for balanced MCC
-METRIC_CHUNK = 32  # probes whose rankings are computed at once
-INTERVAL_DRAWS = 1000  # bootstrap draws of the test proteins, for intervals
-INTERVAL_SEED = 0  # one seed for every run, so that every probe and model shares the draws
 INTERVAL_METRICS = ("roc_auc", "average_precision")
 DRAW_BUDGET = 2 ** 25  # pair weights of one probe held at once while ranking under the draws
 
@@ -220,71 +225,6 @@ def mean_targets(targets: Tensor, group: int = MEAN_CONTROL_BATCH) -> Tensor:
                       for start in range(0, targets.shape[0], group)])
 
 
-def ranking_metrics(scores: Tensor, labels: Tensor, chunk: int = METRIC_CHUNK) -> tuple[Tensor, Tensor]:
-    """ROC AUC and average precision of each column of `scores` against binary `labels`, as scikit-learn computes them
-    for untied scores, `chunk` columns at a time."""
-    # scores: (n, G); labels: (n,) 0 or 1
-    roc_aucs, precisions = [], []
-    ranks = torch.arange(1, scores.shape[0] + 1, dtype=torch.float64, device=scores.device).unsqueeze(1)  # (n, 1)
-    for start in range(0, scores.shape[1], chunk):
-        order = scores[:, start: start + chunk].argsort(dim=0, descending=True)  # (n, g)
-        hits = labels.to(torch.float64)[order]  # (n, g), 1 where the k-th highest score belongs to a positive
-        positives = hits.sum(dim=0)  # (g,)
-        negatives = scores.shape[0] - positives
-        true_positives = hits.cumsum(dim=0)  # (n, g)
-        precisions.append((true_positives / ranks * hits).sum(dim=0) / positives.clamp_min(1))
-        negatives_above = (1.0 - hits).cumsum(dim=0)  # (n, g), negatives ranked at or above each row
-        roc_aucs.append(((negatives - negatives_above) * hits).sum(dim=0) / (positives * negatives).clamp_min(1))
-    return torch.cat(roc_aucs), torch.cat(precisions)
-
-
-def threshold_mcc(scores: Tensor, labels: Tensor) -> Tensor:
-    """MCC of each column of logits `scores` at probability 0.5 (a logit of 0 or more predicts a positive)."""
-    # scores: (n, G); labels: (n,) 0 or 1
-    predicted, positive = scores >= 0, labels.to(torch.bool).unsqueeze(1)  # (n, G), (n, 1)
-    masks = (predicted & positive, predicted & ~positive, ~predicted & positive, ~predicted & ~positive)
-    return binary_mcc(torch.stack([mask.sum(dim=0, dtype=torch.float64) for mask in masks], dim=-1))  # (G,)
-
-
-def balanced_views(labels: np.ndarray, seed: int = 0, subsamples: int = BALANCED_VIEWS) -> list[np.ndarray]:
-    """Index sets of class-balanced views, drawn as Atlas draws them: the majority class downsampled without
-    replacement to the minority's size, view i from seed `seed + 11 * (i + 1)`; a balanced split is its own one view."""
-    # labels: (n,) 0 or 1
-    positive, negative = np.flatnonzero(labels == 1), np.flatnonzero(labels == 0)
-    if len(positive) == len(negative):
-        return [np.arange(len(labels))]
-    majority, minority = (negative, positive) if len(negative) > len(positive) else (positive, negative)
-    return [np.concatenate([minority, np.random.default_rng(seed + 11 * (view + 1)).choice(majority, size=len(minority), replace=False)])
-            for view in range(subsamples)]
-
-
-def balanced_mcc(scores: Tensor, labels: Tensor, seed: int = 0, subsamples: int = BALANCED_VIEWS, chunk: int = METRIC_CHUNK) -> Tensor:
-    """Balanced MCC of each column of `scores`, as Atlas defines it: the MCC at the one threshold that maximizes its mean
-    over the class-balanced views (`balanced_views`), a score at or above the threshold predicting a positive. Every
-    score is a candidate threshold, which reaches every count any view can show."""
-    # scores: (n, G); labels: (n,) 0 or 1
-    views = balanced_views(labels.cpu().numpy(), seed, subsamples)
-    member = torch.zeros((len(views), scores.shape[0]), dtype=torch.bool, device=scores.device)  # (V, n)
-    for row, view in enumerate(views):
-        member[row, torch.as_tensor(view, device=scores.device)] = True
-    positive = labels.to(torch.bool)  # (n,)
-    out = []
-    for start in range(0, scores.shape[1], chunk):
-        ordered, order = scores[:, start: start + chunk].sort(dim=0, descending=True)  # (n, g)
-        cut = torch.ones_like(ordered, dtype=torch.bool)  # (n, g), the last row of each run of equal scores
-        cut[:-1] = ordered[:-1] != ordered[1:]
-        hit = positive[order]  # (n, g)
-        mean = torch.zeros(ordered.shape, dtype=torch.float64, device=scores.device)  # (n, g)
-        for inside in member:
-            kept = inside[order]  # (n, g)
-            tp = (hit & kept).cumsum(dim=0, dtype=torch.float64)  # (n, g), the view's positives at or above each cut
-            fp = (~hit & kept).cumsum(dim=0, dtype=torch.float64)
-            counts = torch.stack([tp, fp, float((positive & inside).sum()) - tp, float((~positive & inside).sum()) - fp], dim=-1)  # (n, g, 4)
-            mean += binary_mcc(counts) / len(member)
-        out.append(mean.masked_fill(~cut, -torch.inf).max(dim=0).values)
-    return torch.cat(out)  # (G,)
-
-
 def pair_metrics(scores: Tensor, labels: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     """ROC AUC, average precision, MCC at probability 0.5 and balanced MCC (Atlas's views, seed 0) of each column of
     logits `scores`."""
@@ -292,48 +232,13 @@ def pair_metrics(scores: Tensor, labels: Tensor) -> tuple[Tensor, Tensor, Tensor
     return roc_auc, average_precision, threshold_mcc(scores, labels), balanced_mcc(scores, labels)
 
 
-def protein_draws(proteins: int, draws: int = INTERVAL_DRAWS, seed: int = INTERVAL_SEED) -> Tensor:
-    """Each protein's count in each of `draws` bootstrap draws of a split's `proteins` proteins, taken with
-    replacement on the CPU from `seed`, so that every probe and model shares them: (draws, proteins)."""
-    picks = torch.randint(0, proteins, (draws, proteins), generator=torch.Generator().manual_seed(seed))  # (B, u)
-    return torch.zeros(draws, proteins).scatter_add_(1, picks, torch.ones(draws, proteins))  # (B, u)
-
-
-def weighted_ranking_metrics(scores: Tensor, labels: Tensor, weights: Tensor) -> tuple[Tensor, Tensor]:
-    """ROC AUC and average precision of each column of `scores` under each row of `weights`, as scikit-learn computes
-    them with sample weights (a run of tied scores is one threshold): (G, B) each, NaN where a row weighs one class
-    alone."""
-    # scores: (n, G); labels: (n,) 0 or 1; weights: (B, n), nonnegative
-    hit = labels.to(device=scores.device, dtype=torch.float64)  # (n,)
-    weights = weights.to(device=scores.device, dtype=torch.float64)
-    roc_aucs, precisions = [], []
-    for column in scores.T:
-        ordered, order = column.sort(descending=True)  # (n,)
-        ends = torch.ones_like(ordered, dtype=torch.bool)  # (n,), the last row of each run of equal scores
-        ends[:-1] = ordered[:-1] != ordered[1:]
-        weight = weights[:, order]  # (B, n)
-        tp = (weight * hit[order]).cumsum(dim=1)[:, ends]  # (B, r), positive weight at or above each threshold
-        fp = (weight * (1.0 - hit[order])).cumsum(dim=1)[:, ends]
-        tp_above, fp_above = F.pad(tp[:, :-1], (1, 0)), F.pad(fp[:, :-1], (1, 0))  # (B, r), at the threshold before
-        positives, negatives = tp[:, -1], fp[:, -1]  # (B,)
-        both = (positives > 0) & (negatives > 0)
-        area = ((fp - fp_above) * (tp + tp_above)).sum(dim=1) / 2  # trapezoids between thresholds
-        precision = torch.where(tp + fp > 0, tp / (tp + fp).clamp_min(1e-300), 0.0)  # (B, r)
-        roc_aucs.append(torch.where(both, area / (positives * negatives).clamp_min(1e-300), torch.nan))
-        precisions.append(torch.where(both, ((tp - tp_above) * precision).sum(dim=1) / positives.clamp_min(1e-300), torch.nan))
-    return torch.stack(roc_aucs), torch.stack(precisions)  # (G, B), (G, B)
-
-
 @torch.no_grad()
 def bank_scores(bank: ProbeBank, which: str, X: PairRows, batch: int = 512) -> Tensor:
     """The logit of every group of a one-output bank for every row: (n, G)."""
-    probes = X.shape[1]
-    every_group = torch.arange(bank.groups, device=bank.device)
     out = []
     for start in range(0, X.shape[0], batch):
         rows = X[start: start + batch]  # (b, P, 2 w)
-        Z = bank.shared_logits(_flat(rows), every_group, probes, which) if _shared(bank) else bank.logits(rows, 0, bank.groups, which)  # (b, G, 1)
-        out.append(Z[..., 0])
+        out.append(bank_logits(bank, rows, which)[..., 0])  # (b, G)
     return torch.cat(out)  # (n, G)
 
 

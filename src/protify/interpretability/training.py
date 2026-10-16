@@ -12,6 +12,7 @@ from torch import Tensor
 
 from .probe_bank import ProbeBank, ProbeSettings
 from .scores import ScoreAccumulator
+from .sites import TapSpec
 
 
 # The test conditions: which model produced the states, which probe read them, and how the input was changed.
@@ -42,6 +43,7 @@ class TrainingSettings:
     pooling: str = "mean_var"  # what a protein probe reads of a pooled state: "mean_var", or "mean" alone
     untrained_controls: bool = True  # with controls, also score the untrained model's states
     site_budget_gb: float = 8.0  # pooled rows of one site held on the device at once; larger sites train in layer chunks
+    bank_budget_gb: float = 0.0  # device memory of one bank's weights and optimizer state; 0 leaves banks unbounded
 
     def __post_init__(self) -> None:
         if self.pooling not in POOLINGS:
@@ -55,6 +57,29 @@ class TrainingSettings:
     def grid(self) -> list[tuple[float, float]]:
         """Every (learning rate, weight decay) pair; each probe keeps the pair that validates best."""
         return list(itertools.product(self.learning_rates, self.weight_decays))
+
+
+def recorded_settings(record: dict[str, object]) -> TrainingSettings:
+    """The training settings a task's run.json records (runs from before `normalize` and `pooling` used neither)."""
+    saved = dict(record["settings"])
+    probe = dict(saved.pop("probe"))
+    probe["betas"] = tuple(probe["betas"])
+    saved["learning_rates"], saved["weight_decays"] = tuple(saved["learning_rates"]), tuple(saved["weight_decays"])
+    return TrainingSettings(**saved, probe=ProbeSettings(**probe))
+
+
+def recorded_spec(record: dict[str, object]) -> TapSpec:
+    spec = record["spec"]
+    return TapSpec(sites=tuple(spec["sites"]), blocks=tuple(spec["blocks"]) if spec["blocks"] else None, per_head=spec["per_head"])
+
+
+def probe_columns(settings: TrainingSettings) -> dict[str, object]:
+    """The probe's own settings as table columns: kind, pooling, and an MLP's hidden width and dropout (NaN for a
+    linear probe), so sweeps of several variants rank them together."""
+    probe = settings.probe
+    mlp = probe.kind == "mlp"
+    return {"probe_kind": probe.kind, "pooling": settings.pooling,
+            "hidden": float(probe.hidden) if mlp else np.nan, "dropout": float(probe.dropout) if mlp else np.nan}
 
 
 def grid_vectors(settings: TrainingSettings, probes: int) -> tuple[Tensor, Tensor]:
@@ -177,6 +202,7 @@ class TaskResults:
             "task": task,
             "family": family,
             "probe_name": [name.split("|")[0] for name in bank.names],
+            **probe_columns(settings),
             "learning_rate": [pairs[index][0] for index in choice],
             "weight_decay": [pairs[index][1] for index in choice],
             "best_validation_loss": bank.best_loss.cpu().numpy(),
@@ -202,6 +228,7 @@ class TaskResults:
             "task": task,
             "family": family,
             "probe_name": [name.split("|")[0] for name in bank.names],
+            **probe_columns(settings),
             "learning_rate": [pairs[index][0] for index in setting],
             "weight_decay": [pairs[index][1] for index in setting],
             "validation_score": validation.scores()[0].cpu().numpy(),
