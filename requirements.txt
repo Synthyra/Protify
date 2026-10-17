@@ -27,6 +27,8 @@ pandas>=3.0.6
 requests>=2.34.2
 pyyaml>=6.0.3
 umap-learn>=0.5.12
+# interpretability: ProtParam targets of scrambled sequences
+biopython>=1.85
 # runtime backend: T5Tokenizer reads ProtT5's spiece.model through it; the Rostlab repos ship no tokenizer.json
 sentencepiece
 kernels

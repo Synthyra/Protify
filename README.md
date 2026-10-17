@@ -224,6 +224,7 @@ For more details about supported models and datasets, including programmatic acc
 - **Estimator probes**: `--probe_type xgboost`, `lightgbm`, or `random_forest` fit gradient-boosted or forest models on pooled embeddings through the same pipeline, cache, and results table as the neural probes. Axis-aligned splits read sparse autoencoder features directly
 - **Flexible model training**: Probe-only (frozen PLM), full fine-tuning, hybrid probing, LoRA via PEFT, and vectorized multi-seed MLP probes
 - **Parallel probe sweeps**: Train many seeded pooled MLP probes in one vectorized pass with `--parallel_probe_runs`, including run-specific deterministic shuffles and static preflight planning for workstation launches
+- **Tap probing**: One ESMC forward pass yields every token-wise state of every block (residual stream, queries, keys and values before and after rotation, attention context and output, SwiGLU gate, up and activation), and thousands of linear or MLP probes train on them in parallel, with globally tuned settings, model, sequence and input controls, and figures. See [tap probing](docs/tap_probing.md)
 - **Automated model selection**: Find optimal scikit-learn models for your data with LazyPredict, enhanced by automatic hyperparameter optimization
 - **Hyperparameter optimization**: Integrated Weights & Biases sweeps that conducts a hyperparameter search and trains the final version based on the best hyperparameters
 - **Complete reproducibility**: Every session generates a detailed log that can be used to reproduce your entire workflow
