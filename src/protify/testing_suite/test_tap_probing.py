@@ -26,8 +26,9 @@ try:
     from src.protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from src.protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
     from src.protify.interpretability.probe_bank import ProbeBank, ProbeSettings
+    from src.protify.interpretability import probe_bank as probe_bank_module
     from src.protify.interpretability.protein_intervals import chosen_states, draw_scores
-    from src.protify.interpretability.protein_probing import bank_layer_bytes, full_view, head_view, layer_chunks, score_bank, validation_loss
+    from src.protify.interpretability.protein_probing import bank_layer_bytes, full_view, head_view, layer_chunks, score_bank, train_bank, validation_loss
     from src.protify.interpretability.residue_probing import _mean_groups, residue_batch, score_residue_task, untrained_copy
     from src.protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, draw_plan, drawn_ranking, multiclass_mcc, ranking_summary
     from src.protify.interpretability.solver import chosen_fit, penalty_path, standardized_rows
@@ -50,8 +51,9 @@ except ImportError:
     from protify.interpretability.latent import SCRAMBLED, label_sets, principal_components, project_layers
     from protify.interpretability.pooled_store import PooledTapStore, embed_pooled, masked_mean_var
     from protify.interpretability.probe_bank import ProbeBank, ProbeSettings
+    from protify.interpretability import probe_bank as probe_bank_module
     from protify.interpretability.protein_intervals import chosen_states, draw_scores
-    from protify.interpretability.protein_probing import bank_layer_bytes, full_view, head_view, layer_chunks, score_bank, validation_loss
+    from protify.interpretability.protein_probing import bank_layer_bytes, full_view, head_view, layer_chunks, score_bank, train_bank, validation_loss
     from protify.interpretability.residue_probing import _mean_groups, residue_batch, score_residue_task, untrained_copy
     from protify.interpretability.scores import ResamplePlan, ScoreAccumulator, binary_mcc, draw_plan, drawn_ranking, multiclass_mcc, ranking_summary
     from protify.interpretability.solver import chosen_fit, penalty_path, standardized_rows
@@ -360,7 +362,10 @@ def test_probe_bank_gradients_match_autograd(kind: str, loss: str) -> None:
         torch.testing.assert_close(bank.grads[name], value.grad, rtol=1e-4, atol=1e-6)
 
 
-def test_probe_bank_adamw_matches_torch() -> None:
+@pytest.mark.parametrize("compiled", [False, True])
+def test_probe_bank_adamw_matches_torch(compiled: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    if compiled:  # the compiled update a GPU bank takes, here on the CPU
+        monkeypatch.setattr(probe_bank_module, "_adamw_", probe_bank_module._compiled_adamw_)
     generator = torch.Generator().manual_seed(6)
     rates, decays = torch.tensor([1e-2, 3e-3]), torch.tensor([0.1, 0.0])
     bank = ProbeBank(["a", "b"], 5, 3, "multiclass", ProbeSettings(), rates, decays, seed=2, device=CPU)
@@ -655,6 +660,32 @@ def test_fused_mlp_path_matches_the_per_setting_path(loss: str) -> None:
     torch.testing.assert_close(bank.fused_loss_sums(X, targets, count), expected_sums, rtol=1e-5, atol=1e-5)
     bank.operand_dtype = torch.bfloat16  # as training runs it
     torch.testing.assert_close(bank.fused_logits(X, count), expected_Z, rtol=5e-2, atol=5e-2)
+
+
+@pytest.mark.parametrize("kind", ["linear", "mlp"])
+def test_finished_settings_leave_the_bank_and_keep_their_record(kind: str) -> None:
+    generator = torch.Generator().manual_seed(13)
+    names, width, outputs = [f"s:{layer}" for layer in range(3)], 12, 3
+    settings = TrainingSettings(learning_rates=(3e-1, 1e-2, 1e-3), weight_decays=(0.0,), batch_size=16, max_epochs=40, patience=2,
+                                probe=ProbeSettings(kind=kind, hidden=8, dropout=0.0))
+    X, valid_X = (torch.randn(rows, len(names), width, generator=generator) for rows in (96, 48))  # (n, P, w)
+    y, valid_y = (torch.randint(0, outputs, (rows,), generator=generator) for rows in (96, 48))  # noise, so the fast rate stops first
+    trained = []
+    for compact in (False, True):
+        bank = make_bank(names, width, outputs, "multiclass", settings, seed=0, device=CPU)
+        bank.set_standardization(X.mean(dim=0).repeat(3, 1), X.var(dim=0).repeat(3, 1))
+        bank.operand_dtype = torch.float32
+        trained.append((bank, train_bank(bank, X, y, valid_X, valid_y, settings, "test", compact=compact)))
+    (whole, whole_epochs), (compacted, compacted_epochs) = trained
+    assert whole.grads and not compacted.grads  # a setting finished first and left the bank being trained
+    assert compacted_epochs == whole_epochs and compacted.steps == whole.steps
+    assert torch.equal(compacted.best_step, whole.best_step) and torch.equal(compacted.stopped, whole.stopped)
+    assert len(set(whole.best_step.view(3, len(names)).max(dim=1).values.tolist())) > 1  # the settings stopped at different steps
+    torch.testing.assert_close(compacted.best_loss, whole.best_loss, rtol=1e-5, atol=1e-6)
+    for name, value in whole.best.items():
+        torch.testing.assert_close(compacted.best[name], value, rtol=1e-5, atol=1e-6)
+        assert compacted.params[name] is compacted.best[name]
+        torch.testing.assert_close(compacted.initial[name], whole.initial[name], rtol=0, atol=0)
 
 
 def test_fused_dropout_drops_units_at_its_rate_from_the_banks_seed() -> None:

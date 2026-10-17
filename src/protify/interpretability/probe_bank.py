@@ -56,6 +56,34 @@ def _gelu_grad(pre: Tensor) -> Tensor:
     return cdf + pre * pdf
 
 
+def _adamw_(
+    param: Tensor,
+    grad: Tensor,
+    first_moment: Tensor,
+    second_moment: Tensor,
+    decay_scale: Tensor,
+    step_size: Tensor,
+    root_correction2: Tensor,
+    beta1: float,
+    beta2: float,
+    eps: float,
+) -> None:
+    """One AdamW update of one parameter of every group, in place, then its gradient cleared."""
+    # param, grad, moments: (G, F); decay_scale = 1 - lr * wd and step_size = lr / (1 - beta1^t): (G, 1);
+    # root_correction2 = sqrt(1 - beta2^t): 0-d
+    param.mul_(decay_scale)
+    first_moment.mul_(beta1).add_(grad, alpha=1.0 - beta1)
+    second_moment.mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
+    param.sub_(step_size * first_moment / (second_moment.sqrt() / root_correction2 + eps))
+    grad.zero_()
+
+
+# The update is memory-bound: eager, its nine elementwise passes read and write each (G, F) tensor about 28 times;
+# compiled, one kernel reads the parameter, gradient and moments once and writes them back once. Shapes are dynamic,
+# so banks of any size share the compiled kernel.
+_compiled_adamw_ = torch.compile(_adamw_, dynamic=True, fullgraph=True)
+
+
 class ProbeBank:
     """G probes of one input width and one output size, trained together."""
 
@@ -295,15 +323,17 @@ class ProbeBank:
         self.grads["bias2"] += dZ.sum(dim=0).reshape(self.groups, self.outputs)
         dZ = dZ.to(self.operand_dtype)
         H = used.view(probes, rows, count, hidden).to(self.operand_dtype)  # (P, n, K, m)
-        d_second = torch.einsum("pnkm,nkpc->kpmc", H, dZ).to(torch.float32)  # (K, P, m, C)
-        self.grads["weight2"] += d_second.reshape(self.groups, hidden, self.outputs)
+        # the bf16 products are added into the float32 gradients in place, through views in the gradients' layout,
+        # with no float32 or reordered copy of a (P, w, K * m) product
+        d_second = torch.einsum("pnkm,nkpc->kpmc", H, dZ)  # (K, P, m, C)
+        self.grads["weight2"].view(count, probes, hidden, self.outputs).add_(d_second)
         d_used = torch.einsum("nkpc,kpmc->pnkm", dZ, second.to(self.operand_dtype)).to(torch.float32)  # (P, n, K, m)
         d_used = d_used.reshape(probes, rows, count * hidden)  # (P, n, K * m)
         if dropped is not None:
             d_used = d_used * dropped
         d_pre = d_used * _gelu_grad(pre)  # (P, n, K * m)
-        d_first = torch.bmm(inputs.transpose(1, 2), d_pre.to(self.operand_dtype)).to(torch.float32)  # (P, w, K * m)
-        self.grads["weight1"] += d_first.view(probes, self.width, count, hidden).permute(2, 0, 1, 3).reshape(self.groups, self.width, hidden)
+        d_first = torch.bmm(inputs.transpose(1, 2), d_pre.to(self.operand_dtype))  # (P, w, K * m)
+        self.grads["weight1"].view(count, probes, self.width, hidden).add_(d_first.view(probes, self.width, count, hidden).permute(2, 0, 1, 3))
         self.grads["bias1"] += d_pre.sum(dim=1).view(probes, count, hidden).transpose(0, 1).reshape(self.groups, hidden)
         return loss * scale
 
@@ -382,22 +412,18 @@ class ProbeBank:
         return self._to_index_order(loss, heads) * factor
 
     def step(self) -> None:
-        """One AdamW step of every group, with each group's own learning rate and weight decay, then clear grads."""
+        """One AdamW step of every group, with each group's own learning rate and weight decay, then clear grads. On a
+        GPU each parameter's update is one compiled kernel."""
         self.steps += 1
         beta1, beta2 = self.settings.betas
-        correction1 = 1.0 - beta1 ** self.steps
-        correction2 = 1.0 - beta2 ** self.steps
+        update = _compiled_adamw_ if self.device.type == "cuda" else _adamw_
+        decay_scale = (1.0 - self.learning_rates * self.weight_decays).view(-1, 1)  # (G, 1)
+        step_size = (self.learning_rates / (1.0 - beta1 ** self.steps)).view(-1, 1)  # (G, 1)
+        root_correction2 = torch.tensor(math.sqrt(1.0 - beta2 ** self.steps), device=self.device)  # 0-d
         for name, param in self.params.items():
-            grad = self.grads[name]
-            shape = (-1,) + (1,) * (param.dim() - 1)
-            rate = self.learning_rates.view(shape)  # (G, 1[, 1])
-            decay = self.weight_decays.view(shape)  # (G, 1[, 1])
-            param.mul_(1.0 - rate * decay)
-            self.first_moment[name].mul_(beta1).add_(grad, alpha=1.0 - beta1)
-            self.second_moment[name].mul_(beta2).addcmul_(grad, grad, value=1.0 - beta2)
-            denominator = (self.second_moment[name].sqrt() / math.sqrt(correction2)).add_(self.settings.eps)
-            param.sub_(rate / correction1 * self.first_moment[name] / denominator)
-            grad.zero_()
+            groups = param.shape[0]
+            update(param.view(groups, -1), self.grads[name].view(groups, -1), self.first_moment[name].view(groups, -1),
+                   self.second_moment[name].view(groups, -1), decay_scale, step_size, root_correction2, beta1, beta2, self.settings.eps)
 
     # -- validation and early stopping -------------------------------------------------------------------------
 

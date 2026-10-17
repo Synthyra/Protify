@@ -190,6 +190,42 @@ def validation_loss(bank: ProbeBank, X: Tensor, targets: Tensor, settings_count:
     return totals / denominator
 
 
+def _setting_groups(kept: Tensor, probes: int) -> Tensor:
+    """The groups of the grid settings `kept`, setting-major: (len(kept) * P,)."""
+    return (kept[:, None] * probes + torch.arange(probes, device=kept.device)).reshape(-1)
+
+
+def _keep_record(bank: ProbeBank, training: ProbeBank, groups: Tensor) -> None:
+    """Copy what a trained group keeps, its kept weights and early-stopping record, from `training` into `bank` at
+    `groups`."""
+    for name, value in training.best.items():
+        bank.best[name][groups] = value
+    for attribute in ("best_loss", "best_step", "misses", "stopped"):
+        getattr(bank, attribute)[groups] = getattr(training, attribute)
+    bank.steps = training.steps
+
+
+def _without_finished(training: ProbeBank, remaining: Tensor, probes: int, original: bool) -> ProbeBank:
+    """A bank of the grid settings `remaining` of `training` alone, to train on. Current weights and optimizer state
+    move to it one parameter at a time, so the copy costs one parameter's worth of memory at its peak; the original
+    bank keeps its kept and initial weights, and a smaller bank before it, already recorded, keeps nothing."""
+    groups = _setting_groups(remaining, probes)
+    reduced = object.__new__(ProbeBank)
+    reduced.__dict__.update(training.__dict__)  # shares the dropout generator, so its stream goes on
+    reduced.names = [training.names[index] for index in groups.tolist()]
+    reduced.initial = {}  # training never reads them
+    for attribute in ("grads", "first_moment", "second_moment", "params", "best"):
+        source, copied = getattr(training, attribute), {}
+        for name in list(source):
+            copied[name] = source[name][groups]
+            if not (original and attribute == "best"):
+                del source[name]
+        setattr(reduced, attribute, copied)
+    for attribute in ("learning_rates", "weight_decays", "mean", "inverse_std", "best_loss", "best_step", "misses", "stopped"):
+        setattr(reduced, attribute, getattr(training, attribute)[groups])
+    return reduced
+
+
 def train_bank(
     bank: ProbeBank,
     train_X: Tensor,
@@ -198,12 +234,18 @@ def train_bank(
     valid_y: Tensor,
     settings: TrainingSettings,
     description: str,
+    compact: bool = True,
 ) -> int:
-    """Minibatch training of every group with per-group early stopping. Returns the epochs run."""
+    """Minibatch training of every group with per-group early stopping. Returns the epochs run.
+
+    A grid setting whose probes have all stopped costs nothing more: the settings still training move to a smaller
+    bank, and every group's kept weights and early-stopping record come back to `bank` at the end. A bank that
+    compacted holds no optimizer state after, and its current weights are its kept ones; `compact=False` trains every
+    setting's groups until the last group stops, and keeps both."""
     # train_X: (n, P, w); valid_X: (v, P, w)
     count = len(settings.grid())
     probes = bank.groups // count
-    every_group = torch.arange(bank.groups, device=bank.device)  # (K * P,)
+    training, kept = bank, torch.arange(count, device=bank.device)  # the bank being trained, and its settings
     rng = np.random.default_rng(settings.seed)
     steps_per_epoch = math.ceil(train_X.shape[0] / settings.batch_size)
     validate_every = settings.validate_every or steps_per_epoch
@@ -216,18 +258,27 @@ def train_bank(
         for start in range(0, len(order), settings.batch_size):
             rows = order[start: start + settings.batch_size]
             inputs, labels = train_X[rows], train_y[rows]  # (b, P, w), (b,) or (b, C)
-            if _shared(bank):
-                bank.shared_accumulate(_flat(inputs), labels, every_group, probes)
+            if _shared(training):
+                training.shared_accumulate(_flat(inputs), labels, torch.arange(training.groups, device=training.device), probes)
             else:
-                bank.fused_accumulate(inputs, labels, count)
-            bank.step()
-            if bank.steps % validate_every == 0:
-                active = bank.observe(validation_loss(bank, valid_X, valid_y, count), settings.patience)
+                training.fused_accumulate(inputs, labels, len(kept))
+            training.step()
+            if training.steps % validate_every == 0:
+                active = training.observe(validation_loss(training, valid_X, valid_y, len(kept)), settings.patience)
                 if active == 0:
                     break
-        bar.set_postfix(active=active)
+                finished = training.stopped.view(len(kept), probes).all(dim=1)  # (K',)
+                if compact and bool(finished.any()):
+                    if training is not bank:
+                        _keep_record(bank, training, _setting_groups(kept, probes))
+                    training = _without_finished(training, (~finished).nonzero().squeeze(1), probes, original=training is bank)
+                    kept = kept[~finished]
+        bar.set_postfix(active=active, settings=len(kept))
         if active == 0:
             break
+    if training is not bank:
+        _keep_record(bank, training, _setting_groups(kept, probes))
+        bank.params = bank.best
     return epochs
 
 
