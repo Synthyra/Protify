@@ -48,9 +48,6 @@ def read_sweeps(roots: Path | Sequence[Path], labels: Sequence[str]) -> pd.DataF
     for column in ("hidden", "dropout"):  # sweeps written before MLP settings were recorded are linear
         if column not in sweeps:
             sweeps[column] = np.nan
-    tasks = sweeps.groupby(["label", "replicate"])["task"].agg(lambda names: tuple(sorted(set(names))))
-    if tasks.nunique() != 1:
-        raise ValueError(f"Labels or replicates swept different tasks, so their seconds do not compare: {tasks.to_dict()}.")
     return sweeps
 
 
@@ -71,8 +68,12 @@ def _per_task_shortfalls(sweeps: pd.DataFrame) -> pd.DataFrame:
 
 
 def rank_settings(sweeps: pd.DataFrame) -> pd.DataFrame:
-    """Each setting's mean and worst per-task shortfall, and the seconds its label took, best first."""
+    """Each setting's mean and worst per-task shortfall, and the seconds its label took, best first. Every label and
+    replicate must hold the same tasks, so filter the sweeps to one loss first when a label swept one loss alone."""
     sweeps = _complete(sweeps)
+    tasks = sweeps.groupby(["label", "replicate"])["task"].agg(lambda names: tuple(sorted(set(names))))
+    if tasks.nunique() != 1:
+        raise ValueError(f"Labels or replicates swept different tasks, so their seconds do not compare: {tasks.to_dict()}.")
     per_task = _per_task_shortfalls(sweeps)
     task_seconds = sweeps.groupby(["label", "replicate", "task"])["task_seconds"].first()
     seconds = task_seconds.groupby(["label", "replicate"]).sum().groupby("label").mean().rename("seconds")

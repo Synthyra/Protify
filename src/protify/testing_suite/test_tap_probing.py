@@ -791,14 +791,18 @@ def test_a_raw_pass_writes_the_normalized_twin(tiny_model: ESMplusplusModel, tok
 
 def test_mlp_sweeps_of_replicates_then_select(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
     synthetic_dataset(tmp_path / "data")
-    names = ["localization", "go_cc"]
+    names = ["localization", "go_cc", "prot_param"]
     datasets = {name: load_concept(name, local_dir=tmp_path / "data") for name in names}
     roots = [tmp_path / f"run_s{seed}" for seed in (0, 1)]
     for seed, root in zip((0, 1), roots):
         write_stores(tiny_model, tokenizer, "tiny", datasets, root, TapSpec(sites=("embedding", "resid_post")), controls=False, seed=0, max_tokens=256, device=CPU)
-        main(["sweep", "--root", str(root), "--tasks", ",".join(names), "--local-data", str(tmp_path / "data"), "--sites", "embedding,resid_post",
-              "--device", "cpu", "--lr", "3e-2", "3e-3", "--wd", "0", "0.1", "--batch-size", "16", "--max-epochs", "4", "--patience", "2",
-              "--probe", "mlp", "--pooling", "mean_var", "mean", "--hidden", "8", "16", "--dropout", "0.1", "0.3", "--label", "p", "--seed", str(seed)])
+        common = ["--root", str(root), "--local-data", str(tmp_path / "data"), "--sites", "embedding,resid_post", "--device", "cpu",
+                  "--max-epochs", "4", "--patience", "2", "--probe", "mlp", "--seed", str(seed)]
+        main(["sweep", *common, "--tasks", ",".join(names), "--lr", "3e-2", "3e-3", "--wd", "0", "0.1", "--batch-size", "16",
+              "--pooling", "mean_var", "mean", "--hidden", "8", "16", "--dropout", "0.1", "0.3", "--label", "p"])
+        # a second batch for the regression task alone, as the study sweeps ProtParam at a second batch
+        main(["sweep", *common, "--tasks", "prot_param", "--lr", "3e-2", "--wd", "0", "--batch-size", "32", "--pooling", "mean_var",
+              "--hidden", "8", "--dropout", "0.1", "--label", "q_mlp"])
     sweep = pd.read_parquet(roots[0] / "sweeps" / "p_mlp" / "go_cc" / "sweep.parquet")
     assert len(sweep) == 4 * 4 * (1 + 3)  # lr x wd, hidden x dropout, embedding and three blocks
     assert set(sweep["hidden"]) == {8.0, 16.0} and set(sweep["dropout"]) == {0.1, 0.3} and set(sweep["pooling"]) == {"mean_var"}
@@ -809,6 +813,13 @@ def test_mlp_sweeps_of_replicates_then_select(tiny_model: ESMplusplusModel, toke
     main(["select", "--root", *map(str, roots), "--labels", "p_mlp_mean", "--loss", "classification"])
     record = json.loads((roots[0] / "sweeps" / "selection_p_mlp_mean_classification.json").read_text(encoding="utf-8"))
     assert record["chosen"]["hidden"] in (8.0, 16.0) and len(record["roots"]) == 2
+    assert record["tasks"] == ["go_cc", "localization"]
+    # labels that swept different tasks compare within the one loss they share, and not across losses
+    main(["select", "--root", *map(str, roots), "--labels", "p_mlp", "q_mlp", "--loss", "regression"])
+    record = json.loads((roots[0] / "sweeps" / "selection_p_mlp_q_mlp_regression.json").read_text(encoding="utf-8"))
+    assert record["tasks"] == ["prot_param"] and {row["label"] for row in record["ranking"]} == {"p_mlp", "q_mlp"}
+    with pytest.raises(ValueError, match="swept different tasks"):
+        main(["select", "--root", *map(str, roots), "--labels", "p_mlp", "q_mlp"])
 
 
 def test_selection_averages_replicates_and_prefers_narrow_layers_within_tolerance() -> None:
