@@ -1112,7 +1112,7 @@ def build_parser() -> argparse.ArgumentParser:
     erase.add_argument("--validation-proteins", type=int, default=500)
     erase.add_argument("--test-proteins", type=int, default=1000, help="the first of a fixed permutation of the test split")
     erase.add_argument("--residue-rows", type=int, default=100_000, help="training rows of a residue concept's readout (a third for validation)")
-    erase.add_argument("--max-rank", type=int, default=16, help="directions erased at most, for concepts with many labels")
+    erase.add_argument("--max-rank", type=int, default=16, help="directions erased at most from a multilabel concept")
     erase.set_defaults(handler=command_erase, max_tokens=8192)
 
     shapes = commands.add_parser("geometry", help="neighbor separability, mean and covariance separation, and the shape of every pooled mean state")

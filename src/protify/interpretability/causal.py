@@ -636,7 +636,8 @@ def erase_concept(model: nn.Module, tokenizer: object, data: ConceptData, depths
                   max_rank: int | None = None, max_tokens: int = 8192) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]:
     """Erase the concept at each of `depths` (LEACE, and the random control of the same rank), then read it: the
     masked-token cost on the test proteins (`STATS` per protein against the unerased prediction) and the concept's
-    linear readability where `readout_depths` say, against the unerased stream there. The training and validation
+    linear readability where `readout_depths` say, against the unerased stream there. `max_rank` bounds a multilabel
+    concept's erased directions; other concepts lose every direction LEACE finds. The training and validation
     proteins are drawn from the seed; the test proteins, whose draws every seed and model share, are the first
     `test_proteins` of a fixed permutation of the test split."""
     blocks = len(esmc_backbone(model).transformer.blocks)
@@ -653,8 +654,9 @@ def erase_concept(model: nn.Module, tokenizer: object, data: ConceptData, depths
     started = time.time()
     moments = concept_moments(model, tokenizer, data, rows["train"], depths, device, max_tokens)
     erasers = {}
+    cap = max_rank if data.task.kind == "multilabel" else None  # only a many-label concept is cut to its top directions
     for depth in depths:
-        fitted = leace(moments[depth], max_rank)
+        fitted = leace(moments[depth], cap)
         erasers[(depth, "leace")] = fitted
         erasers[(depth, "random")] = random_eraser(moments[depth], fitted.rank, seed * 1000 + depth)
     record: dict[str, object] = {"rows": {split: len(chosen) for split, chosen in rows.items()}, "erasers": {}, "readouts": [],
