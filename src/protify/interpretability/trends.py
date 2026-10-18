@@ -493,7 +493,7 @@ def pair_figure(
             axes[2].scatter(table["median"], positions + offset, s=10, color=colors[model], zorder=3)
         axes[2].set_yticks(positions)
         axes[2].set_yticklabels([SITE_LABELS.get(site, site) for site in sites], fontsize=5.2)
-        axes[2].set_xlabel("best at the site minus best residual stream")
+        axes[2].set_xlabel("site minus stream, best of each")
         axes[2].grid(axis="x", color=GRID, lw=0.5)
     handles, labels = axes[0].get_legend_handles_labels()
     figures._legend_top(figure, handles, labels, min(len(labels), 4) or 1, 0.35)
