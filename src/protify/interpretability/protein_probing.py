@@ -101,7 +101,7 @@ def family_offset(layout: SiteLayout, slots: slice, family: str) -> tuple[int, i
 def bank_layer_bytes(layout: SiteLayout, settings: TrainingSettings, outputs: int) -> int:
     """Device bytes one layer's probes take in a bank under `settings`, every grid setting and family included: what
     `bank_budget_gb` bounds. A head family's probes together hold a full-width probe's input columns."""
-    width = 2 * layout.width if settings.pooling == "mean_var" else layout.width
+    width = layout.width if settings.pooling == "mean" else 2 * layout.width
     if settings.probe.kind == "linear":
         parameters = width * outputs + outputs
     else:
@@ -123,7 +123,8 @@ def keep_state(saved: dict[str, dict[str, Tensor]], key: str, state: dict[str, T
 
 
 def head_view(pooled: Tensor, heads: int, pooling: str = "mean_var") -> Tensor:
-    """Split pooled (mean, variance) columns into per-head (mean, variance) blocks, or per-head means alone."""
+    """Split pooled (mean, variance) columns into per-head (mean, variance) blocks, per-head means alone, or per-head
+    (mean, squared mean) blocks."""
     # pooled: (n, L, 2 * w) -> (n, L * H, 2 * d_h), or (n, L * H, d_h) for the mean alone
     n, layers, columns = pooled.shape
     width = columns // 2
@@ -131,14 +132,21 @@ def head_view(pooled: Tensor, heads: int, pooling: str = "mean_var") -> Tensor:
     mean = mean.reshape(n, layers, heads, width // heads)  # (n, L, H, d_h)
     if pooling == "mean":
         return mean.reshape(n, layers * heads, width // heads)  # (n, L * H, d_h)
-    variance = variance.reshape(n, layers, heads, width // heads)  # (n, L, H, d_h)
+    if pooling == "mean_square":
+        variance = mean.square()  # (n, L, H, d_h): the squared means take the variance's place
+    else:
+        variance = variance.reshape(n, layers, heads, width // heads)  # (n, L, H, d_h)
     return torch.cat([mean, variance], dim=-1).reshape(n, layers * heads, 2 * width // heads)  # (n, L * H, 2 * d_h)
 
 
 def full_view(pooled: Tensor, pooling: str = "mean_var") -> Tensor:
-    """The pooled columns a full-width probe reads: mean then variance, or the mean alone."""
+    """The pooled columns a full-width probe reads: mean then variance, the mean alone, or the mean then its
+    elementwise square (a quadratic probe's diagonal terms)."""
     # pooled: (n, L, 2 * w) -> (n, L, 2 * w), or (n, L, w)
-    return pooled if pooling == "mean_var" else pooled[..., : pooled.shape[-1] // 2]
+    if pooling == "mean_var":
+        return pooled
+    mean = pooled[..., : pooled.shape[-1] // 2]
+    return mean if pooling == "mean" else torch.cat([mean, mean.square()], dim=-1)
 
 
 def feature_moments(X: Tensor, chunk: int = 1024) -> tuple[Tensor, Tensor]:

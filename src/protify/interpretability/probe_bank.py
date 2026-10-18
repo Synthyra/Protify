@@ -37,16 +37,30 @@ class ProbeSettings:
     dropout: float = 0.1
     betas: tuple[float, float] = (0.9, 0.999)
     eps: float = 1e-8
+    activation: str = "gelu"  # an MLP's hidden units: gelu, or identity for a rank-limited linear map with the MLP's shape
 
     def __post_init__(self) -> None:
         if self.kind not in ("linear", "mlp"):
             raise ValueError(f"Probe kind must be 'linear' or 'mlp', not {self.kind!r}.")
+        if self.activation not in ACTIVATIONS:
+            raise ValueError(f"Probe activation must be one of {ACTIVATIONS}, not {self.activation!r}.")
 
 
 def _uniform_(tensor: Tensor, fan_in: int, generator: torch.Generator) -> Tensor:
     """PyTorch's nn.Linear initialization, U(-1/sqrt(fan_in), 1/sqrt(fan_in)), for weights and biases alike."""
     bound = 1.0 / math.sqrt(fan_in)
     return tensor.uniform_(-bound, bound, generator=generator)
+
+
+ACTIVATIONS = ("gelu", "identity")
+
+
+def _activate(pre: Tensor, activation: str) -> Tensor:
+    return F.gelu(pre) if activation == "gelu" else pre
+
+
+def _activation_grad(pre: Tensor, activation: str) -> Tensor | float:
+    return _gelu_grad(pre) if activation == "gelu" else 1.0
 
 
 def _gelu_grad(pre: Tensor) -> Tensor:
@@ -177,7 +191,7 @@ class ProbeBank:
         if self.settings.kind == "linear":
             return torch.einsum("ngw,gwc->ngc", inputs, weights["weight"][start:stop]) + weights["bias"][start:stop]  # (n, g, C)
         pre = torch.einsum("ngw,gwm->ngm", inputs, weights["weight1"][start:stop]) + weights["bias1"][start:stop]  # (n, g, m)
-        return torch.einsum("ngm,gmc->ngc", F.gelu(pre), weights["weight2"][start:stop]) + weights["bias2"][start:stop]  # (n, g, C)
+        return torch.einsum("ngm,gmc->ngc", _activate(pre, self.settings.activation), weights["weight2"][start:stop]) + weights["bias2"][start:stop]  # (n, g, C)
 
     def _loss_terms(self, Z: Tensor, targets: Tensor) -> tuple[Tensor, Tensor]:
         """Summed loss per group and its gradient with respect to the logits, both unnormalized."""
@@ -222,7 +236,7 @@ class ProbeBank:
         weight1, bias1 = self.params["weight1"][start:stop], self.params["bias1"][start:stop]
         weight2, bias2 = self.params["weight2"][start:stop], self.params["bias2"][start:stop]
         pre = torch.einsum("ngw,gwm->ngm", inputs, weight1) + bias1  # (n, g, m)
-        hidden = F.gelu(pre)  # (n, g, m)
+        hidden = _activate(pre, self.settings.activation)  # (n, g, m)
         dropped = self._dropout_mask(hidden)  # (n, g, m) or None
         hidden_used = hidden * dropped if dropped is not None else hidden  # (n, g, m)
         Z = torch.einsum("ngm,gmc->ngc", hidden_used, weight2) + bias2  # (n, g, C)
@@ -233,7 +247,7 @@ class ProbeBank:
         d_hidden = torch.einsum("ngc,gmc->ngm", dZ, weight2)  # (n, g, m)
         if dropped is not None:
             d_hidden = d_hidden * dropped
-        d_pre = d_hidden * _gelu_grad(pre)  # (n, g, m)
+        d_pre = d_hidden * _activation_grad(pre, self.settings.activation)  # (n, g, m)
         self.grads["weight1"][start:stop] += torch.einsum("ngw,ngm->gwm", inputs, d_pre)  # (g, w, m)
         self.grads["bias1"][start:stop] += d_pre.sum(dim=0)  # (g, m)
         return loss * scale
@@ -296,7 +310,7 @@ class ProbeBank:
         # X: (n, P, w) -> (n, G, C)
         first, first_bias, second, second_bias = self._fused_weights(which, settings_count)
         pre = torch.bmm(self._fused_inputs(X, settings_count), first).to(torch.float32) + first_bias  # (P, n, K * m)
-        return self._fused_output(F.gelu(pre), second, second_bias)
+        return self._fused_output(_activate(pre, self.settings.activation), second, second_bias)
 
     def fused_loss_sums(self, X: Tensor, targets: Tensor, settings_count: int = 1, which: str = "current") -> Tensor:
         """Summed loss of every group over these rows: (G,)."""
@@ -314,7 +328,7 @@ class ProbeBank:
         inputs = self._fused_inputs(X, count)  # (P, n, w)
         first, first_bias, second, second_bias = self._fused_weights("current", count)
         pre = torch.bmm(inputs, first).to(torch.float32) + first_bias  # (P, n, K * m)
-        activated = F.gelu(pre)  # (P, n, K * m)
+        activated = _activate(pre, self.settings.activation)  # (P, n, K * m)
         dropped = self._dropout_mask(activated)  # (P, n, K * m) or None
         used = activated * dropped if dropped is not None else activated  # (P, n, K * m)
         Z = self._fused_output(used, second, second_bias)  # (n, G, C)
@@ -331,7 +345,7 @@ class ProbeBank:
         d_used = d_used.reshape(probes, rows, count * hidden)  # (P, n, K * m)
         if dropped is not None:
             d_used = d_used * dropped
-        d_pre = d_used * _gelu_grad(pre)  # (P, n, K * m)
+        d_pre = d_used * _activation_grad(pre, self.settings.activation)  # (P, n, K * m)
         d_first = torch.bmm(inputs.transpose(1, 2), d_pre.to(self.operand_dtype))  # (P, w, K * m)
         self.grads["weight1"].view(count, probes, self.width, hidden).add_(d_first.view(probes, self.width, count, hidden).permute(2, 0, 1, 3))
         self.grads["bias1"] += d_pre.sum(dim=1).view(probes, count, hidden).transpose(0, 1).reshape(self.groups, hidden)

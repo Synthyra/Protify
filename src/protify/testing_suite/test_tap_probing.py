@@ -18,7 +18,7 @@ try:
     from src.protify.base_models.esmc import get_esmc_tokenizer
     from src.protify.interpretability.baselines import BASELINE_SITES, BaselineModel
     from src.protify.interpretability.capture import capture_states, model_dims
-    from src.protify.interpretability import figures
+    from src.protify.interpretability import causal, figures, geometry
     from src.protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, interval_tasks, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
     from src.protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, protein_draws, ranking_metrics, standardized, threshold_mcc, weighted_ranking_metrics
     from src.protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
@@ -43,7 +43,7 @@ except ImportError:
     from protify.base_models.esmc import get_esmc_tokenizer
     from protify.interpretability.baselines import BASELINE_SITES, BaselineModel
     from protify.interpretability.capture import capture_states, model_dims
-    from protify.interpretability import figures
+    from protify.interpretability import causal, figures, geometry
     from protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, interval_tasks, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
     from protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, protein_draws, ranking_metrics, standardized, threshold_mcc, weighted_ranking_metrics
     from protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
@@ -64,7 +64,7 @@ except ImportError:
     from protify.interpretability.training import CONTROLS, PLM_STATES, PROBE_STATES, TaskResults, TrainingSettings, make_bank
     from protify.interpretability.trends import PAIR_TASK
 
-from fastplms.models.esm_plusplus.modeling_esm_plusplus import ESMplusplusConfig, ESMplusplusModel
+from fastplms.models.esm_plusplus.modeling_esm_plusplus import ESMplusplusConfig, ESMplusplusForMaskedLM, ESMplusplusModel
 
 
 AMINO_ACIDS = "ACDEFGHIKLMNPQRSTVWY"
@@ -318,6 +318,9 @@ def test_head_view_splits_mean_and_variance_by_head() -> None:
     torch.testing.assert_close(means[:, layer * 4 + head], pooled[:, layer, 4:6])
     torch.testing.assert_close(full_view(pooled, "mean"), pooled[..., :8])
     assert full_view(pooled) is pooled
+    torch.testing.assert_close(full_view(pooled, "mean_square"), torch.cat([pooled[..., :8], pooled[..., :8].square()], dim=-1))
+    squares = head_view(pooled, heads=4, pooling="mean_square")  # (2, 12, 4): each head's means, then their squares
+    torch.testing.assert_close(squares[:, layer * 4 + head], torch.cat([pooled[:, layer, 4:6], pooled[:, layer, 4:6].square()], dim=-1))
 
 
 # -- probe bank ----------------------------------------------------------------------------------------------------
@@ -328,7 +331,8 @@ def reference_loss(params: dict[str, torch.Tensor], X: torch.Tensor, targets: to
     if kind == "linear":
         Z = torch.einsum("ngw,gwc->ngc", X, params["weight"]) + params["bias"]
     else:
-        hidden = F.gelu(torch.einsum("ngw,gwm->ngm", X, params["weight1"]) + params["bias1"])
+        pre = torch.einsum("ngw,gwm->ngm", X, params["weight1"]) + params["bias1"]
+        hidden = pre if kind == "bottleneck" else F.gelu(pre)
         Z = torch.einsum("ngm,gmc->ngc", hidden, params["weight2"]) + params["bias2"]
     if loss == "multiclass":
         return sum(F.cross_entropy(Z[:, group], targets) for group in range(Z.shape[1]))
@@ -338,12 +342,12 @@ def reference_loss(params: dict[str, torch.Tensor], X: torch.Tensor, targets: to
     return sum(F.mse_loss(Z[:, group], expanded[:, group]) for group in range(Z.shape[1]))
 
 
-@pytest.mark.parametrize("kind", ["linear", "mlp"])
+@pytest.mark.parametrize("kind", ["linear", "mlp", "bottleneck"])
 @pytest.mark.parametrize("loss", ["multiclass", "multilabel", "regression"])
 def test_probe_bank_gradients_match_autograd(kind: str, loss: str) -> None:
     generator = torch.Generator().manual_seed(5)
     groups, width, outputs, rows = 3, 6, 4, 9
-    settings = ProbeSettings(kind=kind, hidden=7, dropout=0.0)
+    settings = ProbeSettings(kind="linear" if kind == "linear" else "mlp", hidden=7, dropout=0.0, activation="identity" if kind == "bottleneck" else "gelu")
     bank = ProbeBank([f"p{g}" for g in range(groups)], width, outputs, loss, settings,
                      torch.full((groups,), 1e-3), torch.zeros(groups), seed=1, device=CPU)
     X = torch.randn(rows, groups, width, generator=generator)
@@ -630,11 +634,13 @@ def task_targets(loss: str, rows: int, outputs: int, generator: torch.Generator)
     return torch.randn(rows, outputs, generator=generator)
 
 
+@pytest.mark.parametrize("activation", ["gelu", "identity"])
 @pytest.mark.parametrize("loss", ["multiclass", "multilabel", "regression"])
-def test_fused_mlp_path_matches_the_per_setting_path(loss: str) -> None:
+def test_fused_mlp_path_matches_the_per_setting_path(loss: str, activation: str) -> None:
     generator = torch.Generator().manual_seed(12)
     count, probes, width, outputs, rows = 3, 4, 5, 3, 11
-    settings = TrainingSettings(learning_rates=(1e-2, 1e-3, 3e-4), weight_decays=(0.0,), probe=ProbeSettings(kind="mlp", hidden=6, dropout=0.0))
+    settings = TrainingSettings(learning_rates=(1e-2, 1e-3, 3e-4), weight_decays=(0.0,),
+                                probe=ProbeSettings(kind="mlp", hidden=6, dropout=0.0, activation=activation))
     bank = make_bank([f"s:{layer}" for layer in range(probes)], width, outputs, loss, settings, seed=0, device=CPU)
     for value in bank.params.values():  # distinct weights in every setting, so a mix-up between settings shows
         value.add_(0.1 * torch.randn(value.shape, generator=generator))
@@ -1638,3 +1644,187 @@ def test_trends_across_models(tmp_path: Path) -> None:
     chosen = pair_best.set_index("model").loc["ESMC-600"]
     assert set(chance[chance["model"] == "ESMC-600"]["probe_name"]) == {f"{chosen['any_site']}:{int(chosen['any_layer'])}"}
     assert (chance["above_chance"] == (chance["low"] > chance["chance"])).all()
+
+
+# -- from readable to used: lenses, write ablations and erasure ------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def tiny_masked_lm() -> ESMplusplusForMaskedLM:
+    torch.manual_seed(0)
+    config = ESMplusplusConfig(hidden_size=64, num_attention_heads=4, num_hidden_layers=3, attn_backend="sdpa")
+    return ESMplusplusForMaskedLM(config).eval()
+
+
+def test_masked_columns_are_seeded_per_protein_at_the_rate() -> None:
+    columns = causal.masked_columns(100, protein=3, seed=24895)
+    assert len(columns) == 15 and columns.min() >= 1 and columns.max() <= 100 and len(set(columns)) == 15
+    assert np.array_equal(columns, causal.masked_columns(100, protein=3, seed=24895))
+    assert not np.array_equal(columns, causal.masked_columns(100, protein=4, seed=24895))
+    assert len(causal.masked_columns(3, protein=0, seed=1)) == 1  # at least one residue
+
+
+def test_masked_batch_masks_only_its_residues(tokenizer: object) -> None:
+    sequences, _ = synthetic_proteins(6, seed=2)
+    batch = token_batches(sequences, 400)[0]
+    masked = causal.masked_batch(tokenizer, batch, 24895, CPU)
+    clean = tokenizer(list(batch.sequences), padding=True, return_tensors="pt")["input_ids"].reshape(-1)
+    fed = masked.input_ids.reshape(-1)
+    assert (fed[masked.masked] == tokenizer.mask_token_id).all() and torch.equal(masked.targets, clean[masked.masked])
+    others = torch.ones_like(fed, dtype=torch.bool)
+    others[masked.masked] = False
+    assert torch.equal(fed[others], clean[others])
+    assert len(masked.masked) + len(masked.kept) == sum(len(sequence) for sequence in batch.sequences)
+
+
+def test_stream_hooks_read_every_depth_and_an_identity_write_changes_nothing(tiny_masked_lm: ESMplusplusForMaskedLM, tokenizer: object) -> None:
+    encoded = tokenizer(["MKTAYIAKQR", "MLLA"], padding=True, return_tensors="pt")
+    seen = {}
+    with torch.no_grad():
+        reference = tiny_masked_lm(**encoded).logits
+        with causal.stream_hooks(tiny_masked_lm, read=lambda depth, x: seen.__setitem__(depth, x.clone()), write=lambda depth, x: x.clone()) as blocks:
+            again = tiny_masked_lm(**encoded).logits
+        hidden = tiny_masked_lm.transformer(tiny_masked_lm.embed(encoded["input_ids"]), attention_mask=encoded["attention_mask"], output_hidden_states=True).hidden_states
+    assert blocks == 3 and sorted(seen) == [0, 1, 2, 3, 4]
+    torch.testing.assert_close(again, reference)
+    for depth in range(3):  # the inputs of the three blocks, then the final norm's output
+        torch.testing.assert_close(seen[depth], hidden[depth])
+    torch.testing.assert_close(seen[4], hidden[-1])
+    assert not [module for module in tiny_masked_lm.modules() if module._forward_hooks]
+
+
+def test_a_zero_write_at_one_depth_changes_the_prediction(tiny_masked_lm: ESMplusplusForMaskedLM, tokenizer: object) -> None:
+    encoded = tokenizer(["MKTAYIAKQR"], padding=True, return_tensors="pt")
+    with torch.no_grad():
+        reference = tiny_masked_lm(**encoded).logits
+        with causal.write_hooks(tiny_masked_lm, 1, "ffn", torch.zeros_like):
+            ablated = tiny_masked_lm(**encoded).logits
+        block = tiny_masked_lm.transformer.blocks[1]
+        x = tiny_masked_lm.embed(encoded["input_ids"])
+        x = tiny_masked_lm.transformer.blocks[0](x)[0]
+        attention = block.attn(x)[0]
+        x = x + attention / block.scaling_factor  # the block without its feed-forward write
+        x = tiny_masked_lm.transformer.blocks[2](x)[0]
+        manual = tiny_masked_lm.sequence_head(tiny_masked_lm.transformer.norm(x))
+    assert not torch.allclose(ablated, reference)
+    torch.testing.assert_close(ablated, manual)
+
+
+def test_an_untrained_tuned_lens_is_the_logit_lens_and_the_last_depth_is_the_model(tiny_masked_lm: ESMplusplusForMaskedLM, tokenizer: object) -> None:
+    encoded = tokenizer(["MKTAYIAKQR"], padding=True, return_tensors="pt")
+    head = causal.lens_head(tiny_masked_lm)
+    lens = causal.TunedLens(4, 64)
+    seen = {}
+    with torch.no_grad(), causal.stream_hooks(tiny_masked_lm, read=lambda depth, x: seen.__setitem__(depth, x[0].float())):
+        logits = tiny_masked_lm(**encoded).logits[0]
+    with torch.no_grad():
+        torch.testing.assert_close(head(lens(2, seen[2])), head(seen[2]))
+        torch.testing.assert_close(head(seen[3]), logits, rtol=1e-4, atol=1e-4)
+
+
+def test_leace_leaves_no_linear_covariance_and_the_control_matches_its_rank() -> None:
+    generator = torch.Generator().manual_seed(0)
+    labels = torch.randint(0, 3, (4000,), generator=generator)
+    z = F.one_hot(labels, 3).to(torch.float64)
+    x = torch.randn(4000, 16, generator=generator, dtype=torch.float64) + z @ torch.randn(3, 16, generator=generator, dtype=torch.float64) * 2
+    x[:, 0] *= 30.0  # one large direction, as the stream's
+    moments = causal.Moments(4000.0, x.sum(0), x.T @ x, z.sum(0), x.T @ z)
+    eraser = causal.leace(moments)
+    erased = eraser(x.to(torch.float32)).to(torch.float64)
+    before = (x - x.mean(0)).T @ (z - z.mean(0)) / 4000
+    cross = (erased - erased.mean(0)).T @ (z - z.mean(0)) / 4000
+    assert eraser.rank == 2 and cross.abs().max() < 1e-4 * before.abs().max()
+    control = causal.random_eraser(moments, eraser.rank, seed=1)
+    projection = control.projection.to(torch.float64)
+    assert control.rank == 2 and torch.linalg.matrix_rank(projection, rtol=1e-4) == 2  # stored in float32
+    torch.testing.assert_close(projection @ projection, projection, rtol=1e-4, atol=1e-4)  # a projection
+    assert causal.leace(moments, max_rank=1).rank == 1
+
+
+def test_relative_depths_match_across_models() -> None:
+    assert causal.relative_depths(30, [0.03, 0.5, 0.97]) == [1, 16, 30]
+    assert causal.relative_depths(80, [0.5]) == [41]
+
+
+@pytest.mark.parametrize("name", ["ssp_q3", "localization", "prot_param", "go_cc"])
+def test_erase_concept_runs_and_removes_the_concept_where_it_erases(name: str, tiny_masked_lm: ESMplusplusForMaskedLM, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path)
+    data = load_concept(name, local_dir=tmp_path)
+    mlm, readouts, record = causal.erase_concept(tiny_masked_lm, tokenizer, data, [0, 2], CPU, seed=24895, fit_proteins=90, validation_proteins=30,
+                                                 test_proteins=30, residue_rows_cap=1500, max_rank=4, max_tokens=600)
+    assert set(mlm["condition"]) == set(causal.CONDITIONS) and set(mlm["depth"]) == {0, 2} and mlm["protein"].nunique() == 30
+    assert (mlm["masked"] >= 1).all() and (mlm["kl"] >= -1e-6).all()
+    full = readouts[readouts["draw"] == 0]
+    assert set(full["condition"]) == {"clean", *causal.CONDITIONS} and readouts["draw"].max() == 1000
+    assert set(full[full["condition"] == "leace"]["read"]) == {0, 2, 3, 4}
+    assert all(item["rank"] >= 1 for item in record["erasers"].values())
+
+
+def test_lenses_train_and_score_every_depth(tiny_masked_lm: ESMplusplusForMaskedLM, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path)
+    data = load_concept("ssp_q3", local_dir=tmp_path)
+    lens, readout, history = causal.train_lenses(tiny_masked_lm, tokenizer, data, CPU, seed=24895, epochs=2, max_tokens=600, moment_proteins=20)
+    assert len(history) == 2 and history[1]["lens_kl"] <= history[0]["lens_kl"] + 1e-6
+    table = causal.score_lenses(tiny_masked_lm, tokenizer, data, lens, readout, CPU, seed=24895, max_tokens=600)
+    masked = table[(table["lens"] != "identity") & (table["class"] == "all")]
+    assert set(masked["depth"]) == set(range(5)) and masked["protein"].nunique() == 30
+    final = masked[masked["depth"] == 4]
+    assert np.allclose(final["kl"], 0.0, atol=1e-9)  # the final norm is the model's own prediction
+    last = masked[(masked["depth"] == 3) & (masked["lens"] == "logit")]
+    assert last["kl"].sum() < 1e-6 * last["masked"].sum() + 1e-3  # the last block through the head is the prediction too
+    by_class = table[(table["lens"] == "logit") & (table["class"] != "all") & (table["depth"] == 1)]
+    assert np.isclose(by_class["masked"].sum(), masked[(masked["depth"] == 1) & (masked["lens"] == "logit")]["masked"].sum())
+    identity = table[table["lens"] == "identity"]
+    assert set(identity["depth"]) == set(range(5)) and (identity["correct"] <= identity["masked"]).all()
+
+
+def test_ablations_cost_against_the_clean_prediction(tiny_masked_lm: ESMplusplusForMaskedLM, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path)
+    data = load_concept("ssp_q3", local_dir=tmp_path)
+    means = causal.mean_writes(tiny_masked_lm, tokenizer, data.splits["train"].sequences[:20], CPU, seed=1, max_tokens=600)
+    assert means.shape == (3, 2, 64)
+    table = causal.score_ablations(tiny_masked_lm, tokenizer, data, means, CPU, seed=1, max_tokens=600)
+    clean = table[table["block"] == -1]
+    assert len(clean) == 30 and np.allclose(clean["kl"], 0.0, atol=1e-9)
+    ablated = table[table["block"] >= 0]
+    assert len(ablated) == 30 * 3 * 2 * 2 and (ablated.groupby(["block", "write", "ablation"])["kl"].sum() > 0).all()
+    assert np.allclose(ablated.groupby(["block", "write", "ablation"])["masked"].sum(), clean["masked"].sum())
+
+
+# -- the geometry of pooled states ------------------------------------------------------------------------------------
+
+
+def test_bhattacharyya_terms_separate_means_from_shape() -> None:
+    generator = torch.Generator().manual_seed(3)
+    labels = torch.rand(4000, generator=generator) > 0.5
+    shifted = torch.randn(4000, 8, generator=generator, dtype=torch.float64)
+    shifted[labels, 0] += 2.0  # the classes differ in their means
+    spread = torch.randn(4000, 8, generator=generator, dtype=torch.float64)
+    spread[labels, 0] *= 3.0  # the classes differ in their spread alone
+    by_mean = geometry.bhattacharyya_terms(shifted, labels.unsqueeze(1), components=8)
+    by_shape = geometry.bhattacharyya_terms(spread, labels.unsqueeze(1), components=8)
+    assert by_mean["bhattacharyya_mean"] == pytest.approx(0.5, rel=0.1) and by_mean["bhattacharyya_cov"] < 0.02
+    assert by_shape["bhattacharyya_mean"] < 0.02 and by_shape["bhattacharyya_cov"] > 0.2
+
+
+def test_state_geometry_reads_rank_and_a_massive_dimension() -> None:
+    generator = torch.Generator().manual_seed(4)
+    X = torch.randn(3000, 16, generator=generator, dtype=torch.float64)
+    shape = geometry.state_geometry(X, twonn_rows=1500)
+    assert shape["effective_rank"] == pytest.approx(16, rel=0.05) and shape["participation_ratio"] == pytest.approx(16, rel=0.05)
+    assert abs(shape["anisotropy"]) < 0.01 and shape["twonn_dimension"] == pytest.approx(16, rel=0.3)
+    X[:, 3] *= 20.0
+    heavy = geometry.state_geometry(X, twonn_rows=1500)
+    assert heavy["top_dimension_share"] > 0.9 and heavy["effective_rank"] < 3
+
+
+def test_store_geometry_on_a_tiny_store(tiny_model: ESMplusplusModel, tokenizer: object, tmp_path: Path) -> None:
+    synthetic_dataset(tmp_path / "data")
+    tasks = [load_concept(name, local_dir=tmp_path / "data") for name in ("localization", "prot_param", "go_cc")]
+    sequences = sorted({sequence for data in tasks for part in data.splits.values() for sequence in part.sequences})
+    spec = TapSpec(sites=("resid_post", "final_norm"), per_head=False)
+    embed_pooled(tiny_model, tokenizer, sequences, spec, {False: tmp_path / "store"}, "tiny", "trained", max_tokens=600, device=CPU, progress=False)
+    separability, shapes = geometry.store_geometry(PooledTapStore(tmp_path / "store"), tasks, ["resid_post", "final_norm"], CPU)
+    assert len(shapes) == 4 and set(separability["task"]) == {"localization", "prot_param", "go_cc"} and len(separability) == 12
+    assert separability["knn_k"].isin(geometry.NEIGHBORS).all() and separability[separability["task"] == "prot_param"]["labels"].eq(0).all()
+    assert (separability[separability["task"] == "localization"]["knn"] > 0.3).all()  # the classes differ in composition

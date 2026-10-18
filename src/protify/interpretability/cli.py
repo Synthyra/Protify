@@ -50,6 +50,7 @@ holds on the device at once.
 from __future__ import annotations
 
 import argparse
+import numpy as np
 import json
 import time
 import pandas as pd
@@ -327,9 +328,9 @@ def training_settings(args: argparse.Namespace) -> TrainingSettings:
 
 
 def variant_label(label: str | None, kind: str, pooling: str, several: bool) -> str:
-    """A variant's results label: the one given when the arguments name one variant, else `<kind>[_mean]` after the
+    """A variant's results label: the one given when the arguments name one variant, else `<kind>[_<pooling>]` after the
     given label as a prefix (`linear`, `linear_mean`, `mlp`, `mlp_mean`, or `p_b256_mlp_mean`)."""
-    name = f"{kind}_mean" if pooling == "mean" else kind
+    name = kind if pooling == "mean_var" else f"{kind}_{pooling}"
     if label is None:
         return name
     return f"{label}_{name}" if several else label
@@ -338,7 +339,8 @@ def variant_label(label: str | None, kind: str, pooling: str, several: bool) -> 
 def file_variant(entry: dict[str, object], base: TrainingSettings) -> Variant:
     """One variant of a `--variants` file: `label`, `probe`, `pooling`, and optionally `hidden`, `dropout`, `lr`, `wd` and
     `batch_size`, each variant's own selection; anything left out is the command line's."""
-    probe = ProbeSettings(kind=entry["probe"], hidden=int(entry.get("hidden", base.probe.hidden)), dropout=float(entry.get("dropout", base.probe.dropout)))
+    probe = ProbeSettings(kind=entry["probe"], hidden=int(entry.get("hidden", base.probe.hidden)), dropout=float(entry.get("dropout", base.probe.dropout)),
+                          activation=str(entry.get("activation", base.probe.activation)))
     settings = replace(
         base,
         probe=probe,
@@ -794,6 +796,95 @@ def command_pca(args: argparse.Namespace) -> None:
         print(f"{name}: {len(groups)} proteins, {table['group'].nunique()} groups -> {folder / f'{name}.parquet'}")
 
 
+def masked_lm(args: argparse.Namespace, device: torch.device) -> tuple[torch.nn.Module, object]:
+    """The model with its masked-LM head, in bfloat16, for the analyses of `causal`."""
+    from ..base_models.get_base_models import get_base_model
+
+    model, tokenizer = get_base_model(args.model, masked_lm=True, dtype=torch.bfloat16)
+    if args.random_init:
+        model = untrained_copy(model, args.seed)
+    return model.to(device, torch.bfloat16).eval(), tokenizer
+
+
+def command_lens(args: argparse.Namespace) -> None:
+    from . import causal
+
+    device = torch.device(args.device)
+    torch.manual_seed(args.seed)
+    model, tokenizer = masked_lm(args, device)
+    data = load_concept(causal.LENS_TASK, repo=args.repo, revision=args.revision, local_dir=args.local_data)
+    started = time.time()
+    lens, readout, history = causal.train_lenses(model, tokenizer, data, device, args.seed, epochs=args.epochs, lr=args.lr, max_tokens=args.max_tokens)
+    trained = time.time() - started
+    table = causal.score_lenses(model, tokenizer, data, lens, readout, device, args.seed, max_tokens=args.max_tokens)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    table.to_parquet(out / "lens.parquet", index=False)
+    causal.write_json(out / "lens.json", {"model": model_label(args), "seed": args.seed, "task": causal.LENS_TASK, "epochs": args.epochs, "lr": args.lr,
+                                          "max_tokens": args.max_tokens, "history": history, "train_seconds": trained,
+                                          "score_seconds": time.time() - started - trained})
+    print(f"lens: {table['protein'].nunique()} test proteins in {time.time() - started:.0f} s -> {out / 'lens.parquet'}")
+
+
+def command_ablate(args: argparse.Namespace) -> None:
+    from . import causal
+
+    device = torch.device(args.device)
+    model, tokenizer = masked_lm(args, device)
+    data = load_concept(causal.LENS_TASK, repo=args.repo, revision=args.revision, local_dir=args.local_data)
+    started = time.time()
+    train = data.splits["train"].sequences
+    reference = sorted(np.random.default_rng(args.seed).permutation(len(train))[: args.reference_proteins].tolist())
+    means = causal.mean_writes(model, tokenizer, [train[index] for index in reference], device, args.seed, args.max_tokens)
+    table = causal.score_ablations(model, tokenizer, data, means, device, args.seed, args.max_tokens)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    table.to_parquet(out / "ablation.parquet", index=False)
+    causal.write_json(out / "ablation.json", {"model": model_label(args), "seed": args.seed, "task": causal.LENS_TASK,
+                                              "reference_proteins": len(reference), "seconds": time.time() - started})
+    print(f"ablate: {table['protein'].nunique()} test proteins in {time.time() - started:.0f} s -> {out / 'ablation.parquet'}")
+
+
+def command_erase(args: argparse.Namespace) -> None:
+    from . import causal
+
+    device = torch.device(args.device)
+    torch.manual_seed(args.seed)
+    model, tokenizer = masked_lm(args, device)
+    blocks = len(causal.esmc_backbone(model).transformer.blocks)
+    depths = causal.relative_depths(blocks, [float(share) for share in args.shares.split(",")])
+    out = Path(args.out)
+    for name in parse_tasks(args.concepts):
+        if (out / name / "readouts.parquet").exists():
+            print(f"have {out / name}")
+            continue
+        data = load_concept(name, repo=args.repo, revision=args.revision, local_dir=args.local_data)
+        mlm, readouts, record = causal.erase_concept(
+            model, tokenizer, data, depths, device, args.seed, fit_proteins=args.fit_proteins, validation_proteins=args.validation_proteins,
+            test_proteins=args.test_proteins, residue_rows_cap=args.residue_rows, max_rank=args.max_rank, max_tokens=args.max_tokens)
+        (out / name).mkdir(parents=True, exist_ok=True)
+        mlm.to_parquet(out / name / "mlm.parquet", index=False)
+        causal.write_json(out / name / "erase.json", {"model": model_label(args), "seed": args.seed, "task": name, "depths": depths,
+                                                      "max_rank": args.max_rank, **record})
+        readouts.to_parquet(out / name / "readouts.parquet", index=False)  # last, so a resumed run skips only finished concepts
+        print(f"erase {name}: depths {depths} in {record['seconds']:.0f} s -> {out / name}")
+
+
+def command_geometry(args: argparse.Namespace) -> None:
+    from . import geometry
+
+    device = torch.device(args.device)
+    store = PooledTapStore(store_path(Path(args.root), "trained", "original"))
+    tasks = [load_concept(name, repo=args.repo, revision=args.revision, local_dir=args.local_data) for name in parse_tasks(args.tasks)]
+    started = time.time()
+    separability, shapes = geometry.store_geometry(store, tasks, [site.strip() for site in args.sites.split(",")], device, args.seed)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    separability.to_parquet(out / "separability.parquet", index=False)
+    shapes.to_parquet(out / "geometry.parquet", index=False)
+    print(f"geometry: {len(shapes)} states, {len(tasks)} tasks in {time.time() - started:.0f} s -> {out}")
+
+
 def command_figures(args: argparse.Namespace) -> None:
     from . import figures
 
@@ -902,7 +993,8 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--hidden", type=int, nargs="+", default=[512], help="MLP hidden widths (several in a sweep only)")
         sub.add_argument("--dropout", type=float, nargs="+", default=[0.1], help="MLP dropouts (several in a sweep only)")
         sub.add_argument("--no-controls", action="store_true")
-        sub.add_argument("--pooling", choices=("mean_var", "mean"), nargs="+", default=["mean_var"], help="what protein probes read of a pooled state; several train from one load")
+        sub.add_argument("--pooling", choices=("mean_var", "mean", "mean_square"), nargs="+", default=["mean_var"],
+                         help="what protein probes read of a pooled state (mean_square: the mean and its square); several train from one load")
         sub.add_argument("--variants", default=None,
                          help="a JSON list of variants, each with its label, probe, pooling and its own hidden, dropout, lr, wd and batch_size; replaces --probe and --pooling")
         sub.add_argument("--wandb-project", default=None, help="log a train run to this W&B project through foundry.logging (sweeps make no run)")
@@ -994,6 +1086,44 @@ def build_parser() -> argparse.ArgumentParser:
     pca.add_argument("--revision", default=None)
     pca.add_argument("--local-data", default=None)
     pca.set_defaults(handler=command_pca)
+
+    lens = commands.add_parser("lens", help="logit and tuned lenses and a token-identity readout at every depth of masked-token prediction")
+    common(lens)
+    data_sources(lens)
+    lens.add_argument("--out", required=True)
+    lens.add_argument("--epochs", type=int, default=4, help="passes over the lens task's training proteins")
+    lens.add_argument("--lr", type=float, default=1e-3, help="Adam's peak learning rate, cosine-annealed to zero")
+    lens.set_defaults(handler=command_lens, max_tokens=8192)
+
+    ablate = commands.add_parser("ablate", help="each block's attention and feed-forward write set to zero or its mean, and the cost to masked-token prediction")
+    common(ablate)
+    data_sources(ablate)
+    ablate.add_argument("--out", required=True)
+    ablate.add_argument("--reference-proteins", type=int, default=512, help="training proteins whose mean writes replace a write")
+    ablate.set_defaults(handler=command_ablate, max_tokens=8192)
+
+    erase = commands.add_parser("erase", help="LEACE erasure of a concept at matched relative depths, against random subspaces of the same rank")
+    common(erase)
+    data_sources(erase)
+    erase.add_argument("--out", required=True)
+    erase.add_argument("--concepts", default="ssp_q3,localization,prot_param,interpro_family")
+    erase.add_argument("--shares", default="0.03,0.23,0.42,0.58,0.68,0.81,0.9,0.97", help="relative depths of the stream to erase at")
+    erase.add_argument("--fit-proteins", type=int, default=2000, help="training proteins that fit the eraser and the readouts")
+    erase.add_argument("--validation-proteins", type=int, default=500)
+    erase.add_argument("--test-proteins", type=int, default=1000, help="the first of a fixed permutation of the test split")
+    erase.add_argument("--residue-rows", type=int, default=100_000, help="training rows of a residue concept's readout (a third for validation)")
+    erase.add_argument("--max-rank", type=int, default=16, help="directions erased at most, for concepts with many labels")
+    erase.set_defaults(handler=command_erase, max_tokens=8192)
+
+    shapes = commands.add_parser("geometry", help="neighbor separability, mean and covariance separation, and the shape of every pooled mean state")
+    shapes.add_argument("--root", required=True, help="a run root whose trained store is read")
+    shapes.add_argument("--tasks", default="protein")
+    shapes.add_argument("--sites", default="embedding,resid_post,final_norm,attn_context,mlp_act")
+    shapes.add_argument("--out", required=True)
+    shapes.add_argument("--seed", type=int, default=0, help="the draw of training proteins the state's own geometry is measured on")
+    shapes.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    data_sources(shapes)
+    shapes.set_defaults(handler=command_geometry)
 
     drawn = commands.add_parser("figures", help="draw the figures and summary tables of one or more replicate runs")
     drawn.add_argument("--roots", nargs="+", required=True, help="one root per seed replicate; sweeps, interventions and latent views are read from the first")

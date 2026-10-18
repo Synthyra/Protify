@@ -20,7 +20,7 @@ PLM_STATES = ("trained", "untrained")
 PROBE_STATES = ("trained", "untrained")
 CONTROLS = ("original", "l2_normalized", "mean", "scrambled", "random_gaussian")
 MEAN_CONTROL_BATCH = 8  # proteins whose states and labels the mean control averages
-POOLINGS = ("mean_var", "mean")
+POOLINGS = ("mean_var", "mean", "mean_square")
 
 
 @dataclass(frozen=True)
