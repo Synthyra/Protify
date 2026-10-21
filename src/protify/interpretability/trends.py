@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import figures
-from .figures import BLOCK_SITES, GRID, INK, INK_SECONDARY, MUTED, PALETTE, RESIDUAL, SITE_LABELS
+from .figures import BLOCK_SITES, GRID, INK, INK_SECONDARY, MUTED, PALETTE, RESIDUAL, SITE_LABELS, STRUCTURE, STRUCTURE_X
 
 
 # The pair tasks of `pairs`, named here so that the trends read their tables without torch.
@@ -429,8 +429,9 @@ def pair_figure(
     model, the randomly initialized model and the baseline encodings (levels), with the first trained model's probes on
     scrambled partners and on an untrained model's states. B: ROC AUC along the same axis, shaded over the first
     replicate's interval on the test pairs (draws of the test proteins) where `intervals` holds one. When the task has
-    an extra test split, C draws its ROC AUC the same way and the figure takes two rows. Last: each site's best state
-    minus the best residual-stream state, per model. Every line style in the figure has its own legend entry."""
+    an extra test split, C draws its ROC AUC the same way and the figure takes two rows. Past the final norm, a diamond
+    marks each model's structure stream where it was probed. Last: each site's best state minus the best
+    residual-stream state, per model. Every line style in the figure has its own legend entry."""
     plt = figures._pyplot()
     from matplotlib.ticker import MaxNLocator
     trained = _ordered_models([model for model in summaries if kinds[model] == "trained"])
@@ -454,10 +455,12 @@ def pair_figure(
     for axis, letter in zip(axes, "ABCD"):
         figures._letter(axis, letter)
 
-    def curve(summary: pd.DataFrame, plm: str = "trained", control: str = "original") -> pd.DataFrame:
-        rows = summary[(summary["task"] == task) & (summary["family"] == "full") & summary["site"].isin(RESIDUAL)
+    def curve(summary: pd.DataFrame, plm: str = "trained", control: str = "original", site: Sequence[str] = RESIDUAL) -> pd.DataFrame:
+        rows = summary[(summary["task"] == task) & (summary["family"] == "full") & summary["site"].isin(site)
                        & (summary["plm"] == plm) & (summary["probe"] == "trained") & (summary["control"] == control)]
         return rows.sort_values("depth")
+
+    structured = False
 
     def level(axis, value: float, model: str) -> None:
         """A baseline encoding's one state, as a named level."""
@@ -496,6 +499,19 @@ def pair_figure(
         for split, axis in auc_axes.items():
             auc = stream[stream["split"] == split]
             axis.plot(auc["relative_depth"], auc["roc_auc"], **style)
+        mark = {"color": style["color"]} if kinds[model] == "trained" else {"facecolors": "white", "edgecolors": MUTED, "linewidths": 0.7}
+        point = curve(summaries[model], site=STRUCTURE)
+        if not point.empty:
+            structured = True
+            axes[0].scatter([STRUCTURE_X], point["full"].iloc[:1], marker="D", s=10, zorder=3, **mark)
+            ranking = rankings.get(model)
+            if ranking is not None:
+                ranking = ranking[(ranking["task"] == task) & (ranking["family"] == "full") & ranking["site"].isin(STRUCTURE)]
+                for split, axis in auc_axes.items():
+                    auc = ranking.loc[ranking["split"] == split, "roc_auc"].iloc[:1]
+                    axis.scatter([STRUCTURE_X] * len(auc), auc, marker="D", s=10, zorder=3, **mark)
+    if structured:
+        axes[0].scatter([], [], marker="D", s=10, color=INK, label="structure stream")
     if trained:
         reference = summaries[trained[0]]
         for plm, control, legend, color in (("trained", "scrambled", "scrambled partners", PALETTE[3]), ("untrained", "original", "untrained model", PALETTE[4])):
@@ -508,7 +524,8 @@ def pair_figure(
         axis.axhline(0.5, color=MUTED, lw=0.6)
     for axis in [axes[0], *auc_axes.values()]:
         axis.set_xlabel("relative depth")
-        axis.set_xlim(0, 1)
+        axis.set_xlim(0, STRUCTURE_X + 0.06 if structured else 1)
+        axis.set_xticks([0.0, 0.5, 1.0])
         axis.grid(axis="y", color=GRID, lw=0.5)
     if len(auc_axes) > 1:
         lows, highs = zip(*(axis.get_ylim() for axis in auc_axes.values()))

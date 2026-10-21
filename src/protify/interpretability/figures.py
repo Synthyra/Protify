@@ -53,6 +53,7 @@ SITE_LABELS = {
     "resid_post": "resid post", "final_norm": "final norm", "structural": "structure stream",
 }
 STRUCTURE = ("structural",)  # ESMFold2's projection of every hidden state, not a state of ESMC itself
+STRUCTURE_X = 1.1  # where a relative-depth axis marks the structure stream, past the final norm at 1
 BLOCK_SITES = tuple(site for site in SITE_LABELS if site not in ("embedding", "final_norm", *STRUCTURE))
 MODEL_SITES = tuple(site for site in SITE_LABELS if site not in STRUCTURE)  # ESMC's own states
 RESIDUAL = ("embedding", "resid_post", "final_norm")

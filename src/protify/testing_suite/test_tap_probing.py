@@ -1537,7 +1537,7 @@ def synthetic_scores(task: str, sites: tuple[str, ...], layers: int, heads: int,
     rng = np.random.default_rng(seed)
     rows = []
     for site in sites:
-        for layer in [0] if site in ("embedding", "final_norm") else range(layers):
+        for layer in [0] if site in ("embedding", "final_norm", "structural") else range(layers):
             for plm in PLM_STATES:
                 for probe in PROBE_STATES:
                     for control in CONTROLS:
@@ -1659,7 +1659,7 @@ def write_trend_run(root: Path, seed: int, sites: tuple[str, ...], blocks: int, 
 
 
 def test_trends_across_models(tmp_path: Path) -> None:
-    sites = ("embedding", "q", "attn_context", "mlp_act", "resid_post", "final_norm")
+    sites = ("embedding", "q", "attn_context", "mlp_act", "resid_post", "final_norm", "structural")
     small, large, random_root, one_hot, random_rows = [tmp_path / "small_0", tmp_path / "small_1"], tmp_path / "large", tmp_path / "random", tmp_path / "one_hot", tmp_path / "rows"
     for seed, root in enumerate(small + [random_root]):
         write_trend_run(root, seed, sites, blocks=3)
@@ -1671,6 +1671,11 @@ def test_trends_across_models(tmp_path: Path) -> None:
           "--baselines", f"OneHot-Protein={one_hot}", f"Random={random_rows}", "--out", str(out)])
     for name in ("emergence", "state_rankings", "controls_summary", "model_size", "ppi"):
         assert (out / f"{name}.png").stat().st_size > 10_000, name
+    # the structure stream is ranked beside the sites, and reported apart from the model's own best state
+    assert "structural" in set(pd.read_csv(out / "site_rankings.csv")["site"])
+    by_model = pd.read_csv(out / "best_states_by_model.csv")
+    trained_best = by_model[by_model["kind"] == "trained"]
+    assert "structural" not in set(by_model["any_site"]) and trained_best["structure_score"].notna().all()
     profiles = pd.read_csv(out / "stream_profiles.csv")
     assert set(profiles["model"]) == {"ESMC-300", "ESMC-600"} and set(profiles["task"]) == {"prot_param", "ssp_q8", "localization", "go_mf"}
     depths = profiles[["onset_depth", "peak_depth", "best_depth"]].to_numpy()
