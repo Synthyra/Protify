@@ -5,7 +5,7 @@ must not keep a reference it does not need: pooling or probing inside the call k
 time. Rows of X at padded positions hold whatever the model computed there; consumers mask them.
 
 Symbols: b sequences; l token columns (CLS, residues, EOS, padding); d model width; f SwiGLU hidden width;
-h heads; d_h head width.
+h heads; d_h head width. The structure stream (`structure.py`) arrives once a pass, after the final norm, as (b, l, 256).
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from torch import Tensor, nn
 
 from .sites import ModelDims, TapSpec
+from .structure import structure_hooks
 
 
 TapConsumer = Callable[[str, int, Tensor], None]
@@ -131,6 +132,8 @@ def tap_hooks(model: nn.Module, spec: TapSpec, consumer: TapConsumer) -> Iterato
                 handles.append(block.register_forward_hook(block_output_hook(layer)))
         if "final_norm" in wanted:
             handles.append(backbone.transformer.norm.register_forward_hook(output_hook("final_norm", 0)))
+        if "structural" in wanted:  # reads every hidden state, whichever blocks the spec names
+            handles.extend(structure_hooks(backbone, dims, lambda Z: consumer("structural", 0, Z)))  # Z: (b, l, 256)
         yield dims
     finally:
         for handle in handles:

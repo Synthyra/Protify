@@ -18,7 +18,7 @@ try:
     from src.protify.base_models.esmc import get_esmc_tokenizer
     from src.protify.interpretability.baselines import BASELINE_SITES, BaselineModel
     from src.protify.interpretability.capture import capture_states, model_dims
-    from src.protify.interpretability import causal, figures, geometry
+    from src.protify.interpretability import causal, figures, geometry, structure
     from src.protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, interval_tasks, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
     from src.protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, protein_draws, ranking_metrics, standardized, threshold_mcc, weighted_ranking_metrics
     from src.protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
@@ -43,7 +43,7 @@ except ImportError:
     from protify.base_models.esmc import get_esmc_tokenizer
     from protify.interpretability.baselines import BASELINE_SITES, BaselineModel
     from protify.interpretability.capture import capture_states, model_dims
-    from protify.interpretability import causal, figures, geometry
+    from protify.interpretability import causal, figures, geometry, structure
     from protify.interpretability.cli import PAIR_PREFIX, STORE_VARIANTS, interval_tasks, main, parse_tasks, restore_selected, store_passes, store_path, train_tasks, validate_tasks, write_stores
     from protify.interpretability.pairs import PAIR_TASKS, MeanRows, PairRows, balanced_mcc, load_pairs, mean_targets, pair_prefix, protein_draws, ranking_metrics, standardized, threshold_mcc, weighted_ranking_metrics
     from protify.interpretability.concepts import ALL_TASKS, PROTEIN_TASKS, RESIDUE_TASKS, ConceptData, ConceptSplit, ConceptTask, load_concept, prot_param_values, scramble, scramble_seed, shuffled_labels
@@ -210,6 +210,63 @@ def test_hooks_are_removed(tiny_model: ESMplusplusModel, tokenizer: object) -> N
     capture_states(tiny_model, encoded["input_ids"], encoded["attention_mask"], TapSpec())
     hooked = [module for module in tiny_model.modules() if module._forward_hooks or module._forward_pre_hooks]
     assert hooked == []
+
+
+def structure_weights(dims: ModelDims, logits: torch.Tensor, seed: int = 0) -> dict[str, torch.Tensor]:
+    """Random weights shaped like ESMFold2's language-model projection for a model of `dims`."""
+    generator = torch.Generator().manual_seed(seed)
+    return {"layer_logits": logits.to(torch.float32),
+            "norm_weight": 1 + 0.1 * torch.randn(dims.d, generator=generator),
+            "norm_bias": 0.1 * torch.randn(dims.d, generator=generator),
+            "projection": torch.randn(256, dims.d, generator=generator) / math.sqrt(dims.d)}
+
+
+def projected(hidden: torch.Tensor, weights: dict[str, torch.Tensor]) -> torch.Tensor:
+    """One hidden state through the LayerNorm and projection under bfloat16 autocast, as the stores compute it."""
+    # hidden: (b, l, d) -> (b, l, 256)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        normalized = F.layer_norm(hidden, (hidden.shape[-1],), weights["norm_weight"], weights["norm_bias"], 1e-5)
+        return F.linear(normalized, weights["projection"])
+
+
+def test_structure_stream_mixes_esmfold2s_states(tiny_model: ESMplusplusModel, tokenizer: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The structure stream is ESMFold2's mixture of ESM++'s hidden states (the embedding, the block outputs but the
+    last, the final norm), each normalized and projected: a one-hot mixture returns each state's projection exactly,
+    in that order, and learned logits the softmax-weighted sum, near ESMFold2's float32 arithmetic."""
+    encoded = tokenizer(["MKTAYIAKQRQISFVKSHFSRQ", "MSEQ"], padding=True, return_tensors="pt")
+    ids, mask = encoded["input_ids"], encoded["attention_mask"]  # (b, l)
+    dims = model_dims(tiny_model)
+    with torch.no_grad():
+        hidden = tiny_model(input_ids=ids, attention_mask=mask, output_hidden_states=True).hidden_states  # n of (b, l, d)
+    assert len(hidden) == dims.blocks + 1
+    spec = TapSpec(sites=("final_norm", "structural"))
+    for index in range(dims.blocks + 1):
+        weights = structure_weights(dims, torch.full((dims.blocks + 1,), -1e4).index_fill(0, torch.tensor([index]), 0.0))
+        monkeypatch.setattr(structure, "released_weights", lambda d, blocks, weights=weights: weights)
+        states = capture_states(tiny_model, ids, mask, spec)
+        assert states[("structural", 0)].shape == (2, ids.shape[1], 256)
+        torch.testing.assert_close(states[("structural", 0)], projected(hidden[index], weights), rtol=0, atol=0)
+    weights = structure_weights(dims, torch.tensor([0.3, -1.2, 0.8, 0.1]), seed=1)
+    monkeypatch.setattr(structure, "released_weights", lambda d, blocks: weights)
+    mixed = capture_states(tiny_model, ids, mask, spec)[("structural", 0)]
+    coefficients = weights["layer_logits"].softmax(0)
+    reference = sum(coefficient * F.linear(F.layer_norm(state, (dims.d,), weights["norm_weight"], weights["norm_bias"], 1e-5), weights["projection"])
+                    for coefficient, state in zip(coefficients, hidden))  # (b, l, 256), float32
+    torch.testing.assert_close(mixed.to(torch.float32), reference, rtol=0.02, atol=0.03)
+    assert [module for module in tiny_model.modules() if module._forward_hooks] == []
+
+
+def test_structure_site_is_asked_for_by_name() -> None:
+    dims = ModelDims(d=64, f=256, heads=4, blocks=3)
+    assert "structural" not in ALL_SITES and parse_sites("all") == ALL_SITES
+    layout = site_layouts(TapSpec(sites=parse_sites("residual,structural")), dims)["structural"]
+    assert (layout.layers, layout.width, layout.heads) == ((0,), 256, 0)
+    assert layout.full_names() == ["structural:0"]
+    assert figures.depth("structural", 0, 3) == 4 and "structural" not in figures.BLOCK_SITES
+    with pytest.raises(ValueError):
+        structure.check_weights(structure_weights(dims, torch.zeros(3)), dims)  # one logit short of n = blocks + 1
+    with pytest.raises(ValueError):
+        structure.released_weights(64, 3)  # no ESMFold2 reads such a model
 
 
 # -- batching and stores -------------------------------------------------------------------------------------------

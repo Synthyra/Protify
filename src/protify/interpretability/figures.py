@@ -50,9 +50,11 @@ SITE_LABELS = {
     "embedding": "embedding", "attn_ln": "attn LN", "q": "Q", "k": "K", "q_rot": "Q rotated", "k_rot": "K rotated",
     "v": "V", "attn_context": "attn context", "attn_out": "attn out", "resid_mid": "resid mid", "mlp_ln": "MLP LN",
     "mlp_gate": "MLP gate", "mlp_up": "MLP up", "mlp_act": "MLP act", "mlp_out": "MLP out",
-    "resid_post": "resid post", "final_norm": "final norm",
+    "resid_post": "resid post", "final_norm": "final norm", "structural": "structure stream",
 }
-BLOCK_SITES = tuple(site for site in SITE_LABELS if site not in ("embedding", "final_norm"))
+STRUCTURE = ("structural",)  # ESMFold2's projection of every hidden state, not a state of ESMC itself
+BLOCK_SITES = tuple(site for site in SITE_LABELS if site not in ("embedding", "final_norm", *STRUCTURE))
+MODEL_SITES = tuple(site for site in SITE_LABELS if site not in STRUCTURE)  # ESMC's own states
 RESIDUAL = ("embedding", "resid_post", "final_norm")
 ATTENTION = ("attn_ln", "q", "k", "q_rot", "k_rot", "v", "attn_context", "attn_out")
 MLP = ("mlp_ln", "mlp_gate", "mlp_up", "mlp_act", "mlp_out")
@@ -198,10 +200,11 @@ def with_probe_parts(scores: pd.DataFrame) -> pd.DataFrame:
 
 
 def depth(site: str, layer: int, blocks: int) -> int:
-    """The residual-stream axis: embedding 0, block k's states k + 1, the final norm blocks + 1."""
+    """The residual-stream axis: embedding 0, block k's states k + 1, the final norm blocks + 1, and the structure
+    stream, a mixture of every depth built once the final norm has run, blocks + 1 too."""
     if site == "embedding":
         return 0
-    if site == "final_norm":
+    if site in ("final_norm", *STRUCTURE):
         return blocks + 1
     return layer + 1
 
@@ -263,14 +266,15 @@ def _with_depth(frame: pd.DataFrame, blocks: int) -> pd.DataFrame:
 
 def best_states(summary: pd.DataFrame, blocks: int) -> pd.DataFrame:
     """Per task: the best probe of the residual stream between blocks (the states a per-layer probe reads), of the
-    attention and MLP sites and of any site (the mid-block stream counts only there), the best single head, and the
-    controls at the residual-stream best, each chosen on validation, with full-test scores averaged over replicates."""
+    attention and MLP sites and of any of the model's sites (the mid-block stream counts only there), the best single
+    head, the structure stream's probe where it was read, and the controls at the residual-stream best, each chosen on
+    validation, with full-test scores averaged over replicates."""
     rows = []
     trained = headline(summary)
     for task, block in trained.groupby("task"):
         full = block[block["family"] == "full"]
         row = {"task": task}
-        for name, sites in (("residual", RESIDUAL), ("attention", ATTENTION), ("mlp", MLP), ("any", tuple(SITE_LABELS))):
+        for name, sites in (("residual", RESIDUAL), ("attention", ATTENTION), ("mlp", MLP), ("any", MODEL_SITES), ("structure", STRUCTURE)):
             candidates = full[full["site"].isin(sites)]
             if candidates.empty:
                 continue

@@ -2,7 +2,9 @@
 
 Every site is an (l, w) matrix per sequence: l token rows (CLS, the residues, EOS) and a width w that is the
 model width d, or the SwiGLU width f for the three MLP-internal sites. A per-block site has one state per
-transformer block; `embedding` and `final_norm` have one state each.
+transformer block; `embedding` and `final_norm` have one state each. `structural` is not a state of ESMC itself but
+ESMFold2's learned 256-wide projection of all of them, the input to its folding trunk (`structure.py`); no default
+reads it, so it is asked for by name.
 
 Symbols: d model width; f SwiGLU hidden width; h attention heads; d_h = d / h; n_b transformer blocks.
 """
@@ -18,9 +20,9 @@ class TapSite:
     """One readable state of a block (or of the whole model) and how wide it is."""
 
     name: str
-    family: str  # residual, attention or mlp
+    family: str  # residual, attention, mlp or structure
     per_block: bool
-    width: str  # "d" or "f"
+    width: str  # "d", "f" or "s" (the structure stream's 256)
     splits_by_head: bool
     description: str
 
@@ -44,10 +46,17 @@ ESMC_SITES: tuple[TapSite, ...] = (
     TapSite("resid_post", "residual", True, "d", False, "the block output, the residual stream after the MLP update"),
     TapSite("final_norm", "residual", False, "d", False, "the final LayerNorm output"),
 )
-SITES_BY_NAME = {site.name: site for site in ESMC_SITES}
+STRUCTURE_WIDTH = 256  # ESMFold2's pair width, the width of its projection of the language model
+STRUCTURE_SITE = TapSite(
+    "structural", "structure", False, "s", False,
+    "ESMFold2's softmax-weighted mixture of the embedding, the block outputs and the final norm, each LayerNorm-ed and "
+    "projected to 256",
+)
+CATALOG = ESMC_SITES + (STRUCTURE_SITE,)
+SITES_BY_NAME = {site.name: site for site in CATALOG}
 # The residual stream alone: the embedding, every block output and the final norm.
 RESIDUAL_SITES = ("embedding", "resid_post", "final_norm")
-ALL_SITES = tuple(site.name for site in ESMC_SITES)
+ALL_SITES = tuple(site.name for site in ESMC_SITES)  # ESMC's own states; `structural` is asked for by name
 
 
 @dataclass(frozen=True)
@@ -64,7 +73,7 @@ class ModelDims:
         return self.d // self.heads
 
     def width(self, site: TapSite) -> int:
-        return self.d if site.width == "d" else self.f
+        return {"d": self.d, "f": self.f, "s": STRUCTURE_WIDTH}[site.width]
 
 
 @dataclass(frozen=True)
@@ -127,7 +136,7 @@ class SiteLayout:
 def site_layouts(spec: TapSpec, dims: ModelDims) -> dict[str, SiteLayout]:
     """The storage and probe layout of every site a spec reads, in catalog order."""
     layouts = {}
-    for site in ESMC_SITES:
+    for site in CATALOG:
         if site.name not in spec.sites:
             continue
         heads = dims.heads if (spec.per_head and site.splits_by_head) else 0
@@ -138,7 +147,7 @@ def site_layouts(spec: TapSpec, dims: ModelDims) -> dict[str, SiteLayout]:
 
 
 def parse_sites(names: Sequence[str] | str | None) -> tuple[str, ...]:
-    """Sites from a CLI value: 'all', 'residual', or comma-separated names."""
+    """Sites from a CLI value: 'all' (ESMC's own states), 'residual', or comma-separated names, `structural` among them."""
     if names is None or names == "all":
         return ALL_SITES
     if isinstance(names, str):
