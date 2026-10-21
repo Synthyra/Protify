@@ -43,6 +43,7 @@ CATEGORY_OF = {task: category for category, tasks in CATEGORIES for task in task
 CONCEPT_ORDER = tuple(task for _, tasks in CATEGORIES for task in tasks)
 # Parameters of the models we know, which order them; others keep the order they are given in.
 MODEL_PARAMETERS = {"ESMC-300": 3e8, "ESMC-600": 6e8, "ESMC-6B": 6e9}
+DISPLAY_NAMES = {"OneHot-Protein": "one-hot", "Random": "random vectors"}  # the baseline encodings, as figures name them
 ONSET_SHARE = 0.95  # a curve's onset: the first depth within 5% of its highest score
 SHARE_FLOOR = 0.5  # where the emergence maps' color scale starts, as a share of a task's highest score
 
@@ -211,6 +212,13 @@ def best_table(summaries: dict[str, pd.DataFrame], kinds: dict[str, str]) -> pd.
 # -- figures ---------------------------------------------------------------------------------------------------------
 
 
+def _display(name: str) -> str:
+    """The name a figure shows for a model: the trained models as named, a control by what it is."""
+    if name.endswith("random init"):
+        return "random init"
+    return DISPLAY_NAMES.get(name, name)
+
+
 def _model_colors(models: Sequence[str]) -> dict[str, str]:
     return {model: PALETTE[index % len(PALETTE)] for index, model in enumerate(models)}
 
@@ -282,10 +290,15 @@ def emergence_maps(summaries: dict[str, pd.DataFrame], profiles: pd.DataFrame, p
     reserve = 0.3 / figure.get_figheight()  # inches kept under the panels for the colorbar
     figure.tight_layout(w_pad=0.6, rect=(0, reserve, 1, 1))
     left = axes[0][0].get_position().x0
-    bar = figure.colorbar(image, cax=figure.add_axes((left, 0.3 * reserve, min(0.35, 0.9 - left), 0.07 / figure.get_figheight())),
-                          orientation="horizontal", extend="min")
+    width, height = min(0.35, 0.9 - left), 0.07 / figure.get_figheight()
+    bar = figure.colorbar(image, cax=figure.add_axes((left, 0.3 * reserve, width, height)), orientation="horizontal", extend="min")
     bar.set_label("score / task's highest residual-stream score", fontsize=5.5)
     bar.ax.tick_params(labelsize=5)
+    from matplotlib.lines import Line2D
+    keys = [Line2D([], [], ls="none", marker="|", ms=6, mew=0.9, color=INK),
+            Line2D([], [], ls="none", marker="o", ms=3, mfc="white", mec=INK, mew=0.6)]
+    figure.legend(keys, ["onset", "best depth"], loc="center left", bbox_to_anchor=(left + width + 0.05, 0.3 * reserve + height / 2), ncol=2,
+                  frameon=False, fontsize=5.5)
     return figures._save(figure, path)
 
 
@@ -347,23 +360,26 @@ def controls_summary(best: pd.DataFrame, path: Path) -> Path:
         if kind == "baseline":
             style["color"] = next(baseline_colors, INK)
             style["marker"] = "x" if style["color"] == INK else "+"
-        axis.scatter(scores(model), positions, zorder=3, label=model, **style)
+        axis.scatter(scores(model), positions, zorder=3, label=_display(model), **style)
     if trained:
         reference = trained[0]
         for column, legend, marker in (("control_trained_trained_scrambled", "scrambled sequences", "o"),
-                                       ("control_untrained_trained_original", "untrained model's states", "v")):
+                                       ("control_untrained_trained_original", "untrained model", "v")):
             values = scores(reference, column)
             if np.isfinite(values).any():
                 axis.scatter(values, positions, s=12, marker=marker, facecolors="none", edgecolors=PALETTE[3] if marker == "o" else PALETTE[4],
-                             linewidths=0.8, zorder=3, label=f"{reference} probes, {legend}")
+                             linewidths=0.8, zorder=3, label=legend)
     for model in trained:
         axis.scatter(scores(model), positions, s=16, color=colors[model], zorder=4, label=model)
     axis.set_yticks(positions)
     axis.set_yticklabels([figures.SHORT_LABELS.get(task, task) for task in rows])
     axis.set_ylim(len(rows) - 0.5, -0.5)
-    axis.set_xlabel("best residual-stream score (MCC; cosine for ProtParam)")
+    axis.set_xlabel("best residual-stream score")
     axis.grid(axis="x", color=GRID, lw=0.5)
-    axis.legend(loc="lower center", bbox_to_anchor=(0.45, 1.0), ncol=3, frameon=False, fontsize=5.3)
+    handles, labels = axis.get_legend_handles_labels()
+    order = sorted(range(len(labels)), key=lambda index: labels[index] not in trained)  # the trained models first
+    axis.legend([handles[index] for index in order], [labels[index] for index in order], loc="lower center", bbox_to_anchor=(0.45, 1.0),
+                ncol=3, frameon=False, fontsize=5.3)
     figure.tight_layout()
     return figures._save(figure, path)
 
@@ -411,14 +427,31 @@ def pair_figure(
 ) -> Path:
     """A: one pair task's MCC on its test pairs along the relative depth of the residual stream, for every trained
     model, the randomly initialized model and the baseline encodings (levels), with the first trained model's probes on
-    scrambled partners and on an untrained model's states. B: ROC AUC along the same axis, dashed on an extra test
-    split, shaded over the first replicate's interval on the test pairs (draws of the test proteins) where `intervals`
-    holds one. C: each site's best state minus the best residual-stream state, per model."""
+    scrambled partners and on an untrained model's states. B: ROC AUC along the same axis, shaded over the first
+    replicate's interval on the test pairs (draws of the test proteins) where `intervals` holds one. When the task has
+    an extra test split, C draws its ROC AUC the same way and the figure takes two rows. Last: each site's best state
+    minus the best residual-stream state, per model. Every line style in the figure has its own legend entry."""
     plt = figures._pyplot()
+    from matplotlib.ticker import MaxNLocator
     trained = _ordered_models([model for model in summaries if kinds[model] == "trained"])
     colors = _model_colors(trained)
-    figure, axes = plt.subplots(1, 3, figsize=(7.2, 2.4), gridspec_kw={"width_ratios": [1.0, 1.0, 1.1]})
-    for axis, letter in zip(axes, "ABC"):
+
+    def stream_of(model: str) -> pd.DataFrame:
+        ranking = rankings.get(model)
+        if ranking is None:
+            return pd.DataFrame(columns=["split", "relative_depth", "roc_auc"])
+        return ranking[(ranking["task"] == task) & (ranking["family"] == "full") & ranking["site"].isin(RESIDUAL)].sort_values("relative_depth")
+
+    extras = sorted({split for model in trained for split in stream_of(model)["split"].unique() if split != "test"})
+    if extras:
+        figure, grid = plt.subplots(2, 2, figsize=(7.2, 4.4))
+        axes = list(grid.ravel())
+    else:
+        figure, axes = plt.subplots(1, 3, figsize=(7.2, 2.4), gridspec_kw={"width_ratios": [1.0, 1.0, 1.1]})
+        axes = list(axes)
+    auc_axes = {"test": axes[1]} | ({extras[0]: axes[2]} if extras else {})
+    gap_axis = axes[-1]
+    for axis, letter in zip(axes, "ABCD"):
         figures._letter(axis, letter)
 
     def curve(summary: pd.DataFrame, plm: str = "trained", control: str = "original") -> pd.DataFrame:
@@ -429,7 +462,7 @@ def pair_figure(
     def level(axis, value: float, model: str) -> None:
         """A baseline encoding's one state, as a named level."""
         axis.axhline(value, color=INK_SECONDARY, lw=0.8, ls=":")
-        axis.text(1.0, value, f" {model}", fontsize=5, color=INK_SECONDARY, va="center", ha="left", transform=axis.get_yaxis_transform())
+        axis.text(1.0, value, f" {_display(model)}", fontsize=5.5, color=INK_SECONDARY, va="center", ha="left", transform=axis.get_yaxis_transform())
 
     def band(model: str, color: str) -> None:
         """The first replicate's interval of the test pairs' ROC AUC along the residual stream."""
@@ -438,65 +471,66 @@ def pair_figure(
             return
         rows = table[(table["task"] == task) & (table["family"] == "full") & table["site"].isin(RESIDUAL) & (table["replicate"] == 0)
                      & (table["split"] == "test") & (table["metric"] == "roc_auc")].sort_values("relative_depth")
-        axes[1].fill_between(rows["relative_depth"], rows["low"], rows["high"], color=color, alpha=0.18, lw=0)
+        auc_axes["test"].fill_between(rows["relative_depth"], rows["low"], rows["high"], color=color, alpha=0.18, lw=0)
 
-    extra = False
     for model in trained + [model for model in summaries if model not in trained]:
         line = curve(summaries[model])
         if line.empty:
             continue
         if kinds[model] in ("trained", "random-init"):
             band(model, colors.get(model, MUTED))
-        ranking = rankings.get(model)
-        stream = pd.DataFrame(columns=["split", "relative_depth", "roc_auc"])
-        if ranking is not None:
-            stream = ranking[(ranking["task"] == task) & (ranking["family"] == "full") & ranking["site"].isin(RESIDUAL)].sort_values("relative_depth")
-        auc, others = stream[stream["split"] == "test"], stream[stream["split"] != "test"]
+        stream = stream_of(model)
         if kinds[model] == "trained":
             axes[0].plot(line["relative_depth"], line["full"], color=colors[model], lw=1.3, label=model)
-            axes[1].plot(auc["relative_depth"], auc["roc_auc"], color=colors[model], lw=1.3)
-            for _, split in others.groupby("split"):
-                axes[1].plot(split["relative_depth"], split["roc_auc"], color=colors[model], lw=1.0, ls="--")
-                extra = True
+            style = {"color": colors[model], "lw": 1.3}
         elif kinds[model] == "random-init":
-            axes[0].plot(line["relative_depth"], line["full"], color=MUTED, lw=1.1, ls="--", label=model)
-            axes[1].plot(auc["relative_depth"], auc["roc_auc"], color=MUTED, lw=1.1, ls="--")
+            axes[0].plot(line["relative_depth"], line["full"], color=MUTED, lw=1.1, ls="--", label=_display(model))
+            style = {"color": MUTED, "lw": 1.1, "ls": "--"}
         else:
             level(axes[0], float(line["full"].iloc[0]), model)
-            if not auc.empty:
-                level(axes[1], float(auc["roc_auc"].iloc[0]), model)
-    if extra:
-        axes[1].plot([], [], color=INK_SECONDARY, lw=1.0, ls="--", label="realistic test (1:10)")
-        axes[1].legend(loc="lower right", frameon=False, fontsize=5)
+            for split, axis in auc_axes.items():
+                auc = stream[stream["split"] == split]
+                if not auc.empty:
+                    level(axis, float(auc["roc_auc"].iloc[0]), model)
+            continue
+        for split, axis in auc_axes.items():
+            auc = stream[stream["split"] == split]
+            axis.plot(auc["relative_depth"], auc["roc_auc"], **style)
     if trained:
         reference = summaries[trained[0]]
-        for plm, control, legend, color in (("trained", "scrambled", "scrambled partners", PALETTE[3]), ("untrained", "original", "untrained model's states", PALETTE[4])):
+        for plm, control, legend, color in (("trained", "scrambled", "scrambled partners", PALETTE[3]), ("untrained", "original", "untrained model", PALETTE[4])):
             line = curve(reference, plm, control)
             if not line.empty:
-                axes[0].plot(line["relative_depth"], line["full"], color=color, lw=0.9, label=f"{trained[0]} probes, {legend}")
+                axes[0].plot(line["relative_depth"], line["full"], color=color, lw=0.9, label=legend)
     axes[0].set_ylabel("MCC")
-    axes[1].set_ylabel("ROC AUC")
-    for axis in axes[:2]:
+    for split, axis in auc_axes.items():
+        axis.set_ylabel("ROC AUC" if split == "test" else "ROC AUC, realistic test")
+        axis.axhline(0.5, color=MUTED, lw=0.6)
+    for axis in [axes[0], *auc_axes.values()]:
         axis.set_xlabel("relative depth")
         axis.set_xlim(0, 1)
         axis.grid(axis="y", color=GRID, lw=0.5)
-    axes[1].axhline(0.5, color=MUTED, lw=0.6)
+    if len(auc_axes) > 1:
+        lows, highs = zip(*(axis.get_ylim() for axis in auc_axes.values()))
+        for axis in auc_axes.values():
+            axis.set_ylim(min(lows), max(highs))
     if not gaps.empty:
         models = _ordered_models([model for model in dict.fromkeys(gaps["model"]) if kinds.get(model) == "trained"])
         first = gaps[gaps["model"] == models[0]].set_index("site")["median"].sort_values(ascending=False) if models else pd.Series(dtype=float)
         sites = list(first.index)
         positions = np.arange(len(sites))[::-1]
         offsets = np.linspace(-0.2, 0.2, len(models)) if len(models) > 1 else [0.0]
-        axes[2].axvline(0.0, color=INK_SECONDARY, lw=0.6)
+        gap_axis.axvline(0.0, color=INK_SECONDARY, lw=0.6)
         for offset, model in zip(offsets, models):
             table = gaps[gaps["model"] == model].set_index("site").reindex(sites)
-            axes[2].scatter(table["median"], positions + offset, s=10, color=colors[model], zorder=3)
-        axes[2].set_yticks(positions)
-        axes[2].set_yticklabels([SITE_LABELS.get(site, site) for site in sites], fontsize=5.2)
-        axes[2].set_xlabel("site minus stream, best of each")
-        axes[2].grid(axis="x", color=GRID, lw=0.5)
+            gap_axis.scatter(table["median"], positions + offset, s=10, color=colors[model], zorder=3)
+        gap_axis.set_yticks(positions)
+        gap_axis.set_yticklabels([SITE_LABELS.get(site, site) for site in sites], fontsize=5.5)
+        gap_axis.set_xlabel("site minus residual stream")
+        gap_axis.xaxis.set_major_locator(MaxNLocator(5))
+        gap_axis.grid(axis="x", color=GRID, lw=0.5)
     handles, labels = axes[0].get_legend_handles_labels()
-    figures._legend_top(figure, handles, labels, min(len(labels), 4) or 1, 0.35)
+    figures._legend_top(figure, handles, labels, len(labels) or 1, 0.3)
     return figures._save(figure, path)
 
 

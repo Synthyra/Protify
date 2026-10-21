@@ -67,10 +67,12 @@ CONDITIONS = (  # (plm, probe, control, legend) of the conditions the summary fi
     ("untrained", "trained", "original", "untrained model, same probes"),
     ("trained", "untrained", "original", "untrained probe"),
 )
-CONTROL_INPUTS = (("original", "original input"), ("scrambled", "scrambled sequence"), ("l2_normalized", "normalized tokens"),
-                  ("mean", "batch mean state"), ("random_gaussian", "Gaussian input"))
-STATE_STYLES = ((("trained", "trained"), "-", "trained model, trained probe"), (("trained", "untrained"), "--", "trained model, untrained probe"),
-                (("untrained", "trained"), ":", "untrained model, trained probe"), (("untrained", "untrained"), "-.", "untrained model, untrained probe"))
+# Each named condition's line in the controls grid: inputs by color, the untrained model and probe in gray by style.
+CONDITION_STYLES = {
+    "trained model": {"color": PALETTE[0]}, "normalized tokens": {"color": PALETTE[2]}, "scrambled sequence": {"color": PALETTE[1]},
+    "batch mean state": {"color": PALETTE[3]}, "Gaussian input": {"color": PALETTE[4]},
+    "untrained model, same probes": {"color": INK_SECONDARY, "ls": ":"}, "untrained probe": {"color": MUTED, "ls": "--"},
+}
 SELECTED_TASKS = ("prot_param", "peptide", "ssp_q8", "interpro_family", "go_bp")
 UNTRAINED_LEGEND = "untrained model, same probes (control)"
 RANDOM_LEGEND = "random-init model, own probes"
@@ -341,7 +343,18 @@ def _depth_line(axis, frame: pd.DataFrame, blocks: int, color: str, legend: str,
         axis.fill_between(body["depth"], body["mean"] - body["std"], body["mean"] + body["std"], color=color, alpha=0.16, lw=0)
     norm = frame[frame["site"] == "final_norm"]
     if not norm.empty:
-        axis.plot(norm["depth"], norm["mean"], marker="o", ms=3, mfc="white", mec=color, mew=1.0, ls="none")
+        axis.plot(norm["depth"], norm["mean"], marker="o", ms=3, mfc="white", mec=color, mew=1.0, ls="none", gid="final_norm")
+
+
+def _stream_legend(axes: list) -> tuple[list, list]:
+    """The legend of residual-stream curves: one entry per series, and one for the final norm's hollow marker when any
+    panel draws it."""
+    from matplotlib.lines import Line2D
+    handles, labels = axes[0].get_legend_handles_labels()
+    if any(line.get_gid() == "final_norm" for axis in axes for line in axis.lines):
+        handles.append(Line2D([], [], marker="o", ms=3, mfc="white", mec=INK_SECONDARY, mew=1.0, ls="none"))
+        labels.append("final norm")
+    return handles, labels
 
 
 def depth_curves(summary: pd.DataFrame, blocks: int, path: Path, random: pd.DataFrame | None = None, tasks: Sequence[str] = TASK_ORDER) -> Path:
@@ -370,7 +383,7 @@ def depth_curves(summary: pd.DataFrame, blocks: int, path: Path, random: pd.Data
             axis.set_ylabel("score")
         if _bottom(axis, axes, len(tasks)):
             axis.set_xlabel("depth")
-    handles, labels = axes[0].get_legend_handles_labels()
+    handles, labels = _stream_legend(axes)
     _legend_top(figure, handles, labels, len(labels), 0.3)
     return _save(figure, path)
 
@@ -403,18 +416,27 @@ def selected_tasks(summary: pd.DataFrame, per_replicate: pd.DataFrame, blocks: i
 
 
 def control_grid(summary: pd.DataFrame, blocks: int, path: Path, tasks: Sequence[str] = TASK_ORDER) -> Path:
-    """The residual stream of every task under all twenty conditions: color by input, line style by model and probe."""
+    """The residual stream of every task under the named conditions (`CONDITIONS`), each with its own color or line
+    style and legend entry. A condition whose line repeats the original input's (normalized tokens on unit-norm states)
+    is not drawn."""
     plt = _pyplot()
     stream = summary[summary["site"].isin(("embedding", "resid_post")) & (summary["family"] == "full")]
     tasks = _ordered(tasks, set(stream["task"]))
     figure, axes = _grid(plt, len(tasks), 6, row_height=1.3)
+    drawn = set()
     for axis, task in zip(axes, tasks):
         block = _with_depth(stream[stream["task"] == task], blocks)
-        for (control, _), color in zip(CONTROL_INPUTS, PALETTE):
-            for (plm, probe), style, _ in STATE_STYLES:
-                line = block[(block["plm"] == plm) & (block["probe"] == probe) & (block["control"] == control)].sort_values("depth")
-                if not line.empty:
-                    axis.plot(line["depth"], line["full"], color=color, ls=style, lw=0.9)
+        lines = {condition[:3]: block[(block["plm"] == condition[0]) & (block["probe"] == condition[1]) & (block["control"] == condition[2])].sort_values("depth")
+                 for condition in CONDITIONS}
+        reference = lines[CONDITIONS[0][:3]]["full"].to_numpy()  # (depths,)
+        for condition in reversed(CONDITIONS):  # the original input on top
+            line = lines[condition[:3]]
+            if line.empty:
+                continue
+            if condition is not CONDITIONS[0] and len(line) == len(reference) and np.allclose(line["full"].to_numpy(), reference):
+                continue
+            axis.plot(line["depth"], line["full"], lw=0.9, **CONDITION_STYLES[condition[3]])
+            drawn.add(condition[3])
         _tag(axis, SHORT_LABELS.get(task, task))
         axis.set_xticks([0, blocks // 2, blocks])
         axis.grid(axis="y", color=GRID, lw=0.5)
@@ -424,13 +446,10 @@ def control_grid(summary: pd.DataFrame, blocks: int, path: Path, tasks: Sequence
             axis.set_xlabel("depth")
     from matplotlib.lines import Line2D
 
-    colors = [Line2D([], [], color=color, lw=1.4) for color in PALETTE[: len(CONTROL_INPUTS)]]
-    styles = [Line2D([], [], color=INK_SECONDARY, ls=style, lw=1.1) for _, style, _ in STATE_STYLES]
-    height = figure.get_figheight()
-    figure.tight_layout(h_pad=0.8, w_pad=0.4, rect=(0, 0, 1, 1 - 0.42 / height))
-    spacing = {"frameon": False, "loc": "upper center", "columnspacing": 1.2, "handlelength": 2.2}
-    figure.legend(colors, [legend for _, legend in CONTROL_INPUTS], ncol=len(colors), bbox_to_anchor=(0.5, 1.0), **spacing)
-    figure.legend(styles, [legend for _, _, legend in STATE_STYLES], ncol=len(styles), bbox_to_anchor=(0.5, 1.0 - 0.17 / height), **spacing)
+    names = [legend for *_, legend in CONDITIONS if legend in drawn]
+    handles = [Line2D([], [], lw=1.2, **CONDITION_STYLES[name]) for name in names]
+    figure.tight_layout(h_pad=0.8, w_pad=0.4, rect=(0, 0, 1, 1 - 0.42 / figure.get_figheight()))
+    figure.legend(handles, names, ncol=4, frameon=False, loc="upper center", bbox_to_anchor=(0.5, 1.0), columnspacing=1.2, handlelength=2.2)
     return _save(figure, path)
 
 
@@ -503,6 +522,9 @@ def site_maps(summary: pd.DataFrame, path: Path, tasks: Sequence[str] = TASK_ORD
         bar = figure.colorbar(image, cax=figure.add_axes((0.945, 0.35, 0.012, 0.3)))
         bar.set_label("score / task maximum", fontsize=6)
         bar.ax.tick_params(labelsize=5.5)
+    from matplotlib.lines import Line2D
+    key = Line2D([], [], ls="none", marker="o", ms=4.5, mfc="none", mec=INK, mew=1.1)  # white on the maps, ink on the page
+    figure.legend([key], ["best state"], loc="upper left", bbox_to_anchor=(0.93, 0.33), frameon=False, fontsize=5.5)
     return _save(figure, path)
 
 
@@ -793,9 +815,8 @@ def diff_summary(
     for row in range(gaps.shape[0]):
         for column in range(gaps.shape[1]):
             value = gaps.iat[row, column]
-            if np.isfinite(value):
-                label = f"{value:.2f}".replace("-0.00", "0.00")
-                left.text(column, row, label, ha="center", va="center", fontsize=3.8, color="white" if abs(value) > 0.6 * limit else INK)
+            if np.isfinite(value) and round(abs(value), 2) > 0:  # cells that round to zero stay blank
+                left.text(column, row, f"{value:.2f}", ha="center", va="center", fontsize=3.8, color="white" if abs(value) > 0.6 * limit else INK)
     left.set_xticks(range(len(sites)))
     left.set_xticklabels([SITE_LABELS[site] for site in sites], rotation=60, ha="right")
     left.set_yticks(range(len(tasks)))
@@ -867,18 +888,20 @@ def variant_depth_curves(variants: dict[str, pd.DataFrame], blocks: int, path: P
             axis.set_ylabel("score")
         if _bottom(axis, axes, len(tasks)):
             axis.set_xlabel("depth")
-    handles, labels = axes[0].get_legend_handles_labels()
+    handles, labels = _stream_legend(axes)
     _legend_top(figure, handles, labels, len(labels), 0.3)
     return _save(figure, path)
 
 
-def variant_dots(table: pd.DataFrame, path: Path) -> Path:
+def variant_dots(table: pd.DataFrame, path: Path, names: Sequence[str] | None = None) -> Path:
     """A: each task's best residual-stream probe under each variant, chosen on validation, one color per variant. B:
     each variant's score minus the first variant's, for the best stream probe (filled) and the mean over all
-    full-width probes (hollow)."""
+    full-width probes (hollow). `names` orders the variants, the first the reference, so their colors match
+    `variant_depth_curves`; it defaults to the table's order."""
+    from matplotlib.lines import Line2D
     plt = _pyplot()
     table = table[table["task"] != "mean over shared tasks"]
-    names = list(dict.fromkeys(table["variant"]))
+    names = list(names) if names is not None else list(dict.fromkeys(table["variant"]))
     tasks = _ordered(TASK_ORDER, set(table["task"])) + sorted(set(table["task"]) - set(TASK_ORDER))
     scores = {column: table.pivot_table(index="task", columns="variant", values=column).reindex(index=tasks) for column in ("residual_best", "mean_probe")}
     figure, (left, right) = plt.subplots(1, 2, figsize=(7.0, 0.2 * len(tasks) + 1.0), sharey=True, gridspec_kw={"width_ratios": [1.2, 1.0]})
@@ -897,10 +920,13 @@ def variant_dots(table: pd.DataFrame, path: Path) -> Path:
     left.set_yticklabels([SHORT_LABELS.get(task, task) for task in tasks])
     left.set_ylim(len(tasks) - 0.5, -0.5)
     left.set_xlabel("best residual-stream score")
-    right.set_xlabel(f"minus {names[0]}")
+    right.set_xlabel(f"{names[1]} minus {names[0]}" if len(names) == 2 else f"variant minus {names[0]}")
     _letter(left, "A", -0.02)
     _letter(right, "B", -0.02)
     left.legend(loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=len(names), frameon=False, fontsize=5.5)
+    kinds = [Line2D([], [], marker="o", ms=3.5, ls="none", color=INK_SECONDARY),
+             Line2D([], [], marker="o", ms=3.5, ls="none", mfc="none", mec=INK_SECONDARY, mew=0.8)]
+    right.legend(kinds, ["best stream state", "mean over probes"], loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=2, frameon=False, fontsize=5.5)
     figure.tight_layout(w_pad=0.6)
     return _save(figure, path)
 
@@ -917,7 +943,7 @@ def compare(variants: dict[str, Sequence[tuple[Path, str]]], out: Path, blocks: 
     names = list(summaries)
     table = variant_table(summaries)
     written = [write_summary(table, out / "variants.csv"), variant_depth_curves(summaries, blocks, out / "variants_depth.png"),
-               variant_dots(table, out / "variants_dots.png")]
+               variant_dots(table, out / "variants_dots.png", names)]
     reference = names[0]
     for name in names[1:]:
         slug = "".join(character if character.isalnum() else "_" for character in name).strip("_")
@@ -937,7 +963,8 @@ def pca_grid(frames: dict[str, pd.DataFrame], path: Path, top: int = 5) -> Path:
     first = frames[names[0]]
     layers = list(dict.fromkeys(first["layer"]))
     groups = [group for group in first["group"].value_counts().index if group not in ("other", "scrambled")][:top]
-    shown = {group: group[:1].upper() + group[1:] for group in groups} | {"scrambled": "scrambled test sequences"}
+    # InterPro names arrive lowercased; restore the capital of the first letter and of GTPase.
+    shown = {group: (group[:1].upper() + group[1:]).replace("gtpase", "GTPase") for group in groups} | {"scrambled": "scrambled test sequences"}
     colors = {group: PALETTE[index] for index, group in enumerate(groups)}
     colors["scrambled"] = PALETTE[6]
     figure, axes = plt.subplots(len(names), len(layers), figsize=(1.05 * len(layers) + 0.4, 1.15 * len(names) + 0.6), squeeze=False)
@@ -961,6 +988,9 @@ def pca_grid(frames: dict[str, pd.DataFrame], path: Path, top: int = 5) -> Path:
             if column == 0:
                 axis.text(-0.32, 0.5, name, transform=axis.transAxes, rotation=90, ha="center", va="center", fontsize=6, color=INK)
     handles, labels = axes[0, 0].get_legend_handles_labels()
+    from matplotlib.lines import Line2D
+    handles.append(Line2D([], [], ls="none", marker="o", ms=1.2, mew=0, color=GRID))
+    labels.append("other test proteins")
     figure.tight_layout(w_pad=0.2, h_pad=0.4, rect=(0, 0, 1, 1 - 0.55 / figure.get_figheight()))
     figure.legend(handles, [textwrap.fill(shown.get(label, label), 40) for label in labels], loc="upper center", ncol=3, frameon=False,
                   bbox_to_anchor=(0.5, 1.0), markerscale=4, fontsize=5.5)
@@ -1007,7 +1037,7 @@ def phospho_figure(tests: pd.DataFrame, blocks: int, path: Path) -> Path:
     for inputs, style in zip(treatments, ("-", "--")):
         rows = stream[stream["inputs"] == inputs]
         right.plot(rows["depth"], -np.log10(rows["p_bonferroni"].clip(lower=1e-300)), color=PALETTE[0], ls=style, lw=1.1, label=inputs)
-    right.axhline(-np.log10(0.05), color=INK_SECONDARY, ls=":", lw=0.7)
+    right.axhline(-np.log10(0.05), color=INK_SECONDARY, ls=":", lw=0.7, label="p = 0.05")
     right.set_xlabel("depth")
     right.set_ylabel("-log10 corrected p", fontsize=6)
     right.grid(axis="y", color=GRID, lw=0.5)
