@@ -806,7 +806,8 @@ def diff_summary(
     names: tuple[str, str] = ("trained model", "random-init model"),
 ) -> Path:
     """A: per task and site, the best score over depth under the first summary minus that under the second.
-    B: the best probe of each task under each, with the spread over replicates. Bests are chosen on validation."""
+    B: the best probe of each task under each over the model's own sites (the structure stream left out), with the
+    spread over replicates. Bests are chosen on validation."""
     plt = _pyplot()
     first, second = site_bests(first), site_bests(second)
     tasks = _ordered(tasks, set(first["task"]) & set(second["task"]))
@@ -831,8 +832,8 @@ def diff_summary(
     bar.set_label(f"{names[0]} minus {names[1]}, best score", fontsize=5.5)
     bar.ax.tick_params(labelsize=5)
     _letter(left, "A", -0.02)
-    best_first = _choose(first, ["task"]).set_index("task").reindex(tasks)
-    best_second = _choose(second, ["task"]).set_index("task").reindex(tasks)
+    best_first = _choose(first[~first["site"].isin(STRUCTURE)], ["task"]).set_index("task").reindex(tasks)
+    best_second = _choose(second[~second["site"].isin(STRUCTURE)], ["task"]).set_index("task").reindex(tasks)
     positions = np.arange(len(tasks))[::-1]
     for frame, color, marker, size, legend in ((best_second, INK_SECONDARY, "s", 4.6, names[1]), (best_first, PALETTE[0], "o", 3.0, names[0])):
         right.errorbar(frame["full"], positions, xerr=frame["full_std"], fmt=marker, ms=size, color=color, ecolor=color,
@@ -854,12 +855,12 @@ def diff_summary(
 
 def variant_table(variants: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Per task and variant: the full-test scores (with their spread over replicates) of the best residual-stream and
-    any-state probes, chosen on validation, and the mean over every full-width probe; a last row per variant averages
-    the tasks all variants share."""
+    any-state probes, chosen on validation, and the mean over every full-width probe of the model's own sites (the
+    structure stream, which a variant may lack, left out); a last row per variant averages the tasks all variants share."""
     rows = []
     for name, summary in variants.items():
         trained = headline(summary)
-        trained = trained[trained["family"] == "full"]
+        trained = trained[(trained["family"] == "full") & ~trained["site"].isin(STRUCTURE)]
         for task, block in trained.groupby("task"):
             stream = block[block["site"].isin(RESIDUAL)]
             best_stream, best_any = _choose(stream), _choose(block)

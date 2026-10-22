@@ -1634,6 +1634,20 @@ def test_best_states_fall_back_to_test_per_task() -> None:
     assert figures._choose(frame[frame["task"] == "a"])["probe_name"] == "resid_post:0"
 
 
+def test_variants_compare_the_models_own_sites() -> None:
+    # The unit-norm variant also holds the structure stream, scored above every state; the raw variant does not. Both
+    # are compared on their own sites, so the two variants match.
+    sites = ("embedding", "q", "resid_post", "final_norm")
+    scores = synthetic_scores("go_mf", sites, layers=2, heads=1, resamples=2, seed=7)
+    structural = synthetic_scores("go_mf", ("structural",), layers=2, heads=1, resamples=2, seed=8).assign(score=2.0)
+    table = figures.variant_table({"unit-norm": figures.summarize(pd.concat([scores, structural], ignore_index=True)),
+                                   "raw": figures.summarize(scores)})
+    table = table.set_index(["variant", "task"])
+    columns = ["residual_best", "any_best", "mean_probe"]
+    assert table.loc[("unit-norm", "go_mf"), columns].tolist() == table.loc[("raw", "go_mf"), columns].tolist()
+    assert table.loc[("unit-norm", "go_mf"), "any_best"] < 2.0
+
+
 def write_trend_run(root: Path, seed: int, sites: tuple[str, ...], blocks: int, manifest: bool = True) -> None:
     """One synthetic replicate of a model with `blocks` blocks: the scores and validation scores of four concept tasks
     and the pair task, the pair task's ranking and interval tables, and, with `manifest`, a store manifest giving the
