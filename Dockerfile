@@ -1,7 +1,13 @@
 # syntax=docker/dockerfile:1.7
 # FastPLMs validates PyTorch 2.14 against CUDA 13.0. The devel image also
 # supplies ptxas for compiled attention kernels, which PyTorch no longer bundles.
-FROM nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04@sha256:8b2705ea7a8653ad3451b46ab835eced92d77b44e671b9cf3ad4f95fbb2efe5e
+# A host whose driver runs CUDA 12.8 at most (driver 570, as on Lambda's GH200s) builds the CUDA 12.6 pair:
+#   docker build -t protify-env:cu126 \
+#     --build-arg BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-devel-ubuntu24.04 \
+#     --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu126 .
+ARG BASE_IMAGE=nvidia/cuda:13.0.1-cudnn-devel-ubuntu24.04@sha256:8b2705ea7a8653ad3451b46ab835eced92d77b44e671b9cf3ad4f95fbb2efe5e
+FROM ${BASE_IMAGE}
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cu130
 
 # The repository lives at /workspace, copied in at build and replaced by a bind mount at run, so
 # `protify` (under src/) and the vendored `foundry` (at the root) import from whichever is there.
@@ -37,7 +43,7 @@ WORKDIR /workspace
 COPY requirements.txt .
 
 RUN pip install --upgrade pip setuptools
-RUN pip install torch==2.14.0 --index-url https://download.pytorch.org/whl/cu130
+RUN pip install torch==2.14.0 --index-url ${TORCH_INDEX}
 RUN pip install -r requirements.txt
 
 COPY . .
